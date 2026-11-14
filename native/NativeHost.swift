@@ -302,15 +302,15 @@ final class NativeController:NSObject {
         }
     }
 }
-final class SetupController:NSObject {
+final class SetupController:NSObject, NSWindowDelegate {
     var window:NSWindow?
     let storeBuild = CredentialVault.storeBuild
     let registrationState = NSTextField(wrappingLabelWithString: "")
     let status=NSTextField(wrappingLabelWithString:"")
     func show(){
-        NSApp.setActivationPolicy(.regular)
         let w=NSWindow(contentRect:NSRect(x:0,y:0,width:420,height:storeBuild ? 330 : 250),styleMask:[.titled,.closable],backing:.buffered,defer:false)
         w.title=storeBuild ? "Tab Cadence Bridge" : "Tab Pilot Bridge";w.isReleasedWhenClosed=false
+        w.delegate = self
         let title=NSTextField(labelWithString:storeBuild ? "连接 Tab Cadence" : "让提醒，贴近正在做的事。")
         title.font=NSFont.systemFont(ofSize:19,weight:.semibold)
         let detail=NSTextField(wrappingLabelWithString:"辅助程序读取 Chrome 原生标签位置。仅在启用快捷切换时处理 Chrome 的 Control+Tab。通过扩展的 macOS 设置开启提醒。")
@@ -329,6 +329,9 @@ final class SetupController:NSObject {
         w.contentView?.addSubview(stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo:w.contentView!.leadingAnchor,constant:24),stack.trailingAnchor.constraint(equalTo:w.contentView!.trailingAnchor,constant:-24),stack.topAnchor.constraint(equalTo:w.contentView!.topAnchor,constant:24)])
         window=w;refreshStatus();w.center();w.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
+    }
+    func windowWillClose(_ notification: Notification) {
+        NSApp.terminate(nil)
     }
     @objc func registerChrome() {
         do {

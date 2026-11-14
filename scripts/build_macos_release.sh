@@ -38,7 +38,7 @@ xcrun swiftc -O -target arm64-apple-macos27.2 -swift-version 5 -parse-as-library
   -module-cache-path "$work/module-cache" -o "$binary" \
   native/Mapping.swift native/Shortcuts.swift native/NativeHost.swift native/Credentials.swift native/StoreSetup.swift \
   -framework AppKit -framework ApplicationServices -framework Carbon -framework Security
-python3 -B scripts/bundle.py "$app" --store-extension-id khpdncgobgafonbopojenbomlclmkdoc
+python3 -B scripts/bundle.py "$app" --store-extension-id jbamhjcmjhmmhehjnnblflckmikhjojm
 codesign --force --timestamp=none --sign - "$app"
 codesign --verify --strict "$app"
 minimum="$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$app/Contents/Info.plist")"
