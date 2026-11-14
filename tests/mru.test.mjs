@@ -1,0 +1,13 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {RecentTabs} from '../extension/core/mru.mjs';
+const tabs=[{id:1,windowId:10,active:true,index:0},{id:2,windowId:10,index:2},{id:3,windowId:10,index:1},{id:4,windowId:20,active:true},{id:5,windowId:10,incognito:true}];
+const fixture=()=>{const m=new RecentTabs([1,2,3,4,5]);m.reconcile(tabs);return m;};
+const step=(m,gesture=1,direction=1,activeId=1)=>m.step({gesture,direction,windowId:10,activeId});
+test('MRU follows use order, not tab strip order; titles are not identity',()=>{const m=fixture();m.touch(3);m.touch(1);assert.equal(step(m),3);assert.equal(step(m,1,1,3),2);});
+test('holding Control freezes order across preview activations and commit promotes only final choice',()=>{const m=fixture();assert.equal(step(m),2);m.reconcile(tabs.map(t=>({...t,active:t.id===2})));assert.equal(step(m,1,1,2),3);assert.deepEqual(m.order,[1,2,3,4]);assert.equal(m.finish(1),3);assert.deepEqual(m.order,[3,1,2,4]);});
+test('quick separate gestures toggle between the two latest tabs',()=>{const m=fixture();assert.equal(step(m),2);m.finish(1);assert.equal(step(m,2,1,2),1);m.finish(2);assert.deepEqual(m.order,[1,2,3,4]);});
+test('Shift traverses the frozen list in reverse and wraps',()=>{const m=fixture();assert.equal(step(m,1,-1),3);assert.equal(step(m,1,-1,3),2);assert.equal(step(m,1,1,2),3);});
+test('Escape restores origin without promoting previewed tabs',()=>{const m=fixture();step(m);step(m,1,1,2);assert.equal(m.finish(1,{cancel:true}),1);assert.deepEqual(m.order,[1,2,3,4]);});
+test('closed, moved, other-window and private tabs never become targets',()=>{const m=fixture();assert.equal(step(m),2);m.reconcile(tabs.filter(t=>t.id!==2).map(t=>t.id===3?{...t,windowId:20}:t));assert.equal(step(m,1,1,1),null);assert(!m.order.includes(5));});
+test('background opens are appended and do not alter an in-flight cycle',()=>{const m=fixture();step(m);m.reconcile([...tabs,{id:6,windowId:10,lastAccessed:999}]);assert.equal(step(m,1,1,2),3);assert(!m.view().items.some(t=>t.id===6));assert.equal(m.order.at(-1),6);});
+test('stale end packets and invalid shortcut packets cannot change current gesture',()=>{const m=fixture();step(m);assert.equal(m.finish(8),null);assert.equal(step(m,0),null);assert.equal(step(m,1,0),null);assert.equal(m.gesture.token,1);});
+test('selection previews remain bounded even with hundreds of tabs',()=>{const m=new RecentTabs();m.reconcile(Array.from({length:500},(_,i)=>({id:i+1,windowId:10,active:i===0})));step(m);assert.equal(m.view().items.length,9);assert.equal(m.view().total,500);});
