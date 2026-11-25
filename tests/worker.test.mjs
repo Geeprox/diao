@@ -3,7 +3,8 @@ import {DEFAULTS,dayKey} from '../extension/core/policy.mjs';
 class Event {listeners=[];addListener(fn){this.listeners.push(fn);}fire(...args){return Promise.all(this.listeners.map(f=>f(...args)));}}
 function area(){let data={};return {async get(keys){if(typeof keys==='string')keys=[keys];return Object.fromEntries(keys.filter(k=>k in data).map(k=>[k,structuredClone(data[k])]))},async set(v){Object.assign(data,structuredClone(v))},async remove(keys){for(const k of Array.isArray(keys)?keys:[keys])delete data[k]},async setAccessLevel(){},clear(){data={}}};}
 const local=area(),session=area();let requests=0,removed=[],snapshots={};let tabs=[{id:7,windowId:2,title:'Fixture',url:'https://example.com/task',active:false}];
-globalThis.chrome={storage:{local,session},runtime:{id:'fixture-extension',onMessage:new Event(),onInstalled:new Event(),onStartup:new Event(),sendMessage:async()=>{},connectNative(){throw new Error('native deliberately unused')}},tabs:{onActivated:new Event(),onUpdated:new Event(),onRemoved:new Event(),async query(){return tabs},async get(id){const t=tabs.find(t=>t.id===id);if(!t)throw Error('absent');return t},async sendMessage(id,message){if(message.type==='snapshot')return snapshots[id];return {ok:true}},async remove(id){removed.push(id)},async update(id,change){Object.assign(tabs.find(t=>t.id===id),change);return tabs.find(t=>t.id===id)}},windows:{async get(){return {left:0,top:0,width:1000,height:800}},async update(){}},permissions:{async contains(){return true}},alarms:{onAlarm:new Event(),async clear(){},async create(){}},sidePanel:{async setPanelBehavior(){}}};
+globalThis.chrome={storage:{local,session},runtime:{id:'fixture-extension',onMessage:new Event(),onInstalled:new Event(),onStartup:new Event(),sendMessage:async()=>{},connectNative(){throw new Error('native deliberately unused')}},tabs:{onActivated:new Event(),onUpdated:new Event(),onRemoved:new Event(),onAttached:new Event(),onReplaced:new Event(),async query(){return tabs},async get(id){const t=tabs.find(t=>t.id===id);if(!t)throw Error('absent');return t},async sendMessage(id,message){if(message.type==='snapshot')return snapshots[id];return {ok:true}},async remove(id){removed.push(id)},async update(id,change){Object.assign(tabs.find(t=>t.id===id),change);return tabs.find(t=>t.id===id)}},windows:{async get(){return {left:0,top:0,width:1000,height:800}},async update(){}},permissions:{async contains(){return true}},alarms:{onAlarm:new Event(),async clear(){},async create(){}},sidePanel:{async setPanelBehavior(){}}};
+chrome.runtime.getURL=path=>'chrome-extension://fixture-extension/'+path;
 chrome.contextMenus={onClicked:new Event()};
 chrome.action={async setBadgeText(){},async setTitle(){}};
 globalThis.fetch=async()=>{requests++;return {ok:true,async json(){return {answers:[{type:'choice',name:'lifecycle',choice:'close',confidence:.99,probabilities:[{value:'close',probability:.99}]}],usage:{input_tokens:100,output_tokens:0}}}}};
@@ -143,7 +144,7 @@ test('only a trusted settings save can remember a key, and forgetting clears per
 
 test('usage settings cannot persist a hidden connection draft, and remembering requires explicit consent',async()=>{
  await reset();assert((await send({type:'saveSettings',scope:'usage',settings:{...DEFAULTS,rememberKey:true,endpoint:'https://different.example/v1',cooldownSeconds:180}})).ok);const saved=(await local.get('settings')).settings;assert.equal(saved.endpoint,DEFAULTS.endpoint);assert.equal(saved.rememberKey,false);assert.equal(saved.cooldownSeconds,180);
- const denied=await send({type:'saveSettings',scope:'connection',settings:{...DEFAULTS,rememberKey:true},apiKey:'synthetic-without-consent'});assert.equal(denied.ok,false);assert.match(denied.error,/勾选/);assert.equal((await local.get('settings')).settings.rememberKey,false);assert.equal(requests,0);
+ const denied=await send({type:'saveSettings',scope:'connection',settings:{...DEFAULTS,rememberKey:true},apiKey:'synthetic-without-consent'});assert.equal(denied.ok,false);assert.match(denied.error,/保存位置/);assert.equal((await local.get('settings')).settings.rememberKey,false);assert.equal(requests,0);
 });
 
 
@@ -179,11 +180,55 @@ test('real worker backlog requires explicit plan consent and rejects content-scr
 test('real worker backlog analyzes an authorized page and never arms or performs closure',async()=>{
  await reset();await startQueue();await chrome.alarms.onAlarm.fire({name:'backlog'});const q=await waitQueue(q=>q?.phase==='complete');assert.equal(q.jobs[0].status,'analyzed');assert.equal(requests,1);assert.equal(removed.length,0);const r=(await local.get('records')).records[7];assert.equal(r.state,'suggested');assert.equal(r.closeAt,undefined);
 });
+test('a pinned, active and recently used page can be analyzed but cannot be closed',async()=>{
+ await reset();
+ Object.assign(tabs[0],{pinned:true,active:true,lastAccessed:Date.now()});
+ const plan=await startQueue();
+ assert.equal(plan.count,1);
+ await chrome.alarms.onAlarm.fire({name:'backlog'});
+ await waitQueue(queue=>queue?.phase==='complete');
+ assert.equal(requests,1);
+ const result=await send({type:'armClose',tabId:7});
+ assert.equal(result.ok,false);
+ assert.equal(removed.length,0);
+});
 test('real worker backlog leaves editors local and sends no API request',async()=>{
  await reset();snapshots[7].editable=true;await startQueue();await chrome.alarms.onAlarm.fire({name:'backlog'});const q=await waitQueue(q=>q?.phase==='complete');assert.equal(q.jobs[0].status,'skipped');assert.equal(requests,0);
 });
 test('backlog plan cannot send a page after URL or model configuration changes',async()=>{
  await reset();chrome.scripting={async executeScript(){}};let plan=(await send({type:'backlogPlan',windowId:2})).data;await local.set({settings:{...DEFAULTS,model:'changed-model'}});assert.equal((await send({type:'backlogStart',planId:plan.id,origins:['https://example.com'],consent:true})).ok,false);await local.set({settings:DEFAULTS});plan=await startQueue();tabs[0].url='https://different.example/private';await chrome.alarms.onAlarm.fire({name:'backlog'});const q=await waitQueue(q=>q?.phase==='complete');assert.equal(q.jobs[0].status,'skipped');assert.equal(requests,0);
+});
+test('queued analysis stays inside the confirmed service and full page URL during async capture',async()=>{
+ for(const change of ['url','model']){
+  await reset();
+  await startQueue();
+  let signal,release;
+  const capturing=new Promise(resolve=>signal=resolve);
+  chrome.scripting.executeScript=async()=>{
+   signal();
+   await new Promise(resolve=>release=resolve);
+  };
+  await chrome.alarms.onAlarm.fire({name:'backlog'});
+  await capturing;
+  if(change==='url')tabs[0].url+='?thread=changed-after-consent';
+  else await local.set({settings:{...DEFAULTS,model:'changed-after-consent'}});
+  release();
+  const result=await waitQueue(queue=>['blocked','complete'].includes(queue?.phase));
+  assert.equal(result.phase,change==='model'?'blocked':'complete');
+  assert.equal(requests,0);
+ }
+});
+test('a confirmed plan can be started once and a paused round keeps its jobs',async()=>{
+ await reset();
+ const first=(await send({type:'backlogPlan',windowId:2})).data;
+ const second=(await send({type:'backlogPlan',windowId:2})).data;
+ const message={type:'backlogStart',planId:first.id,origins:['https://example.com'],consent:true};
+ const results=await Promise.all([send(message),send(message)]);
+ assert.equal(results.filter(result=>result.ok).length,1);
+ await send({type:'backlogPause'});
+ const {analysisQueue}=await local.get('analysisQueue');
+ assert.equal((await send({...message,planId:second.id})).ok,false);
+ assert.equal((await local.get('analysisQueue')).analysisQueue.id,analysisQueue.id);
 });
 test('identical evidence in two backlog tabs reuses a result without a second API request',async()=>{
  await reset();tabs[0].url='https://example.com/task?copy=1';tabs.push({...tabs[0],id:8,url:'https://example.com/task?copy=2'});snapshots[8]={...snapshots[7]};const originalNow=Date.now;let clock=originalNow();Date.now=()=>clock;
@@ -272,4 +317,344 @@ test('right-click native countdown preserves hidden time and supports keep and c
   assert.equal(recentClosed[0].url,tabs[0].url);
   assert.equal(requests,0);
  }finally{Date.now=actualNow;await port.onDisconnect.fire();chrome.runtime.connectNative=original;}
+});
+
+
+test('会话主题复用已有连接，合并重复请求并在内容变化后标记旧缓存', async () => {
+  await reset();
+  await local.set({threadWorkspaceEnabled: true});
+  const conversation = 'topic-fixture-1';
+  tabs[0].url = 'https://chatgpt.com/c/' + conversation;
+  tabs.push({...tabs[0], id: 8});
+  const sender = tab => ({id: chrome.runtime.id, url: tab.url, frameId: 0, tab});
+  const value = {conversation, turns: [
+    {id: 'private-message-1', question: '沙漠植物如何储水？', heading: '储水组织'},
+    {id: 'private-message-2', question: '仙人掌有什么适应性？', heading: '刺与气孔'},
+  ]};
+  const message = (action, data = value) => ({type: 'threadWorkspace', action, value: data});
+  const groups = [{start: 1, end: 2, title: '旱生植物的适应策略'}];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    requests++;
+    assert.equal(url, 'https://api.openai.com/v1/responses');
+    assert.equal(options.headers.Authorization, 'Bearer fixture-key');
+    const body = JSON.parse(options.body);
+    assert.equal(body.model, 'gpt-6-luna');
+    assert.equal(body.store, false);
+    assert.deepEqual(JSON.parse(body.input), [
+      {turn: 1, question: value.turns[0].question, heading: value.turns[0].heading},
+      {turn: 2, question: value.turns[1].question, heading: value.turns[1].heading},
+    ]);
+    assert(!options.body.includes(conversation));
+    return {ok: true, json: async () => ({
+      status: 'completed', output: [{type: 'message', content: [{type: 'output_text', text: JSON.stringify({topics: groups})}]}],
+      usage: {input_tokens: 49, output_tokens: 20},
+    })};
+  };
+  try {
+    const firstRead = await send(message('topicsRead'), sender(tabs[0]));
+    assert(firstRead.ok, firstRead.error);
+    assert.equal(firstRead.data.state, 'empty');
+    assert.equal(requests, 0);
+    const results = await Promise.all(tabs.map(tab => send(message('topicsGenerate'), sender(tab))));
+    for (const result of results) assert.deepEqual(result.data, {state: 'ready', groups});
+    assert.deepEqual((await send(message('topicsRead'), sender(tabs[0]))).data.groups, groups);
+    const changed = {...value, turns: [...value.turns, {id: 'next-message', question: '种子会储水吗？', heading: ''}]};
+    assert.equal((await send(message('topicsRead', changed), sender(tabs[0]))).data.state, 'stale');
+    assert.equal((await send(message('topicsGenerate', {...value, conversation: 'other-thread'}), sender(tabs[0]))).ok, false);
+    assert.equal((await send(message('topicsGenerate'), {...sender(tabs[0]), frameId: 1})).ok, false);
+    assert.equal(requests, 1);
+    const {ledger} = await local.get('ledger');
+    assert.equal(ledger.requests, 1);
+    assert.equal(ledger.tokens, 69);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('不连续的主题不写入缓存，打开概览不会重试失败的请求', async () => {
+  await reset();
+  await local.set({threadWorkspaceEnabled: true});
+  const conversation = 'topic-fixture-2';
+  tabs[0].url = 'https://chatgpt.com/c/' + conversation;
+  const sender = {id: chrome.runtime.id, url: tabs[0].url, frameId: 0, tab: tabs[0]};
+  const value = {conversation, turns: [
+    {id: 'message-1', question: '叶子的蒸腾作用', heading: ''},
+    {id: 'message-2', question: '夜间气孔', heading: ''},
+  ]};
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    requests++;
+    return {ok: true, json: async () => ({status: 'completed', output: [{
+      type: 'message', content: [{type: 'output_text', text: '{"topics":[{"start":2,"end":2,"title":"气孔"}]}'}],
+    }]})};
+  };
+  try {
+    const response = await send({type: 'threadWorkspace', action: 'topicsGenerate', value}, sender);
+    assert.equal(response.ok, false);
+    for (let i = 0; i < 3; i++) {
+      const read = await send({type: 'threadWorkspace', action: 'topicsRead', value}, sender);
+      assert(read.ok, read.error);
+      assert.equal(read.data.state, 'empty');
+    }
+    assert.equal(requests, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+
+test('问答摘要覆盖首尾及旧的第 96 轮边界，尾部变化只重算最后一批', async () => {
+  await reset();
+  await local.set({threadWorkspaceEnabled: true});
+  const conversation='topic-complete-history';
+  tabs[0].url='https://chatgpt.com/c/'+conversation;
+  const sender={id:chrome.runtime.id,url:tabs[0].url,frameId:0,tab:tabs[0]};
+  const value={conversation,format:'summary-v2',turns:Array.from({length:99},(_,index)=>({
+    id:'message-'+index,question:'第 '+(index+1)+' 轮提问',answer:'第 '+(index+1)+' 轮完整证据摘录',
+    sections:['条件','结论'],
+  }))};
+  const call=action=>send({type:'threadWorkspace',action,value},sender);
+  const original=globalThis.fetch;
+  const seen=[];
+  globalThis.fetch=async(url,options)=>{
+    requests++;
+    assert.equal(url,'https://api.openai.com/v1/responses');
+    assert(!options.body.includes(conversation));
+    assert(!options.body.includes('message-'));
+    const evidence=JSON.parse(JSON.parse(options.body).input);
+    seen.push(...evidence.map(turn=>turn.question));
+    assert(evidence.every(turn=>turn.answer.includes('证据摘录')&&turn.sections.length===2));
+    const result={
+      topics:[{start:1,end:evidence.length,title:evidence[0].question,summary:'主题的明确结论'}],
+      turns:evidence.map(turn=>({turn:turn.turn,question:turn.question,answer:'对应回答摘要'})),
+    };
+    return {ok:true,json:async()=>({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(result)}]}],usage:{input_tokens:10,output_tokens:5}})};
+  };
+  try{
+    const empty=await call('topicsRead');
+    assert.deepEqual(empty.data,{state:'empty'});assert.equal(requests,0);
+    const first=await call('topicsGenerate');assert(first.ok,first.error);
+    assert.equal(first.data.summaries.length,99);
+    assert.deepEqual(seen,value.turns.map(turn=>turn.question));
+    const initial=requests;
+    assert.deepEqual((await call('topicsRead')).data,first.data);
+    assert.deepEqual((await call('topicsGenerate')).data,first.data);
+    assert.equal(requests,initial);
+    value.turns.at(-1).answer+='，补一条结论';
+    assert.equal((await call('topicsRead')).data.state,'stale');
+    assert((await call('topicsGenerate')).ok);
+    assert.equal(requests,initial+1);
+  }finally{globalThis.fetch=original;}
+});
+
+
+test('完整问答跨批综合只重算变化的证据，概览重开不会重复调用 OpenAI', async () => {
+  await reset();
+  await local.set({threadWorkspaceEnabled: true});
+  const conversation = 'full-summary-fixture';
+  tabs[0].url = 'https://chatgpt.com/c/' + conversation;
+  const sender = {id:chrome.runtime.id,url:tabs[0].url,frameId:0,tab:tabs[0]};
+  const answer = '首段的条件。' + '完整输入中的合成附加说明。'.repeat(3000) + '中段决定。' +
+    '合成资料里的其他情况。'.repeat(1400) + '尾段的限制。';
+  const value = {conversation,format:'summary-v3',turns:[
+    {id:'source-id-1',question:'哪些条件必须先确认？',answer,sections:['初始条件','中段决定','尾段限制']},
+    {id:'source-id-2',question:'最后怎么处理？',answer:'核对边界后执行。',sections:['处置顺序']},
+  ]};
+  const call = action => send({type:'threadWorkspace',action,value},sender);
+  const original = globalThis.fetch;
+  const requestsSeen = [];
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url,'https://api.openai.com/v1/responses');
+    assert(!options.body.includes(conversation));
+    assert(!options.body.includes('source-id-'));
+    const request = JSON.parse(options.body);
+    const evidence = JSON.parse(request.input);
+    const synthesis = !request.text.format.schema.required.includes('turns');
+    requestsSeen.push({synthesis,evidence});
+    const count = synthesis ? evidence.at(-1).end : evidence.length;
+    const result = {
+      summary:'两轮问答确定了执行条件，并在核对限制后给出处置顺序。',
+      topics:[{start:1,end:count,title:'执行条件与处置顺序',summary:'执行之前依次确认条件、决定和限制。'}],
+    };
+    if (!synthesis) result.turns = evidence.map(turn=>({
+      turn:turn.turn,question:turn.question,answer:'已明确执行前的检查事项。',
+    }));
+    return new Response(JSON.stringify({status:'completed',output:[
+      {type:'message',content:[{type:'output_text',text:JSON.stringify(result)}]},
+    ]}),{status:200});
+  };
+  try {
+    assert.deepEqual((await call('topicsRead')).data,{state:'empty'});
+    assert.equal(requestsSeen.length,0);
+    const initial = await call('topicsGenerate');
+    assert(initial.ok,initial.error);
+    assert.equal(initial.data.summaries.length,2);
+    assert.equal(initial.data.groups[0].end,2);
+    assert.equal(requestsSeen[0].evidence[0].answer,answer);
+    assert.deepEqual(requestsSeen.map(request=>request.synthesis),[false,false,true]);
+    assert.deepEqual(requestsSeen[2].evidence.flatMap(batch => batch.topics), [
+      {start:1,end:1,title:'执行条件与处置顺序',summary:'执行之前依次确认条件、决定和限制。'},
+      {start:2,end:2,title:'执行条件与处置顺序',summary:'执行之前依次确认条件、决定和限制。'},
+    ]);
+    assert.deepEqual((await call('topicsRead')).data,initial.data);
+    assert.deepEqual((await call('topicsGenerate')).data,initial.data);
+    assert.equal(requestsSeen.length,3);
+    value.turns[1].answer += '同时保留回滚入口。';
+    assert.equal((await call('topicsRead')).data.state,'stale');
+    const updated = await call('topicsGenerate');
+    assert(updated.ok,updated.error);
+    assert.deepEqual(requestsSeen.map(request=>request.synthesis),[false,false,true,false,true]);
+    assert.equal(requestsSeen[3].evidence[0].answer,value.turns[1].answer);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+
+test('自动摘要不可重复发起失败请求，关闭自动摘要也不会触发模型', async () => {
+  await reset();
+  const conversation='auto-summary-fixture';
+  tabs[0].url='https://chatgpt.com/c/'+conversation;
+  await local.set({threadWorkspaceEnabled:true,threadWorkspacePreferences:{autoTopicSummary:false}});
+  const sender={id:chrome.runtime.id,url:tabs[0].url,frameId:0,tab:tabs[0]};
+  const value={conversation,format:'summary-v3',turns:[
+    {id:'fixture-turn',question:'该怎样处理？',answer:'先核对范围，再处理。',sections:['核对范围']},
+  ]};
+  const open=()=>send({type:'threadWorkspace',action:'topicsOpen',value},sender);
+  const original=globalThis.fetch;
+  let calls=0;
+  globalThis.fetch=async()=>{calls++;return new Response('{}',{status:429});};
+  try {
+    assert.deepEqual((await open()).data,{state:'empty'});
+    assert.equal(calls,0);
+    await local.set({threadWorkspacePreferences:{autoTopicSummary:true}});
+    const results=await Promise.all([open(),open(),open()]);
+    assert(results.every(result=>result.data?.state==='cooldown'));
+    assert.equal(calls,1);
+    await session.remove('modelCooldowns');
+    assert.equal((await open()).data.state,'cooldown');
+    assert.equal(calls,1);
+  } finally {
+    globalThis.fetch=original;
+  }
+});
+
+test('未安装 Mac 助手时原生功能保持关闭，并返回可操作的安装提示', async () => {
+  await reset();
+  const connect = chrome.runtime.connectNative;
+  try {
+    chrome.runtime.connectNative = () => { throw Error('Missing native host'); };
+    assert.equal((await send({type:'nativeCheck'})).data.status,'unavailable');
+    for (const type of ['saveNative','saveSwitcher']) {
+      const result = await send({type,enabled:true});
+      assert.equal(result.ok,false);
+      assert.match(result.error,/下载并连接 Mac 助手/);
+    }
+    const {settings} = await local.get('settings');
+    assert.equal(settings.nativeEnabled,false);
+    assert.equal(settings.switcherEnabled,false);
+  } finally { chrome.runtime.connectNative = connect; }
+});
+
+test('新会话的 20 轮适配一次调用，升级前的 16 轮分段仍可命中缓存', async () => {
+  await reset();
+  const {topicSnapshot,topicBatchLimit,topicSynthesis,saveTopicBatch} = await import('../extension/core/topics.mjs');
+  const conversation = 'batch-layout-compatibility';
+  const connection = {model:'gpt-6-luna'};
+  const value = {conversation,format:'summary-v3',turns:Array.from({length:20},(_,index)=>({
+    id:'turn-'+index,question:'明确要求',answer:'检查边界和结论。',sections:['检查条件'],
+  }))};
+  const newPlan = await topicSnapshot(value,conversation,await topicBatchLimit(local,conversation,connection));
+  assert.deepEqual(newPlan.batches.map(batch=>batch.evidence.length),[20]);
+  await local.set({threadTopicCache:{['c:'+conversation]:{version:2,model:connection.model,parts:{old:{}}}}});
+  const legacyPlan = await topicSnapshot(value,conversation,await topicBatchLimit(local,conversation,connection));
+  assert.deepEqual(legacyPlan.batches.map(batch=>batch.evidence.length),[16,4]);
+  assert.equal(await topicSynthesis(newPlan,{}),null);
+  await saveTopicBatch(local,newPlan,connection,newPlan.batches[0],{summary:'合成结果'});
+  assert.equal(await topicBatchLimit(local,conversation,connection),20);
+});
+
+
+test('保存自动验证一次，重复保存和读取状态复用成功结果',async()=>{
+ await reset();
+ const message={type:'saveSettings',scope:'connection',settings:DEFAULTS,apiKey:'synthetic-auto-test',verify:true};
+ assert((await send(message)).ok);
+ const checked=await send({type:'state'});
+ assert.equal(checked.data.connectionCheck.ok,true);
+ assert.equal(requests,1);
+ assert((await send({...message,apiKey:''})).ok);
+ assert.equal(requests,1);
+ assert((await send({...message,apiKey:'synthetic-rotated-test'})).ok);
+ assert.equal(requests,2);
+});
+
+
+test('跨窗口移动和休眠同一标签会保留监听，唤醒后只接受新的顶层文档回执', async()=>{
+  await reset();
+  const original=chrome.scripting;
+  chrome.scripting={async executeScript(){return [{documentId:'restored-document'}];}};
+  try {
+    assert((await send({type:'watch',tabId:7,adapter:{waiting:'Running',done:'Completed'}})).ok);
+    const read=async()=>(await local.get('records')).records[7];
+    tabs[0].windowId=3;
+    await chrome.tabs.onAttached.fire(7,{newWindowId:3,newPosition:0});
+    await send({type:'state'});
+    assert.equal((await read()).windowId,3);
+    tabs[0].discarded=true;
+    await chrome.tabs.onUpdated.fire(7,{discarded:true});
+    await send({type:'state'});
+    assert.equal((await read()).watchSuspended,'sleeping');
+    assert.equal((await read()).watching,true);
+    tabs[0].discarded=false;
+    tabs[0].status='complete';
+    await chrome.tabs.onUpdated.fire(7,{discarded:false,status:'complete'});
+    await send({type:'state'});
+    assert.equal((await read()).watchDocumentId,'restored-document');
+    const sender={id:chrome.runtime.id,frameId:0,tab:tabs[0],url:tabs[0].url};
+    await send({type:'sensor',snapshot:{observed:'done'}},{...sender,documentId:'old-document'});
+    assert.equal((await read()).state,'waiting');
+    await send({type:'sensor',snapshot:{observed:'done'}},{...sender,documentId:'restored-document'});
+    assert.equal((await read()).state,'resume');
+    assert.equal(requests,0);
+  } finally {chrome.scripting=original;}
+});
+
+test('Chrome 重启只恢复唯一匹配的监听，重复网址无需猜测归属',async()=>{
+  await reset();
+  const original=chrome.scripting;
+  chrome.scripting={async executeScript(){return [{documentId:'after-browser-restart'}];}};
+  try {
+    const [tab]=tabs;
+    assert((await send({type:'watch',tabId:7,adapter:{waiting:'Running',done:'Completed'}})).ok);
+    tabs=[{...tab,id:22,status:'complete',windowId:4}];
+    await chrome.runtime.onStartup.fire();
+    const {records}=await local.get('records');
+    assert.equal(records[7],undefined);
+    assert.equal(records[22].watching,true);
+    assert.equal(records[22].watchDocumentId,'after-browser-restart');
+    tabs=[{...tabs[0],id:23},{...tabs[0],id:24,index:1}];
+    await chrome.runtime.onStartup.fire();
+    assert.deepEqual((await local.get('records')).records,{});
+    assert.equal(requests,0);
+  } finally {chrome.scripting=original;}
+});
+
+test('API 冷却遵守服务端 Retry-After，并在会话存储清空后继续生效',async()=>{
+  await reset();
+  const original=globalThis.fetch;
+  globalThis.fetch=async()=>{
+    requests++;
+    return new Response('{}',{status:429,headers:{'Retry-After':'71'}});
+  };
+  try {
+    const before=Date.now();
+    assert.equal((await send({type:'testAPI'})).ok,false);
+    const deadline=(await local.get('modelCooldowns')).modelCooldowns['https://api.openai.com'];
+    assert(deadline>=before+71000&&deadline<=Date.now()+71000);
+    session.clear();
+    await session.set({apiKey:'fixture-key',apiKeyOrigin:'https://api.openai.com'});
+    assert.match((await send({type:'testAPI'})).error,/限流/);
+    assert.equal(requests,1);
+  } finally {globalThis.fetch=original;}
 });

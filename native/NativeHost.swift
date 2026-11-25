@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import QuartzCore
 
 func attr(_ e:AXUIElement,_ key:String)->CFTypeRef? {var value:CFTypeRef?;return AXUIElementCopyAttributeValue(e,key as CFString,&value) == .success ? value : nil}
 func textAttr(_ e:AXUIElement,_ key:String)->String {attr(e,key) as? String ?? ""}
@@ -81,70 +82,189 @@ struct OverlayPalette {
         return (max(fg,bg)+0.05)/(min(fg,bg)+0.05)
     }
 }
-final class OverlayKeepButton:NSButton {
-    private var hovered=false
-    private var tracking:NSTrackingArea?
-    override func acceptsFirstMouse(for event:NSEvent?)->Bool {true}
-    override func updateTrackingAreas(){
-        if let tracking=tracking {removeTrackingArea(tracking)}
-        tracking=NSTrackingArea(rect:.zero,options:[.mouseEnteredAndExited,.activeAlways,.inVisibleRect],owner:self,userInfo:nil)
-        addTrackingArea(tracking!);super.updateTrackingAreas()
+final class OverlayKeepButton: NSButton {
+    private let tint = CALayer()
+    private var hovered = false
+    private var tracking: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        tint.cornerRadius = 4
+        tint.opacity = 0
+        layer?.addSublayer(tint)
     }
-    override func mouseEntered(with event:NSEvent){hovered=true;needsDisplay=true}
-    override func mouseExited(with event:NSEvent){hovered=false;needsDisplay=true}
-    override func draw(_ dirtyRect:NSRect){
-        if hovered || isHighlighted {
-            let shape=NSBezierPath(roundedRect:bounds.insetBy(dx:0.5,dy:1),xRadius:4,yRadius:4)
-            (contentTintColor ?? .labelColor).withAlphaComponent(isHighlighted ? 0.12:0.055).setFill();shape.fill()
-        }
-        super.draw(dirtyRect)
+
+    required init?(coder: NSCoder) { nil }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+        super.updateTrackingAreas()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        tint.frame = bounds.insetBy(dx: 0.5, dy: 1)
+        CATransaction.commit()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        updateTint()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        updateTint()
+    }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        updateTint()
+    }
+
+    func setTint(_ color: NSColor) {
+        contentTintColor = color
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        tint.backgroundColor = color.cgColor
+        CATransaction.commit()
+    }
+
+    func resetTint() {
+        hovered = false
+        NativeMotion.tint(tint, opacity: 0, animated: false)
+    }
+
+    private func updateTint() {
+        NativeMotion.tint(tint, opacity: isHighlighted ? 0.12 : hovered ? 0.055 : 0)
     }
 }
 final class OverlayView:NSView {
-    var vertical=false
-    var anchorOffset:CGFloat?
-    var kind="resume"
-    var closeAt=Date.distantPast
-    var paused=false
-    var remaining:Double=30
-    var onHover:((Bool)->Void)?
-    var onPardon:(()->Void)?
-    private var area:NSTrackingArea?
-    private var inside=false
-    private lazy var keepButton:NSButton = {
-        let button=OverlayKeepButton(title:"保留",target:self,action:#selector(keep))
-        button.font=NSFont.systemFont(ofSize:11.5,weight:.medium)
-        button.isBordered=false
-        button.toolTip="保留此页，取消本次关闭"
+    var vertical = false {
+        didSet {
+            guard oldValue != vertical else { return }
+            needsDisplay = true
+            needsLayout = true
+        }
+    }
+    var anchorOffset: CGFloat? {
+        didSet { if oldValue != anchorOffset { needsDisplay = true } }
+    }
+    private(set) var kind = "resume"
+    private var closeAt = Date.distantPast
+    private var paused = false
+    private var remaining: Double = 30
+    var onHover: ((Bool) -> Void)?
+    var onPardon: (() -> Void)?
+    private var area: NSTrackingArea?
+    private var inside = false
+    private var lastPaintedSecond: Int?
+    private lazy var keepButton: OverlayKeepButton = {
+        let button = OverlayKeepButton(frame: .zero)
+        button.title = "保留"
+        button.target = self
+        button.action = #selector(keep)
+        button.font = .systemFont(ofSize: 11.5, weight: .medium)
+        button.isBordered = false
+        button.toolTip = "保留此页，取消本次关闭"
         button.setAccessibilityLabel("保留此页，取消本次关闭")
+        button.isHidden = true
         return button
     }()
-    private var secondsRemaining:Int {Int(ceil(paused ? remaining:max(0,closeAt.timeIntervalSinceNow)))}
-    private var palette:OverlayPalette {OverlayPalette.resolve(kind:kind,paused:paused,seconds:secondsRemaining,appearance:effectiveAppearance)}
-    private func updatePalette(){
-        let ink=palette.ink
-        keepButton.contentTintColor=ink
-        keepButton.attributedTitle=NSAttributedString(string:"保留",attributes:[.font:NSFont.systemFont(ofSize:11.5,weight:.medium),.foregroundColor:ink])
+
+    private var secondsRemaining: Int {
+        let seconds = paused ? remaining : closeAt.timeIntervalSinceNow
+        return Int(ceil(min(max(seconds, 0), 30)))
     }
-    override func viewDidChangeEffectiveAppearance(){super.viewDidChangeEffectiveAppearance();updatePalette();needsDisplay=true}
-    override var isFlipped:Bool {true}
-    override init(frame:NSRect){super.init(frame:frame);addSubview(keepButton)}
-    required init?(coder:NSCoder){fatalError("init(coder:) is unavailable")}
-    @objc private func keep(){onPardon?()}
-    func resetInteraction(){inside=false}
-    override func updateTrackingAreas(){
-        if let area=area {removeTrackingArea(area)}
-        area=NSTrackingArea(rect:.zero,options:[.mouseEnteredAndExited,.activeAlways,.inVisibleRect],owner:self,userInfo:nil)
-        addTrackingArea(area!);super.updateTrackingAreas()
+    private var palette: OverlayPalette {
+        OverlayPalette.resolve(kind: kind, paused: paused, seconds: secondsRemaining, appearance: effectiveAppearance)
     }
-    override func mouseEntered(with event:NSEvent){if kind=="countdown" && !inside {inside=true;onHover?(true)}}
-    override func mouseExited(with event:NSEvent){if inside {inside=false;onHover?(false)}}
-    func update(_ object:[String:Any]?){
-        kind=object?["kind"] as? String == "countdown" ? "countdown":"resume"
-        if let milliseconds=object?["closeAt"] as? Double,milliseconds.isFinite {closeAt=Date(timeIntervalSince1970:milliseconds/1000)}
-        paused=object?["paused"] as? Bool ?? false
-        if let milliseconds=object?["remainingMs"] as? Double,milliseconds.isFinite {remaining=min(max(milliseconds/1000,0),30)}
-        updatePalette();keepButton.isHidden=kind != "countdown";setAccessibilityRole(.group);setAccessibilityLabel(kind == "countdown" ? "关闭提醒，悬停暂停，点击保留取消关闭":"可以继续了");needsDisplay=true
+
+    private func updatePalette() {
+        let ink = palette.ink
+        guard keepButton.contentTintColor != ink else { return }
+        keepButton.setTint(ink)
+        keepButton.attributedTitle = NSAttributedString(string: "保留", attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .medium), .foregroundColor: ink,
+        ])
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updatePalette()
+        needsDisplay = true
+    }
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        addSubview(keepButton)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("可以继续了")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    @objc private func keep() { onPardon?() }
+
+    private func setPointerInside(_ entered: Bool) {
+        let next = kind == "countdown" && entered
+        guard next != inside else { return }
+        inside = next
+        onHover?(next)
+    }
+
+    func resetInteraction() {
+        setPointerInside(false)
+        keepButton.resetTint()
+    }
+
+    func updatePointer(at pointInWindow: NSPoint) {
+        setPointerInside(bounds.contains(convert(pointInWindow, from: nil)))
+    }
+
+    override func updateTrackingAreas() {
+        if let area { removeTrackingArea(area) }
+        let next = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(next)
+        area = next
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) { setPointerInside(true) }
+    override func mouseExited(with event: NSEvent) { setPointerInside(false) }
+
+    func update(_ object: [String: Any]?) {
+        let oldKind = kind
+        let oldPaused = paused
+        kind = object?["kind"] as? String == "countdown" ? "countdown" : "resume"
+        if let ms = object?["closeAt"] as? Double, ms.isFinite {
+            closeAt = Date(timeIntervalSince1970: ms / 1000)
+        }
+        paused = object?["paused"] as? Bool ?? false
+        if let ms = object?["remainingMs"] as? Double, ms.isFinite {
+            remaining = min(max(ms / 1000, 0), 30)
+        }
+
+        let seconds = kind == "countdown" ? secondsRemaining : nil
+        guard kind != oldKind || paused != oldPaused || seconds != lastPaintedSecond else { return }
+        lastPaintedSecond = seconds
+        updatePalette()
+        if kind != oldKind {
+            keepButton.isHidden = kind != "countdown"
+            setAccessibilityLabel(kind == "countdown" ? "关闭提醒，悬停暂停，点击保留取消关闭" : "可以继续了")
+        }
+        needsDisplay = true
     }
     func verifyNativeControl() throws {
         vertical=true;update(["kind":"countdown","paused":true,"remainingMs":18000.0]);needsLayout=true;layoutSubtreeIfNeeded()
@@ -201,12 +321,32 @@ final class OverlayView:NSView {
 }
 final class NativeController:NSObject {
     lazy var shortcuts=ChromeShortcuts(send:{[weak self] value in self?.send(value)})
-    let vault=CredentialVault();let geometry=BrowserGeometry();var panel:NSPanel?;var target:TabTarget?;var deadline=Date.distantPast;var timer:Timer?;var lastStatus="";var nativeMessaging=false
+    let vault=CredentialVault();let geometry=BrowserGeometry();var panel:NSPanel?;var target:TabTarget?;var timer:Timer?;var lastStatus="";var nativeMessaging=false
     var overlayState:[String:Any]?
-    var visibleRemaining:Double=20;var lastDisplayTick:Date?;var lastVisibility:Bool?;var lastVisibilityAt=Date.distantPast
+    var visibleRemaining:Double=20;var lastDisplayTick:TimeInterval?;var lastVisibility:Bool?;var lastVisibilityAt=Date.distantPast
     var lastOverlayRect:CGRect?;var lastAnchorRect:CGRect?
     var probeOutput:URL?
     var probeEvents:[[String:Any]]=[]
+    private var focusObserver: NSObjectProtocol?
+
+    override init() {
+        super.init()
+        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.target != nil else { return }
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.google.Chrome" {
+                self.tick()
+            } else {
+                self.hide("chrome_not_frontmost")
+            }
+        }
+    }
+
+    deinit {
+        if let focusObserver { NSWorkspace.shared.notificationCenter.removeObserver(focusObserver) }
+    }
+
     func send(_ value:[String:Any]) {
         guard let data=try? JSONSerialization.data(withJSONObject:value) else{return}
         if let url=probeOutput {probeEvents.append(value.filter{$0.key != "apiKey"}.merging(["at":Date().timeIntervalSince1970]){first,_ in first});probeEvents=Array(probeEvents.suffix(256));if let receipt=try? JSONSerialization.data(withJSONObject:["events":probeEvents],options:.sortedKeys){try? receipt.write(to:url,options:.atomic)}}
@@ -229,46 +369,142 @@ final class NativeController:NSObject {
         let now=Date();guard lastVisibility != visible || now.timeIntervalSince(lastVisibilityAt)>=0.75 else{return}
         lastVisibility=visible;lastVisibilityAt=now;send(["type":"closeVisibility","tabId":t.tabId,"visibilityId":id,"visible":visible])
     }
-    func hide(_ status:String){lastDisplayTick=nil;visibility(false);panel?.orderOut(nil);if status != lastStatus{send(["type":"status","status":status,"reason":reason(status)]);lastStatus=status}}
+    func hide(_ status: String) {
+        lastDisplayTick = nil
+        let displayed = panel?.isVisible == true
+        if displayed { panel?.orderOut(nil) }
+        visibility(false)
+        if displayed {
+            (panel?.contentView as? OverlayView)?.resetInteraction()
+        }
+        if status != lastStatus {
+            send(["type": "status", "status": status, "reason": reason(status)])
+            lastStatus = status
+        }
+    }
     func reason(_ s:String)->String {[
         "mapped":"已定位原生标签，浮标已显示。",
-        "accessibility_required":"需要辅助功能授权；在系统设置的隐私与安全性中，打开设备控制和数据访问（或辅助功能），添加 TabPilotBridge 后重试。",
-        "duplicate_title":"标题重复，已隐藏浮标；在 Side Panel 中查看。",
-        "ambiguous_mapping":"无法唯一确定标签，已隐藏浮标；在 Side Panel 中查看。",
+        "accessibility_required":"需要辅助功能授权；在系统设置的隐私与安全性中，打开设备控制和数据访问（或辅助功能），开启 Mac 助手后重试。",
+        "duplicate_title":"标题重复，已隐藏浮标；在 Tab Cadence 侧栏查看。",
+        "ambiguous_mapping":"无法唯一确定标签，已隐藏浮标；在 Tab Cadence 侧栏查看。",
         "tab_not_visible":"标签不在可见范围，已隐藏浮标；滚动到标签后重试。",
-        "tab_not_found":"标签标题或 Chrome 界面发生变化，已隐藏；在 Side Panel 中重新发起定位。",
+        "tab_not_found":"标签标题或 Chrome 界面发生变化，已隐藏；在 Tab Cadence 侧栏重新发起定位。",
         "chrome_not_frontmost":"Chrome 不在前台，提醒已暂停，返回后继续。",
         "window_occluded":"Chrome 窗口被遮挡，提醒已暂停。",
         "window_not_frontmost":"目标窗口不在前台，浮标已隐藏。",
-        "window_not_matched":"窗口不能唯一匹配，已隐藏；在 Side Panel 中重新发起定位。",
+        "window_not_matched":"窗口不能唯一匹配，已隐藏；在 Tab Cadence 侧栏重新发起定位。",
         "window_minimized":"窗口已最小化，浮标已隐藏。",
-        "screen_not_matched":"无法确定目标显示器，已隐藏；使用 Side Panel 查看。",
+        "screen_not_matched":"无法确定目标显示器，已隐藏；使用 Tab Cadence 侧栏查看。",
         "chrome_not_running":"Chrome 未运行；打开 Chrome 后重试。",
         "hidden":"浮标已收起。",
-        "expired":"本次浮标已结束；可从 Side Panel 再次显示。"
-    ][s] ?? "定位暂不可用；在 Side Panel 中重试。"}
-    func show(_ t:TabTarget,duration:Double=20,overlay:[String:Any]?=nil){let sameTarget=target?.tabId==t.tabId && target?.title==t.title && target?.window.rect==t.window.rect;overlayState=overlay;(panel?.contentView as? OverlayView)?.resetInteraction();target=t;if !sameTarget {geometry.reset()};deadline=Date().addingTimeInterval(min(max(duration,1),60));visibleRemaining=min(max(duration,1),60);lastDisplayTick=nil;lastVisibility=nil;timer?.invalidate();tick();timer=Timer.scheduledTimer(withTimeInterval:0.25,repeats:true){[weak self]_ in self?.tick()}}
-    func tick(){
-        guard let t=target else{timer?.invalidate();timer=nil;target=nil;hide("expired");return}
-        let found=geometry.locate(t)
-        guard let tab=found.tab,let window=found.window else{hide(found.status);return}
-        let now=Date();if let last=lastDisplayTick,now.timeIntervalSince(last)<=1 {visibleRemaining-=max(0,now.timeIntervalSince(last))};lastDisplayTick=now
-        guard visibleRemaining>0 else{target=nil;timer?.invalidate();timer=nil;hide("expired");return}
-        // AX global coordinates use the top-left of the primary display. AppKit uses bottom-left.
-        let primaryTop=NSScreen.screens.first?.frame.maxY ?? 0
-        let screens=NSScreen.screens.map {CGRect(x:$0.frame.minX,y:primaryTop-$0.frame.maxY,width:$0.frame.width,height:$0.frame.height)}
-        guard let screen=screens.first(where:{$0.contains(CGPoint(x:tab.rect.midX,y:tab.rect.midY))}),let rect=overlayRect(tab:tab.rect,window:window,screen:screen,vertical:found.vertical) else{hide("screen_not_matched");return}
-        guard coverageVisible(window,protectedArea:tab.rect.union(rect)) else{hide("window_occluded");return}
-        if panel==nil {let p=NSPanel(contentRect:.zero,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false);p.isOpaque=false;p.backgroundColor = .clear;p.hasShadow=true;p.level = .floating;p.ignoresMouseEvents=true;p.collectionBehavior=[.canJoinAllSpaces,.fullScreenAuxiliary,.transient];p.title="Tab Pilot 标签提醒";p.hidesOnDeactivate=false;p.contentView=OverlayView();panel=p}
-        if let v=panel?.contentView as? OverlayView {
-            v.vertical=found.vertical;v.anchorOffset=found.vertical ? tab.rect.midY-rect.minY:tab.rect.midX-rect.minX;v.update(overlayState)
-            v.onPardon={[weak self] in guard let self=self,let target=self.target else{return};self.send(["type":"pardon","tabId":target.tabId]);self.target=nil;self.timer?.invalidate();self.timer=nil;self.hide("hidden")}
-            v.onHover={[weak self] paused in guard let self=self,let target=self.target else{return};self.send(["type":"closeHover","tabId":target.tabId,"paused":paused])}
-            panel?.ignoresMouseEvents=v.kind != "countdown"
+        "expired":"本次浮标已结束；可从 Tab Cadence 侧栏再次显示。"
+    ][s] ?? "定位暂不可用；在 Tab Cadence 侧栏重试。"}
+    func show(_ target: TabTarget, duration: Double = 20, overlay: [String: Any]? = nil) {
+        let sameTarget = self.target?.tabId == target.tabId && self.target?.title == target.title &&
+            self.target?.window.rect == target.window.rect
+        if !sameTarget {
+            if panel?.isVisible == true { hide("hidden") }
+            geometry.reset()
         }
-        panel?.setFrame(CGRect(x:rect.minX,y:primaryTop-rect.maxY,width:rect.width,height:rect.height),display:true)
-        panel?.orderFrontRegardless();visibility(panel?.isVisible==true)
-        if lastStatus != "mapped" || lastOverlayRect != rect || lastAnchorRect != tab.rect || probeOutput != nil {lastOverlayRect=rect;lastAnchorRect=tab.rect;send(["type":"status","status":"mapped","reason":reason("mapped"),"orientation":found.vertical ? "vertical" : "horizontal","tabId":t.tabId,"windowRect":[window.minX,window.minY,window.width,window.height],"screenRect":[screen.minX,screen.minY,screen.width,screen.height],"anchorRect":[tab.rect.minX,tab.rect.minY,tab.rect.width,tab.rect.height],"overlayRect":[rect.minX,rect.minY,rect.width,rect.height],"mouseTransparent":panel?.ignoresMouseEvents ?? true,"kind":overlayState?["kind"] as? String ?? "resume"]);lastStatus="mapped"}
+        overlayState = overlay
+        self.target = target
+        visibleRemaining = min(max(duration, 1), 60)
+        lastDisplayTick = nil
+        lastVisibility = nil
+        timer?.invalidate()
+        tick()
+        guard self.target != nil else { return }
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func tick() {
+        guard let target else { stopOverlay(status: "expired"); return }
+        let found = geometry.locate(target)
+        guard let tab = found.tab, let window = found.window else { hide(found.status); return }
+
+        // Chrome 的辅助功能坐标以主显示器左上角为原点。
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
+        let screens = NSScreen.screens.map {
+            CGRect(x: $0.frame.minX, y: primaryTop - $0.frame.maxY,
+                   width: $0.frame.width, height: $0.frame.height)
+        }
+        guard let screen = screens.first(where: { $0.contains(CGPoint(x: tab.rect.midX, y: tab.rect.midY)) }),
+              let rect = overlayRect(tab: tab.rect, window: window, screen: screen, vertical: found.vertical) else {
+            hide("screen_not_matched")
+            return
+        }
+        guard coverageVisible(window, protectedArea: tab.rect.union(rect)) else { hide("window_occluded"); return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if let lastDisplayTick, now - lastDisplayTick <= 1 { visibleRemaining -= now - lastDisplayTick }
+        lastDisplayTick = now
+        guard visibleRemaining > 0 else { stopOverlay(status: "expired"); return }
+
+        let panel = self.panel ?? makeOverlayPanel()
+        guard let view = panel.contentView as? OverlayView else { return }
+        view.vertical = found.vertical
+        view.anchorOffset = found.vertical ? tab.rect.midY - rect.minY : tab.rect.midX - rect.minX
+        view.update(overlayState)
+        let countdown = view.kind == "countdown"
+        panel.ignoresMouseEvents = !countdown
+        let frame = CGRect(x: rect.minX, y: primaryTop - rect.maxY, width: rect.width, height: rect.height)
+        let changedFrame = panel.frame != frame
+        let wasVisible = panel.isVisible
+        if changedFrame { panel.setFrame(frame, display: true) }
+        NativeMotion.reveal(panel, animated: !countdown)
+        if countdown && (!wasVisible || changedFrame) {
+            view.updatePointer(at: panel.mouseLocationOutsideOfEventStream)
+        }
+        visibility(panel.isVisible)
+
+        if lastStatus != "mapped" || lastOverlayRect != rect || lastAnchorRect != tab.rect || probeOutput != nil {
+            lastOverlayRect = rect
+            lastAnchorRect = tab.rect
+            send(["type": "status", "status": "mapped", "reason": reason("mapped"),
+                  "orientation": found.vertical ? "vertical" : "horizontal", "tabId": target.tabId,
+                  "windowRect": [window.minX, window.minY, window.width, window.height],
+                  "screenRect": [screen.minX, screen.minY, screen.width, screen.height],
+                  "anchorRect": [tab.rect.minX, tab.rect.minY, tab.rect.width, tab.rect.height],
+                  "overlayRect": [rect.minX, rect.minY, rect.width, rect.height],
+                  "mouseTransparent": panel.ignoresMouseEvents, "kind": view.kind])
+            lastStatus = "mapped"
+        }
+    }
+
+    private func makeOverlayPanel() -> NSPanel {
+        let window = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                             backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = .floating
+        window.ignoresMouseEvents = true
+        window.animationBehavior = .none
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        window.title = "Tab Cadence 标签提醒"
+        window.hidesOnDeactivate = false
+        let view = OverlayView()
+        view.onPardon = { [weak self] in
+            guard let self, let target = self.target else { return }
+            self.send(["type": "pardon", "tabId": target.tabId])
+            self.stopOverlay(status: "hidden")
+        }
+        view.onHover = { [weak self] paused in
+            guard let self, let target = self.target else { return }
+            self.send(["type": "closeHover", "tabId": target.tabId, "paused": paused])
+        }
+        window.contentView = view
+        panel = window
+        return window
+    }
+
+    private func stopOverlay(status: String) {
+        timer?.invalidate()
+        timer = nil
+        hide(status)
+        target = nil
     }
     func handle(_ data:Data){
         guard data.count<=65536,let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],let type=object["type"] as? String else{hide("hidden");return}
@@ -276,7 +512,7 @@ final class NativeController:NSObject {
         if type=="mruConfigure"{shortcuts.configure(object);return}
         if type=="mruPreview"{shortcuts.preview(object);return}
         if type=="mruDismiss"{shortcuts.dismiss();return}
-        if type=="hide"{target=nil;timer?.invalidate();timer=nil;hide("hidden");return}
+        if type=="hide"{stopOverlay(status:"hidden");return}
         if type == "hello" {
             let trusted = AXIsProcessTrusted()
             let name = CredentialVault.storeBuild ? "Tab Cadence Bridge" : "TabPilotBridge"
@@ -302,53 +538,173 @@ final class NativeController:NSObject {
         }
     }
 }
-final class SetupController:NSObject {
-    var window:NSWindow?
-    let storeBuild = CredentialVault.storeBuild
-    let registrationState = NSTextField(wrappingLabelWithString: "")
-    let status=NSTextField(wrappingLabelWithString:"")
-    func show(){
-        NSApp.setActivationPolicy(.regular)
-        let w=NSWindow(contentRect:NSRect(x:0,y:0,width:420,height:storeBuild ? 330 : 250),styleMask:[.titled,.closable],backing:.buffered,defer:false)
-        w.title=storeBuild ? "Tab Cadence Bridge" : "Tab Pilot Bridge";w.isReleasedWhenClosed=false
-        let title=NSTextField(labelWithString:storeBuild ? "连接 Tab Cadence" : "让提醒，贴近正在做的事。")
-        title.font=NSFont.systemFont(ofSize:19,weight:.semibold)
-        let detail=NSTextField(wrappingLabelWithString:"辅助程序读取 Chrome 原生标签位置。仅在启用快捷切换时处理 Chrome 的 Control+Tab。通过扩展的 macOS 设置开启提醒。")
-        detail.font=NSFont.systemFont(ofSize:13);detail.textColor = .secondaryLabelColor
-        let open=NSButton(title:"打开辅助功能设置",target:self,action:#selector(openSettings))
-        let refresh=NSButton(title:"刷新授权状态",target:self,action:#selector(refreshStatus))
-        var controls: [NSView] = [title, detail]
-        if storeBuild {
-            controls.append(NSButton(title:"连接 Chrome",target:self,action:#selector(registerChrome)))
-            registrationState.font = NSFont.systemFont(ofSize:12)
-            registrationState.maximumNumberOfLines = 0
-            controls.append(registrationState)
-        }
-        controls += [status, open, refresh]
-        let stack=NSStackView(views:controls);stack.orientation = .vertical;stack.alignment = .leading;stack.spacing=14;stack.translatesAutoresizingMaskIntoConstraints=false
-        w.contentView?.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo:w.contentView!.leadingAnchor,constant:24),stack.trailingAnchor.constraint(equalTo:w.contentView!.trailingAnchor,constant:-24),stack.topAnchor.constraint(equalTo:w.contentView!.topAnchor,constant:24)])
-        window=w;refreshStatus();w.center();w.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
-    }
-    @objc func registerChrome() {
-        do {
-            try StoreSetup.register()
-            registrationState.stringValue = "Chrome 连接已注册。"
-        } catch {
-            registrationState.stringValue = error.localizedDescription
+final class SetupController: NSObject, NSWindowDelegate {
+    private enum Step: Equatable {
+        case install, invalid, conflict, failure, authorize, ready
+
+        var presentation: (title: String, detail: String, action: String, symbol: String) {
+            switch self {
+            case .install:
+                return ("先安装 Mac 助手", "把 Tab Cadence Bridge 拖入「应用程序」，再从那里打开。",
+                        "打开应用程序", "folder")
+            case .invalid:
+                return ("请重新下载 Mac 助手", "这份助手的安装文件不完整。",
+                        "打开下载页", "arrow.down.circle")
+            case .conflict:
+                return ("Chrome 连接需要处理", "此 Mac 已注册另一份助手。按安装说明处理原有连接后，再回到此窗口。",
+                        "查看安装说明", "link")
+            case .failure:
+                return ("暂时无法准备助手", "Chrome 的助手连接未能保存。请检查此 Mac 的本地设置后重试。",
+                        "重试", "arrow.clockwise")
+            case .authorize:
+                let name = CredentialVault.storeBuild ? "Tab Cadence Bridge" : "Tab Pilot Bridge"
+                return ("允许辅助功能访问", "在辅助功能列表中开启 \(name)。如果列表中没有，从「应用程序」添加。",
+                        "打开辅助功能设置", "hand.raised")
+            case .ready:
+                return ("Mac 助手已就绪", "在 Tab Cadence 的 macOS 设置中开启标签提醒或最近使用切换。",
+                        "返回 Chrome", "checkmark.circle")
+            }
         }
     }
-    @objc func refreshStatus(){
-        let name = storeBuild ? "Tab Cadence Bridge" : "TabPilotBridge"
-        status.stringValue = AXIsProcessTrusted() ? "辅助功能已授权。可以返回扩展验证浮标。" : "请在辅助功能列表中添加并启用 \(name)。"
-        status.font = NSFont.systemFont(ofSize:12)
+
+    private var step: Step?
+    private var window: NSWindow?
+    private let heading = NSTextField(labelWithString: "")
+    private let detail = NSTextField(wrappingLabelWithString: "")
+    private let symbol = NSImageView()
+    private lazy var action = NSButton(title: "", target: self, action: #selector(performStep))
+
+    func show() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 416, height: 214),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = CredentialVault.storeBuild ? "Tab Cadence Bridge" : "Tab Pilot Bridge"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        heading.font = .systemFont(ofSize: 21, weight: .semibold)
+        detail.font = .systemFont(ofSize: 13)
+        detail.textColor = NativeColors.secondaryLabel
+        detail.maximumNumberOfLines = 4
+        symbol.contentTintColor = .secondaryLabelColor
+        symbol.imageScaling = .scaleProportionallyDown
+        symbol.setAccessibilityElement(false)
+        action.bezelStyle = .rounded
+        action.keyEquivalent = "\r"
+        action.controlSize = .large
+        window.defaultButtonCell = action.cell as? NSButtonCell
+
+        let header = NSStackView(views: [symbol, heading])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 11
+        let text = NSStackView(views: [header, detail])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 9
+        text.translatesAutoresizingMaskIntoConstraints = false
+        action.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSView()
+        content.addSubview(text)
+        content.addSubview(action)
+        window.contentView = content
+        NSLayoutConstraint.activate([
+            symbol.widthAnchor.constraint(equalToConstant: 26),
+            symbol.heightAnchor.constraint(equalToConstant: 26),
+            text.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
+            text.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
+            text.topAnchor.constraint(equalTo: content.topAnchor, constant: 34),
+            detail.widthAnchor.constraint(equalTo: text.widthAnchor),
+            action.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+            action.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -21),
+            action.topAnchor.constraint(greaterThanOrEqualTo: text.bottomAnchor, constant: 14),
+        ])
+
+        self.window = window
+        refresh(animated: false)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
     }
-    @objc func openSettings(){NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)}
+
+    func windowDidBecomeKey(_ notification: Notification) { refresh() }
+    func windowWillClose(_ notification: Notification) { NSApp.terminate(nil) }
+
+    private func currentStep() -> Step {
+        if CredentialVault.storeBuild {
+            do { try StoreSetup.register() }
+            catch StoreSetup.Failure.needsInstallation { return .install }
+            catch StoreSetup.Failure.incompleteBundle { return .invalid }
+            catch StoreSetup.Failure.connectionConflict { return .conflict }
+            catch { return .failure }
+        }
+        return AXIsProcessTrusted() ? .ready : .authorize
+    }
+
+    private func refresh(animated: Bool = true) {
+        let next = currentStep()
+        guard step != next else { return }
+        step = next
+        let presentation = next.presentation
+        heading.stringValue = presentation.title
+        detail.stringValue = presentation.detail
+        action.title = presentation.action
+        symbol.image = NSImage(systemSymbolName: presentation.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
+        if animated, !NativeMotion.reduced {
+            symbol.alphaValue = 0.75
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = NativeMotion.presentationDuration
+                context.timingFunction = NativeMotion.easing
+                symbol.animator().alphaValue = 1
+            }
+        } else {
+            symbol.alphaValue = 1
+        }
+    }
+
+    @objc private func performStep() {
+        guard let step else { return }
+        switch step {
+        case .install:
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications", isDirectory: true))
+        case .invalid:
+            NSWorkspace.shared.open(URL(string: "https://github.com/Geeprox/tab-cadence/releases/latest")!)
+        case .conflict:
+            NSWorkspace.shared.open(URL(string: "https://github.com/Geeprox/tab-cadence/blob/main/docs/mac-install.md")!)
+        case .failure:
+            refresh()
+        case .authorize:
+            let settings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+            if !NSWorkspace.shared.open(settings) {
+                detail.stringValue = "在系统设置的「隐私与安全性 → 辅助功能」中开启此助手。"
+            }
+        case .ready:
+            if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
+                NSWorkspace.shared.open(chrome)
+            } else {
+                detail.stringValue = "安装 Chrome 和 Tab Cadence 后，即可在扩展设置中开启 Mac 功能。"
+            }
+        }
+    }
 }
 @main struct Main {
     static func main() throws {
         let args=CommandLine.arguments
-        if args.contains("--self-test"){let app=NSApplication.shared;app.setActivationPolicy(.accessory);try mappingSelfTest();try coverageSelfTest();try shortcutSelfTest();try credentialSelfTest();try OverlayView(frame:NSRect(x:0,y:0,width:148,height:26)).verifyNativeControl();print("Mapping, Chrome shortcut state and native control hit/action and credential validation checks passed");return}
+        if args.contains("--self-test") {
+            NSApplication.shared.setActivationPolicy(.accessory)
+            try mappingSelfTest()
+            try coverageSelfTest()
+            try shortcutSelfTest()
+            try credentialSelfTest()
+            try OverlayView(frame: NSRect(x: 0, y: 0, width: 148, height: 26)).verifyNativeControl()
+            try verifySwitcherPresentation()
+            print("Mapping, visibility, shortcuts, native controls, layout, and credential checks passed.")
+            return
+        }
         if let i=args.firstIndex(of:"--keychain-probe"),args.count>i+2 {
             let result=try credentialRoundtripProbe(args[i+1],scope:args[i+2]);FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject:result,options:.sortedKeys));return
         }
@@ -375,6 +731,10 @@ final class SetupController:NSObject {
                 if let focused=attr(element,kAXFocusedWindowAttribute),CFGetTypeID(focused)==AXUIElementGetTypeID(),let frame=elementRect(unsafeBitCast(focused,to:AXUIElement.self)){report["focusedChromeWindowRect"]=[frame.minX,frame.minY,frame.width,frame.height];report["focusedChromeWindowUncovered"]=controller.coverageVisible(frame)}
             }
             FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]));return
+        }
+        if let index = args.firstIndex(of: "--render-switcher"), args.count > index + 1 {
+            try verifySwitcherPresentation(renderingTo: URL(fileURLWithPath: args[index + 1], isDirectory: true))
+            return
         }
         if let i=args.firstIndex(of:"--render-overlays"),args.count>i+1 {
             let output=URL(fileURLWithPath:args[i+1],isDirectory:true);try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)

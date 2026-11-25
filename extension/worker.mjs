@@ -1,7 +1,9 @@
 import {createThreadWorkspace} from './core/thread-workspace.mjs';
-import {BacklogQueue,backlogPlan,backlogExclusion,queueSummary} from './core/backlog.mjs';
+import {conversationAt, topicConnection, topicBatchLimit, topicSnapshot, readTopics, readLatestTopicOverview, rememberTopicOverview, requestTopics, saveTopicBatch, topicSynthesis} from './core/topics.mjs';
+import {BacklogQueue,backlogPlan,backlogExclusion,backlogWaiting,trackableTab,queueSummary} from './core/backlog.mjs';
 import {advanceCountdown,nativeVisibilityFresh} from './core/countdown.mjs';
-import {CredentialManager,credentialOrigin} from './core/credentials.mjs';
+import {CredentialManager,credentialOrigin,credentialStorage} from './core/credentials.mjs';
+import {connectionSyncSlot} from './core/connection-sync.mjs';
 import {MRUController} from './core/mru-controller.mjs';
 import {DEFAULTS,safeURL,privateURL,boundedEvidence,fingerprint,reserve,settle,mayReevaluate,pardon,mayClose,closeCandidate,visibilityLease,guard} from './core/policy.mjs';
 import {invoke,buildRequest} from './core/providers.mjs';
@@ -9,19 +11,71 @@ import {duplicates,organizationPlan,identity,scheduledCandidate} from './core/wo
 
 let serial=Promise.resolve(),cloudSerial=Promise.resolve(),configSerial=Promise.resolve(),native=null;
 const nativePending=new Map();
+let nativeConnection = {status:'unknown'};
+
+function expectNativeHello(port) {
+  nativeConnection = {status:'checking'};
+  nativeHello = new Promise(resolve => {
+    const timeout = setTimeout(() => {
+      if (native === port && nativeConnection.status === 'checking') nativeConnection = {status:'unavailable'};
+      resolve();
+    }, 1500);
+    finishNativeHello = () => { clearTimeout(timeout); resolve(); };
+  });
+}
+
+async function checkNative(refresh = false) {
+  if (chrome.runtime.getPlatformInfo && (await chrome.runtime.getPlatformInfo()).os !== 'mac') {
+    return {status:'unsupported'};
+  }
+  const connected = native;
+  try {
+    const port = await connectNative();
+    if (refresh && connected === port && nativeConnection.status !== 'checking') {
+      expectNativeHello(port);
+      port.postMessage({type:'hello'});
+    }
+    await nativeHello;
+  } catch {
+    return {status:'unavailable'};
+  }
+  return nativeConnection;
+}
+
+async function requireNativeAccessibility() {
+  const info = await checkNative(true);
+  if (info.status === 'ready') return;
+  throw Error(info.status === 'accessibility_required' ? '请在 Mac 助手中打开辅助功能设置，授权后再开启。' :
+    info.status === 'unsupported' ? '此功能仅适用于支持的 Mac。' : '请先下载并连接 Mac 助手，再开启此功能。');
+}
 const configRun=fn=>{const task=configSerial.then(fn,fn);configSerial=task.catch(()=>{});return task;};
 let nativeCapabilities=new Set(),nativeHello=Promise.resolve(),finishNativeHello=()=>{},activeOverlay=null;
 const run=fn=>{const next=serial.then(fn,fn);serial=next.catch(()=>{});return next;};
 const cloudRun=fn=>{const next=cloudSerial.then(fn,fn);cloudSerial=next.catch(()=>{});return next;};
 const cleanSettings=input=>{const settings={...DEFAULTS};for(const key of Object.keys(DEFAULTS))if(input?.[key]!==undefined)settings[key]=input[key];if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input?.credentialRevision||''))settings.credentialRevision=input.credentialRevision;return settings;};
 const load=async()=>{const d=await chrome.storage.local.get(['settings','records','ledger','adapters']);return {settings:cleanSettings(d.settings),records:d.records||{},ledger:d.ledger,adapters:d.adapters||[]};};
-const session=()=>chrome.storage.session.get(['apiKey','apiKeyOrigin','credentialPersistedOrigin','lease','leases','snapshots','backoffUntil','chromeFocusedWindow']);
+const session=()=>chrome.storage.session.get(['apiKey','apiKeyOrigin','apiKeyRevision','credentialPersistedOrigin','lease','leases','snapshots','chromeFocusedWindow']);
 const saveRecords=records=>chrome.storage.local.set({records});
 async function leaseFor(record){if(!record)return null;const {leases={}}=await session();return Object.values(leases).find(lease=>visibilityLease(lease,record))||null;}
 const emit=()=>chrome.runtime.sendMessage({type:'updated'}).catch(()=>{});
 const mru=new MRUController({chrome,getPort:()=>connectNative(),emit});
 const keychain=new CredentialManager({chrome,request:nativeCredential,settings:async()=>(await load()).settings,mutate:run,changed:()=>{emit();void resumeQueueAfterConnection().catch(()=>{});}});
 const connectionKey=settings=>JSON.stringify([settings.provider,settings.endpoint,settings.model]);
+const profileSlot=settings=>(settings.provider==='chat'||credentialOrigin(settings.endpoint)!==credentialOrigin(DEFAULTS.endpoint)
+ ?'compatible':'openai')+'|'+settings.provider;
+function copyProfiles(profiles,before,after){
+ const next={...profiles};
+ for(const settings of [before,after]){
+  const {provider,endpoint,model}=settings;
+  next[profileSlot(settings)]={provider,endpoint,model};
+ }
+ return next;
+}
+const clearAutoReview=records=>Object.fromEntries(Object.entries(records).map(([id,record])=>[id,
+ record.autoReview?{...record,autoReview:false}:record]));
+const currentKey=(settings,state)=>Boolean(state.apiKey &&
+ state.apiKeyOrigin===credentialOrigin(settings.endpoint) &&
+ (state.apiKeyRevision||'')===(settings.credentialRevision||''));
 let backlogTimer;
 function scheduleBacklog(queue){
  clearTimeout(backlogTimer);
@@ -31,41 +85,91 @@ function scheduleBacklog(queue){
  if(delay<=10000){backlogTimer=setTimeout(()=>void backlog.tick().catch(()=>{}),delay);backlogTimer.unref?.();}
 }
 const backlog=new BacklogQueue({storage:chrome.storage.local,mutate:run,process:processBacklog,emit,schedule:scheduleBacklog});
-async function resumeQueueAfterConnection(){const {settings}=await load(),state=await session();if(state.apiKey&&state.apiKeyOrigin===credentialOrigin(settings.endpoint))await backlog.credentialReady();}
+async function resumeQueueAfterConnection(){const {settings}=await load(),state=await session();if(currentKey(settings,state))await backlog.credentialReady();}
 async function processBacklog(job,queue,stillRunning){return cloudRun(async()=>{
  if(!await stillRunning())return {kind:'deferred'};
- const {settings}=await load();if(connectionKey(settings)!==queue.connectionKey)return {kind:'blocked',blockedBy:'configuration',reason:'模型连接已变化，请重新选择并确认发送范围。'};
- await restoreBeforeRequest();
- const current=await session();if(Date.now()<(current.backoffUntil||0))return {kind:'blocked',blockedBy:'backoff',nextAt:current.backoffUntil,reason:'服务商要求冷却，稍后继续；不会重发已失败的页面。'};
- try{await credentials(settings);}catch(error){return {kind:'blocked',blockedBy:'credentials',reason:error.message};}
+ const {settings}=await load();
+ if(connectionKey(settings)!==queue.connectionKey)return {kind:'blocked',blockedBy:'configuration',reason:'模型连接已变化，请重新确认发送范围。'};
  const tab=await chrome.tabs.get(job.tabId).catch(()=>null);
- if(!tab||tab.windowId!==job.windowId||tab.url!==job.url||!queue.origins.includes(new URL(tab.url).origin))return {kind:'skipped',reason:'页面已关闭、移动或跳转，未发送。'};
- const excluded=backlogExclusion(tab);if(excluded)return {kind:'skipped',reason:excluded+'，未发送。'};
- if(!await chrome.permissions.contains({origins:[job.origin+'/*']}))return {kind:'skipped',reason:'此网站未获读取授权，未发送。'};
- try{await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js']});}catch{return {kind:'skipped',reason:'此页面不允许读取，未发送。'};}
- const snapshot=await readSnapshot(tab.id);
- if(snapshot.editable||snapshot.dirty||snapshot.media||['waiting','unknown'].includes(snapshot.observed)||Date.now()-Math.max(snapshot.lastInteraction||0,tab.lastAccessed||0)<60000)return {kind:'skipped',reason:'页面有编辑、媒体或未完成任务，已保留且未发送。'};
+ if(!tab||tab.url!==job.url||!queue.origins.includes(job.origin))return {kind:'skipped',reason:'网页已关闭或跳转。'};
+ const excluded=backlogExclusion(tab);
+ if(excluded)return {kind:'skipped',reason:excluded};
+ if(backlogWaiting(tab))return {kind:'waiting',reason:'等网页载入后检查。'};
+ if(!await chrome.permissions.contains({origins:[job.origin+'/*']}))return {kind:'skipped',reason:'网站读取权限已撤销。'};
+ let documentId;
+ try{
+  const frames=await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js']});
+  documentId=frames?.[0]?.documentId;
+ }catch{return {kind:'skipped',reason:'Chrome 不允许读取此网页。'};}
+ let snapshot;
+ try{snapshot=await readSnapshot(tab.id,documentId);}
+ catch{return {kind:'skipped',reason:'网页正在切换，未发送。'};}
+ if(snapshot.editable||snapshot.dirty||snapshot.media||tab.audible||['waiting','unknown'].includes(snapshot.observed))
+  return {kind:'skipped',reason:'正在编辑、播放或等待任务，保留在本机。'};
+ await restoreBeforeRequest();
+ try{await credentials(settings);}catch(error){
+  return error.code==='provider_backoff'
+    ? {kind:'blocked',blockedBy:'backoff',nextAt:error.retryAt,reason:'服务暂时限流，恢复后继续。'}
+    : {kind:'blocked',blockedBy:'credentials',reason:error.message};
+ }
  if(!await stillRunning())return {kind:'deferred'};
- const result=await analyze(tab.id,true,queue.autoReview,await fingerprint(boundedEvidence(tab,snapshot)));
+ const result=await analyze(tab.id,true,queue.autoReview,await fingerprint(boundedEvidence(tab,snapshot)),
+  {queueId:queue.id,connection:queue.connectionKey,url:job.url,documentId});
+ if(result.deferred)return {kind:'deferred'};
+ if(result.changed)return {kind:'blocked',blockedBy:'configuration',reason:'模型连接已变化，请重新确认发送范围。'};
  return {kind:result.cached?'cached':result.skipped?'skipped':'analyzed',reason:result.skipped||''};
  });}
 async function restoreBeforeRequest(){const {settings}=await load();if(settings.rememberKey)await keychain.restore(settings);}
-async function readSnapshot(tabId){try{return await chrome.tabs.sendMessage(tabId,{type:'snapshot'},{frameId:0});}catch{throw new Error('尚未授权读取此页；选择“分析页面”或“监听任务”后重试。');}}
+async function readSnapshot(tabId,documentId){try{return await chrome.tabs.sendMessage(tabId,{type:'snapshot'},documentId?{documentId}:{frameId:0});}catch{throw new Error('尚未授权读取此页；选择“分析页面”或“监听任务”后重试。');}}
+async function modelCooldown(settings) {
+  const {modelCooldowns={}}=await chrome.storage.local.get('modelCooldowns');
+  return modelCooldowns[credentialOrigin(settings.endpoint)] || 0;
+}
+async function rememberModelCooldown(settings,error) {
+  if(error.status!==429)return;
+  const origin=credentialOrigin(settings.endpoint),now=Date.now();
+  const retryAt=Number.isFinite(error.retryAt)&&error.retryAt>now ? error.retryAt : now+300000;
+  error.retryAt=retryAt;
+  await run(async()=>{
+    const {modelCooldowns={}}=await chrome.storage.local.get('modelCooldowns');
+    const live=Object.entries(modelCooldowns).filter(([,until])=>until>now).sort((a,b)=>b[1]-a[1]).slice(0,31);
+    await chrome.storage.local.set({modelCooldowns:{...Object.fromEntries(live),[origin]:Math.max(retryAt,modelCooldowns[origin]||0)}});
+  });
+}
 async function credentials(settings) {
-  const s=await session();
-  if(Date.now()<(s.backoffUntil||0))throw Object.assign(new Error('API 正在冷却；五分钟后再试。'),{code:'provider_backoff',retryAt:s.backoffUntil});
-  if(!s.apiKey||s.apiKeyOrigin!==new URL(settings.endpoint).origin){const {credentialStatus}=await chrome.storage.session.get('credentialStatus');throw new Error(settings.rememberKey?(credentialStatus?.reason||'连接尚未恢复，请在模型连接中解锁并恢复，无需重新导入。'):'请先配置模型连接并保存。');}
-  if(!await chrome.permissions.contains({origins:[new URL(settings.endpoint).origin+'/*']}))throw new Error('打开设置，保存并授权 API 域名后重试。');
+  const [s,retryAt]=await Promise.all([session(),modelCooldown(settings)]);
+  if(Date.now()<retryAt)throw Object.assign(new Error('模型服务暂时限流，稍后可再试。'),{code:'provider_backoff',retryAt});
+  if(!currentKey(settings,s)){
+    const {credentialStatus}=await chrome.storage.session.get('credentialStatus');
+    const reason=settings.rememberKey?(credentialStatus?.reason||'打开模型连接，恢复已保存的密钥。'):'请先保存模型连接。';
+    throw Object.assign(new Error(reason),{code:'connection_required'});
+  }
+  if(!await chrome.permissions.contains({origins:[new URL(settings.endpoint).origin+'/*']}))throw Object.assign(new Error('打开模型连接，保存并授权 API 地址。'),{code:'connection_required'});
   return s.apiKey;
 }
-async function analyze(tabId,manual=false,autoReview,expectedHash) {
+async function analyze(tabId,manual=false,autoReview,expectedHash,scope={}) {
   await restoreBeforeRequest();
   const context=await run(async()=>{
     const {settings,records,ledger}=await load();
-    const tab=await chrome.tabs.get(tabId);
-    if(!safeURL(tab.url)||tab.incognito)throw new Error('选择非隐身的普通网页后重试。');
+    if(scope.queueId){
+      const queue=await backlog.read();
+      if(queue?.id!==scope.queueId||queue.phase!=='running')return {deferred:true};
+    }
+    if(scope.connection&&scope.connection!==connectionKey(settings)){
+      if(scope.queueId)return {changed:true};
+      throw Error('模型连接已变化，请重新预览发送内容。');
+    }
+    const tab=await chrome.tabs.get(tabId).catch(()=>null);
+    if(scope.queueId&&tab?.url!==scope.url)return {skipped:'网页已关闭或跳转。'};
+    if(!safeURL(tab?.url)||tab.incognito)throw new Error('选择非隐身的普通网页后重试。');
     if(!manual&&(privateURL(tab.url)||records[tabId]?.autoReview!==true))return {skipped:'此页只接受手动分析。'};
-    const snapshot=await readSnapshot(tabId),evidence=boundedEvidence(tab,snapshot),hash=await fingerprint(evidence),prior=records[tabId],old=prior?.url===tab.url&&prior?.windowId===tab.windowId?prior:undefined;
+    const snapshot=await readSnapshot(tabId,scope.documentId).catch(error=>{
+      if(scope.queueId)return null;
+      throw error;
+    });
+    if(!snapshot)return {skipped:'网页已重新载入，未发送。'};
+    const evidence=boundedEvidence(tab,snapshot),hash=await fingerprint(evidence),prior=records[tabId];
+    const old=prior?.url===tab.url&&prior?.windowId===tab.windowId?prior:undefined;
     if(manual&&expectedHash&&expectedHash!==hash)throw new Error('页面内容已变化，重新预览发送内容后再分析。');
     if(manual&&old&&typeof autoReview==='boolean'){old.autoReview=autoReview&&!privateURL(tab.url);records[tabId]=old;if(old.autoReview){settings.autoAnalyze=true;await chrome.storage.local.set({settings});}await saveRecords(records);}
     if(!mayReevaluate(old,hash))return {skipped:'本次已保留；有新内容且冷却结束后才重新评估。'};
@@ -75,7 +179,7 @@ async function analyze(tabId,manual=false,autoReview,expectedHash) {
       const decision=shared.decision,uncertain=decision.confidence<0.7||(decision.state==='close'&&decision.confidence<0.95);
       records[tabId]={...old,tabId,url:tab.url,windowId:tab.windowId,title:tab.title,hash,evidenceRevision:snapshot.revision,provider:settings.provider,model:settings.model,endpoint:settings.endpoint,decisionAt:shared.decisionAt,decision,state:uncertain?'uncertain':decision.state==='close'?'suggested':decision.state,reason:decision.reason,autoReview:manual&&typeof autoReview==='boolean'?autoReview&&!privateURL(tab.url):old?.autoReview||false};
       if(records[tabId].autoReview){settings.autoAnalyze=true;await chrome.storage.local.set({settings});}
-      if(old?.watching&&old.observed==='done')Object.assign(records[tabId],{state:'resume',reason:'你设定的完成文案已出现，可以返回检查。'});
+      if(old?.watching&&old.observed==='done')Object.assign(records[tabId],{state:'resume',reason:watchReadyReason(old.watchAdapter)});
       await saveRecords(records);emit();return {skipped:'相同内容，已复用其他标签的判断。',cached:true};
     }
     if(old?.attemptAt>Date.now()-settings.cooldownSeconds*1000)return {skipped:'调用间隔保护生效，稍后再试。'};
@@ -88,7 +192,7 @@ async function analyze(tabId,manual=false,autoReview,expectedHash) {
     await chrome.storage.local.set({ledger:request.ledger,records});
     return {settings,tab,evidence,hash,attempt,key,reserved:request.reserved};
   });
-  if(context.skipped)return context;
+  if(context.skipped||context.changed||context.deferred)return context;
   try {
     const result=await invoke(context.settings,context.key,context.evidence);
     return await run(async()=>{
@@ -100,15 +204,82 @@ async function analyze(tabId,manual=false,autoReview,expectedHash) {
       const uncertain=result.decision.confidence<0.7||(result.decision.state==='close'&&result.decision.confidence<0.95);
       records[tabId]={...latest,hash:context.hash,provider:context.settings.provider,model:context.settings.model,endpoint:context.settings.endpoint,decisionAt:Date.now(),state:uncertain?'uncertain':result.decision.state==='close'?'suggested':result.decision.state,decision:result.decision,apiIssue:null,reason:uncertain?'模型判断仍不确定，保留此页，等待你确认。':result.decision.reason};
       // A page's explicit local completion signal remains stronger than a model guess.
-      if(latest.watching&&latest.observed==='done')Object.assign(records[tabId],{state:'resume',reason:'你设定的完成文案已出现，可以返回检查。'});
+      if(latest.watching&&latest.observed==='done')Object.assign(records[tabId],{state:'resume',reason:watchReadyReason(latest.watchAdapter)});
       await chrome.storage.local.set({records,ledger:nextLedger});emit();return {...result,uncertain};
     });
   } catch(error) {
-    if(error.status===429)await chrome.storage.session.set({backoffUntil:Date.now()+300000});
+    await rememberModelCooldown(context.settings,error);
     await run(async()=>{const {records}=await load(),r=records[tabId];if(r?.attemptAt===context.attempt.attemptAt){records[tabId]={...r,autoReview:false,apiIssue:'分析未完成，自动复查已暂停。检查连接后可手动重试。'};await saveRecords(records);emit();}});
     throw error;
   }
 }
+async function adoptSyncedConnection(id,{passphrase,passkeyKey,automatic=false}={}) {
+  const remote = await keychain.sync.info();
+  const {settings:current} = await load();
+  if (!remote || (id && remote.id!==id)) throw Error('同步连接已变化，请重新打开模型连接。');
+  const origin = credentialOrigin(remote.settings.endpoint);
+  if (automatic && origin !== credentialOrigin(current.endpoint)) {
+    throw Error('同步连接的 API 地址已改变，请在此设备重新授权。');
+  }
+  if (!await chrome.permissions.contains({origins:[origin+'/*']})) throw Error('请先授权同步连接的 API 地址。');
+  const {apiKey} = await keychain.sync.load({id:remote.id,passphrase,passkeyKey});
+  keychain.invalidate();
+  await run(async()=>{
+    const {settings:latest,records} = await load();
+    const settings={...latest,...remote.settings,rememberKey:true,credentialStorage:'sync',credentialRevision:remote.id};
+    const changed=connectionKey(settings)!==connectionKey(latest);
+    const {connectionProfiles}=await chrome.storage.local.get('connectionProfiles');
+    await chrome.storage.local.set({settings:{...settings,autoAnalyze:changed?false:settings.autoAnalyze},
+      connectionProfiles:copyProfiles(connectionProfiles,latest,settings),
+      ...(changed?{records:clearAutoReview(records)}:{})});
+    await chrome.storage.session.set({apiKey,apiKeyOrigin:origin,apiKeyRevision:remote.id,credentialPersistedOrigin:origin,
+      credentialStatus:{phase:'ready',persisted:true,storage:'sync',reason:'已连接 · Chrome 同步'}});
+  });
+  emit();
+  void resumeQueueAfterConnection().catch(()=>{});
+  return {revision:remote.id};
+}
+
+async function refreshSyncedConnection() {
+  const {settings} = await load();
+  const inSync = credentialStorage(settings)==='sync';
+  if (!inSync) {emit();return;}
+  const current = await keychain.sync.info();
+  if (current?.id===settings.credentialRevision) {
+    void keychain.restore(settings);
+    return;
+  }
+  keychain.invalidate();
+  await chrome.storage.session.remove(['apiKey','apiKeyOrigin','apiKeyRevision','credentialPersistedOrigin','credentialStatus']);
+  if (current) {
+    try { await adoptSyncedConnection(current.id,{automatic:true}); }
+    catch (error) { await keychain.status('unlock_required',error.message); }
+  } else {
+    await run(async()=>{
+      const {settings:latest} = await load();
+      await chrome.storage.local.set({settings:{...latest,rememberKey:false,credentialStorage:'session',credentialRevision:crypto.randomUUID()}});
+    });
+  }
+  emit();
+}
+
+async function verifySavedConnection(revision) {
+  return cloudRun(async()=>{
+    const {settings} = await load();
+    if (settings.credentialRevision !== revision) return;
+    const {connectionCheck:prior} = await chrome.storage.local.get('connectionCheck');
+    if (prior?.revision===revision && (prior.ok || Date.now()-prior.at<60000)) return;
+    const publish = async result=>{
+      if ((await load()).settings.credentialRevision!==revision) return;
+      await chrome.storage.local.set({connectionCheck:{revision,at:Date.now(),...result}});
+      emit();
+    };
+    await publish({pending:true});
+    try { await testAPI(); await publish({ok:true}); }
+    catch (error) { await publish({ok:false,reason:error.message}); }
+  });
+}
+
 async function testAPI() {
   await restoreBeforeRequest();
   const context=await run(async()=>{
@@ -124,16 +295,23 @@ async function testAPI() {
     await run(async()=>{const {ledger}=await load();await chrome.storage.local.set({ledger:settle(ledger,context.reserved,result.usage,context.settings)});});
     await chrome.storage.session.set({connectionCheck:{provider:context.settings.provider,at:Date.now(),ok:true}});
     return {...result,provider:context.settings.provider,elapsedMs:Date.now()-start};
-  }catch(error){if(error.status===429)await chrome.storage.session.set({backoffUntil:Date.now()+300000});throw error;}
+  }catch(error){await rememberModelCooldown(context.settings,error);throw error;}
 }
 async function connectNative(){
   if(native)return native;
   const port=chrome.runtime.connectNative('app.tabpilot.bridge');native=port;
-  nativeHello=new Promise(resolve=>{const timeout=setTimeout(resolve,1500);finishNativeHello=()=>{clearTimeout(timeout);resolve();};});
+  expectNativeHello(port);
   port.onDisconnect.addListener(()=>{
-    void chrome.runtime.lastError;
+    const linkError = chrome.runtime.lastError?.message || '';
     for(const [id,pending] of nativePending)if(pending.port===port){clearTimeout(pending.timer);pending.reject(Error('辅助程序连接中断，密钥未保存或恢复。'));nativePending.delete(id);}
-    if(native!==port)return;native=null;activeOverlay=null;nativeCapabilities.clear();finishNativeHello();mru.disconnected();chrome.storage.session.set({nativeStatus:{status:'disconnected',reason:'辅助程序连接已断开；检查安装和系统授权后重新启用。'}}).then(emit);
+    if (native !== port) return;
+    native = null;
+    activeOverlay = null;
+    nativeCapabilities.clear();
+    nativeConnection = {status:/host (?:was )?not found|no such native application/i.test(linkError) ? 'missing' : 'disconnected'};
+    finishNativeHello();
+    mru.disconnected();
+    chrome.storage.session.set({nativeStatus:{status:nativeConnection.status,reason:'Mac 助手未连接。'}}).then(emit);
   });
   port.onMessage.addListener(message=>{
     if(message.type==='credentialResult'){
@@ -148,7 +326,13 @@ async function connectNative(){
     }
     if(message.type?.startsWith('mru')){mru.receive(message);return;}
     if(Array.isArray(message.capabilities))nativeCapabilities=new Set(message.capabilities);
-    if(message.type==='status'){finishNativeHello();chrome.storage.session.set({nativeStatus:message}).then(emit);}
+    if (message.type === 'status') {
+      if (['ready','accessibility_required'].includes(message.status)) {
+        nativeConnection = {status:message.status, version:message.version};
+        finishNativeHello();
+      }
+      chrome.storage.session.set({nativeStatus:message}).then(emit);
+    }
     if(message.type==='closeVisibility'&&Number.isInteger(message.tabId))run(async()=>{
       if(activeOverlay?.port!==port||activeOverlay.visibilityId!==message.visibilityId||activeOverlay.tabId!==message.tabId)return;
       const {records}=await load(),record=records[message.tabId];
@@ -285,7 +469,9 @@ async function armClose(tabId,{manual=false}={}){
       if(nativeCapabilities.has('countdown-v1')&&nativeCapabilities.has('visibility-v1'))surface='native';
     }
   }
-  if(surface==='panel'&&(manual||!await leaseFor(record)))throw Error('请在设置中启用 macOS 标签提醒，或从可见的管理面板开始关闭提醒。');
+  if(surface==='panel'&&(manual||!await leaseFor(record)))throw Error(manual?
+    '标签栏关闭提醒需要 Mac 助手。请打开 Tab Cadence 的「设置 → macOS」，下载安装助手并开启标签提醒。':
+    '请从可见的管理面板开始关闭提醒，或在 Tab Cadence 的「设置 → macOS」安装助手并开启标签提醒。');
   const next={...record,tabId,windowId:tab.windowId,url:tab.url,title:tab.title,state:'paused',closeSurface:surface,
     closeIntent:manual?'manual':'suggestion',hash:await fingerprint(boundedEvidence(tab,snapshot)),
     evidenceRevision:snapshot.revision??0,closeAt:null,remainingMs:30000,counting:false,hoverPaused:false,
@@ -340,11 +526,121 @@ async function undoOrganization() {
   for(const group of t.created)await chrome.tabs.ungroup(group.tabIds);
   await restoreOrder(t.source);await chrome.storage.session.remove('organizationUndo');emit();return {ok:true};
 }
-const threadWorkspace=createThreadWorkspace(chrome);
+async function topicConversation(sender) {
+  const tab = await chrome.tabs.get(sender.tab.id).catch(() => null);
+  if (!tab || tab.incognito || !await threadWorkspace.status().then(state => state.enabled)) {
+    throw new Error('当前 ChatGPT 页面未获对话工具授权。');
+  }
+  return conversationAt(tab.url);
+}
+
+const topicActions = ['topicsRead','topicsOpen','topicsGenerate','topicsConnection','topicsCached'];
+const attemptKey = 'threadTopicAttempts';
+async function rememberTopicAttempt(storage, key, value) {
+  const { [attemptKey]: current = {} } = await storage.get(attemptKey);
+  const retained = Object.entries(current).filter(([id, state]) => id !== key && state.until > Date.now()).slice(-31);
+  if (value) retained.push([key,value]);
+  await storage.set({[attemptKey]:Object.fromEntries(retained)});
+}
+async function conversationTopics(action, value, sender) {
+  const conversation = await topicConversation(sender);
+  if (action === 'topicsConnection') {
+    if (!conversation) throw Error('当前会话无法打开模型连接。');
+    await chrome.tabs.create({url:chrome.runtime.getURL('sidepanel.html')+'?view=connection'});
+    return {opened:true};
+  }
+  const automatic = action === 'topicsOpen';
+  const storage = chrome.storage.local;
+  if (action === 'topicsCached') return readLatestTopicOverview(storage, conversation, value);
+  const settings = (await load()).settings;
+  let connection;
+  try {
+    connection = topicConnection(settings);
+  } catch (error) {
+    if (automatic || action === 'topicsRead') return {state:'connection',description:error.message};
+    throw error;
+  }
+  const snapshot = await topicSnapshot(value, conversation, await topicBatchLimit(storage, conversation, connection));
+  if (action === 'topicsRead') return (await readTopics(storage,snapshot,connection)).view;
+  if (automatic) {
+    const {threadWorkspacePreferences} = await storage.get('threadWorkspacePreferences');
+    if (threadWorkspacePreferences?.autoTopicSummary === false) return (await readTopics(storage,snapshot,connection)).view;
+  }
+  const key = await fingerprint({conversation,model:connection.model,revision:settings.credentialRevision||'',batches:snapshot.batches.map(batch=>batch.digest)});
+  return cloudRun(async () => {
+    const {view, parts} = await readTopics(storage, snapshot, connection);
+    if (view.state === 'ready') { await rememberTopicOverview(storage, snapshot, connection); return view; }
+    if (automatic) {
+      const previous = (await storage.get(attemptKey))[attemptKey]?.[key];
+      if (previous?.until > Date.now()) return {state:previous.state,description:previous.description};
+    }
+    await restoreBeforeRequest();
+    let attempted = false;
+    async function generate(batch) {
+      if (parts[batch.digest]) return;
+      const context = await run(async () => {
+        if (await topicConversation(sender) !== snapshot.conversation) throw new Error('已切换会话，分析已停止。');
+        const {settings, ledger} = await load();
+        if (topicConnection(settings).model !== connection.model) throw new Error('模型已更改，请重新打开概览。');
+        const key = await credentials(settings);
+        const reservation = reserve(ledger, settings, batch.evidence);
+        await storage.set({ledger: reservation.ledger});
+        return {settings, key, reservation};
+      });
+      await rememberTopicAttempt(storage,key,{state:'error',until:Date.now() + 120000,description:'上次生成尚未确认完成。'});
+      attempted = true;
+      let response;
+      try {
+        response = await requestTopics(connection, context.key, batch, snapshot.detailed);
+      } catch (error) {
+        await rememberModelCooldown(context.settings,error);
+        await run(() => settleTopicUsage(context, error.usage));
+        emit();
+        throw error;
+      }
+      await run(async () => {
+        await settleTopicUsage(context, response.usage);
+        await saveTopicBatch(storage, snapshot, connection, batch, response.result);
+        emit();
+      });
+      parts[batch.digest] = response.result;
+    }
+    try {
+      for (const batch of snapshot.batches) await generate(batch);
+      const synthesis = await topicSynthesis(snapshot, parts);
+      if (synthesis) await generate(synthesis);
+      if (attempted) await rememberTopicAttempt(storage,key,null);
+      return (await readTopics(storage, snapshot, connection)).view;
+    } catch (error) {
+      const quota = error.status === 429 || error.code === 'provider_backoff';
+      const needsConnection = error.code === 'connection_required' || [401,403].includes(error.status);
+      const result = needsConnection ? {state:'connection',description:'连接未就绪，可在模型连接中恢复。'} :
+        quota ? {state:'cooldown',description:'OpenAI 请求受限，请稍后再试。'} :
+        {state:'error',description:['invalid_topic_output','model_connection'].includes(error.code)||Number.isInteger(error.status) ? error.message : '摘要暂未生成，可重试。'};
+      if (attempted) await rememberTopicAttempt(storage,key,{...result,until:quota ? error.retryAt || Date.now()+300000 : Date.now()+120000});
+      if (automatic) return result;
+      throw error;
+    }
+  });
+}
+
+async function settleTopicUsage(context, usage) {
+  if (!usage) return;
+  const {ledger} = await load();
+  if (ledger?.date !== context.reservation.ledger.date) return;
+  await chrome.storage.local.set({ledger: settle(ledger, context.reservation.reserved, usage, context.settings)});
+}
+
+
+const threadWorkspace=createThreadWorkspace(chrome,conversationTopics);
+function isPanelSender(sender) {
+  const url=chrome.runtime.getURL?.('sidepanel.html');
+  return Boolean(url&&(sender.url===url||sender.url===url+'?view=connection'));
+}
 async function onMessage(message,sender) {
   const m=message;
   if(m.type==='threadWorkspace')return threadWorkspace.handle(m,sender);
-  const isPanel=typeof sender.url==='string'&&sender.url===chrome.runtime.getURL?.('sidepanel.html');
+  const isPanel=isPanelSender(sender);
   if(sender.tab&&!isPanel){
     if(sender.id!==chrome.runtime.id||sender.frameId>0||sender.tab.incognito)throw Error('来源不受信任。');
     if(m.type==='watchFromPage')return submitWatchFromPage(m,sender);
@@ -357,9 +653,9 @@ async function onMessage(message,sender) {
       if(!m.snapshot||sender.url&&sender.url!==sender.tab.url)return {ok:true};
       const {snapshots={}}=await session();snapshots[sender.tab.id]=m.snapshot;await chrome.storage.session.set({snapshots});
       const {records,settings}=await load(),record=records[sender.tab.id];
-      if(record?.watching&&record.url===sender.tab.url){
+      if(record?.watching&&record.url===sender.tab.url&&(!record.watchDocumentId||sender.documentId===record.watchDocumentId)){
         if(m.snapshot.observed==='done'&&record.observed!=='done'){
-          records[sender.tab.id]={...record,state:'resume',observed:'done',reason:'你设定的完成文案已出现，可以返回检查。'};
+          records[sender.tab.id]={...record,state:'resume',observed:'done',watchSuspended:null,reason:watchReadyReason(record.watchAdapter)};
           await saveRecords(records);emit();if(settings.nativeEnabled)await nativeShow(sender.tab.id).catch(()=>{});
         }else if(record.observed!=='done'&&m.snapshot.observed!==record.observed){
           const waiting=m.snapshot.observed==='waiting';
@@ -373,53 +669,116 @@ async function onMessage(message,sender) {
   }
   if(sender.id!==chrome.runtime.id)throw new Error('来源不受信任。');
   if(m.type==='state'){
-    const d=await load(),s=await session(),extra=await chrome.storage.session.get(['nativeStatus','switcherStatus','connectionCheck','organizationUndo','recentClosed','credentialStatus']),tabs=(await chrome.tabs.query({})).filter(t=>!t.incognito);
-    if(d.settings.rememberKey&&(!s.apiKey||s.apiKeyOrigin!==credentialOrigin(d.settings.endpoint)))void keychain.restore(d.settings);
+    const d=await load(),s=await session(),extra=await chrome.storage.session.get(['nativeStatus','switcherStatus','organizationUndo','recentClosed','credentialStatus']),tabs=(await chrome.tabs.query({})).filter(t=>!t.incognito);
+    const [syncConnection,{connectionCheck,connectionProfiles}] = await Promise.all([
+      keychain.sync.info().catch(()=>null),chrome.storage.local.get(['connectionCheck','connectionProfiles'])]);
+    if(d.settings.rememberKey&&!currentKey(d.settings,s))void keychain.restore(d.settings);
     const liveRecords=Object.fromEntries(tabs.filter(t=>d.records[t.id]?.url===t.url&&d.records[t.id]?.windowId===t.windowId).map(t=>[t.id,d.records[t.id]]));
-    return {...d,analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:!!s.apiKey&&s.apiKeyOrigin===new URL(d.settings.endpoint).origin,nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,connectionCheck:extra.connectionCheck,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
+    return {...d,analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:currentKey(d.settings,s),nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,syncConnection,connectionProfiles,connectionCheck:connectionCheck?.revision===d.settings.credentialRevision?connectionCheck:null,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
   }
   if(m.type==='backlogPlan'){
     const {settings}=await load();let tabs=await chrome.tabs.query({});
     if(chrome.windows.getAll){const windows=await chrome.windows.getAll({windowTypes:['normal']});const ids=new Set(windows.map(w=>w.id));tabs=tabs.filter(t=>ids.has(t.windowId));}
     const plan=backlogPlan(tabs,Number.isInteger(m.windowId)?m.windowId:null),id=crypto.randomUUID();
-    await chrome.storage.session.set({backlogPlan:{...plan,id,connectionKey:connectionKey(settings),createdAt:Date.now()}});
-    return {id,count:plan.targets.length,excluded:plan.skipped.length,sites:plan.sites,endpointOrigin:credentialOrigin(settings.endpoint)};
+    await run(async()=>{
+      const now=Date.now(),{backlogPlans={}}=await chrome.storage.session.get('backlogPlans');
+      const active=Object.entries(backlogPlans).filter(([,entry])=>now-entry.createdAt<=600000).slice(-7);
+      await chrome.storage.session.set({backlogPlans:{...Object.fromEntries(active),
+        [id]:{...plan,id,connectionKey:connectionKey(settings),createdAt:now}}});
+    });
+    return {id,count:plan.targets.length,excluded:plan.skipped.length,waiting:plan.waiting,local:plan.local,
+      unavailable:plan.unavailable,sites:plan.sites,endpointOrigin:credentialOrigin(settings.endpoint)};
   }
   if(m.type==='backlogStart'){
-    const {backlogPlan:plan}=await chrome.storage.session.get('backlogPlan'),{settings}=await load();
-    if(m.consent!==true||!plan||plan.id!==m.planId||Date.now()-plan.createdAt>600000||plan.connectionKey!==connectionKey(settings))throw Error('发送范围已变化或过期，请重新打开自动分析预览。');
-    const origins=Array.isArray(m.origins)?[...new Set(m.origins)].filter(origin=>plan.sites.some(site=>site.origin===origin)):[];
-    if(!origins.length||!await chrome.permissions.contains({origins:origins.map(origin=>origin+'/*')}))throw Error('选择网站并允许读取后再开始。');
-    await backlog.start(plan,origins,plan.connectionKey,m.autoReview===true);await chrome.storage.session.remove('backlogPlan');return {ok:true};
+    const {plan,origins}=await run(async()=>{
+      const {backlogPlans={}}=await chrome.storage.session.get('backlogPlans'),{settings}=await load();
+      const plan=backlogPlans[m.planId];
+      if(m.consent!==true||!plan||plan.id!==m.planId||Date.now()-plan.createdAt>600000||
+        plan.connectionKey!==connectionKey(settings))throw Error('发送范围已变化，请重新检查网页。');
+      const origins=Array.isArray(m.origins)?[...new Set(m.origins)]:[];
+      const available=new Set(plan.sites.map(site=>site.origin));
+      if(!origins.length||!origins.every(origin=>available.has(origin))||
+        !await chrome.permissions.contains({origins:origins.map(origin=>origin+'/*')}))throw Error('选择网站并允许读取后再开始。');
+      delete backlogPlans[m.planId];
+      await chrome.storage.session.set({backlogPlans});
+      return {plan,origins};
+    });
+    await backlog.start(plan,origins,plan.connectionKey,m.autoReview===true);
+    return {ok:true};
   }
+  if(m.type==='backlogStop'){await backlog.stop();return {ok:true};}
+  if(m.type==='backlogDismiss'){await backlog.dismiss();return {ok:true};}
   if(m.type==='backlogPause'){await backlog.pause();return {ok:true};}
   if(m.type==='backlogResume'){await backlog.resume();return {ok:true};}
+  if(m.type==='nativeCheck')return checkNative(m.refresh===true);
   if(m.type==='saveSwitcher'){
     if(typeof m.enabled!=='boolean')throw new Error('重新选择快捷切换开关后重试。');
+    if (m.enabled) await requireNativeAccessibility();
     const {settings}=await load();await chrome.storage.local.set({settings:{...settings,switcherEnabled:m.enabled}});await mru.configure(m.enabled);return {ok:true};
   }
   if(m.type==='saveSettings'){
     const {settings:previous}=await load();
-    const scopeFields=m.scope==='usage'?['cooldownSeconds','inputPrice','outputPrice','autoAnalyze']:m.scope==='connection'?['provider','endpoint','model','rememberKey']:null;
+    const scopeFields=m.scope==='usage'?['cooldownSeconds','inputPrice','outputPrice','autoAnalyze']:m.scope==='connection'?['provider','endpoint','model','rememberKey','credentialStorage']:null;
     if(m.scope==='usage'&&m.apiKey)throw Error('请在模型连接页保存密钥。');
     const requested=scopeFields?Object.fromEntries(scopeFields.filter(key=>key in (m.settings||{})).map(key=>[key,m.settings[key]])):m.settings;
     const s=cleanSettings({...previous,...requested});
+    if (m.scope==='connection' && s.provider==='decisions') Object.assign(s,{endpoint:DEFAULTS.endpoint,model:DEFAULTS.model});
     if(!['decisions','responses','chat'].includes(s.provider)||!s.model?.trim()||!Number.isFinite(s.cooldownSeconds)||s.cooldownSeconds<60||s.cooldownSeconds>3600||![s.inputPrice,s.outputPrice].every(x=>Number.isFinite(x)&&x>=0&&x<=1000))throw new Error('检查调用设置：单页间隔需为 60–3600 秒，费用单价需为有效非负数。');
     buildRequest(s,{});
     if(m.scope==='usage'){await run(async()=>{const {settings:latest}=await load();await chrome.storage.local.set({settings:{...latest,cooldownSeconds:s.cooldownSeconds,inputPrice:s.inputPrice,outputPrice:s.outputPrice,autoAnalyze:s.autoAnalyze}});});emit();return {ok:true};}
-    s.rememberKey=s.rememberKey===true;
-    const persistsNewKey=s.rememberKey&&(!!m.apiKey?.trim()||!previous.rememberKey||credentialOrigin(previous.endpoint)!==credentialOrigin(s.endpoint));
-    if(persistsNewKey&&m.rememberConsent!==true)throw Error('请勾选“记住连接”，再点击“保存到钥匙串并连接”。');
-    const prepared=await keychain.prepareSave(s,m.apiKey,previous);s.credentialRevision=crypto.randomUUID();
-    await run(async()=>{const {settings:latest}=await load();s.nativeEnabled=latest.nativeEnabled;s.switcherEnabled=latest.switcherEnabled;await chrome.storage.local.set({settings:s});if(prepared.apiKey)await chrome.storage.session.set({apiKey:prepared.apiKey,apiKeyOrigin:prepared.origin,credentialPersistedOrigin:prepared.persisted?prepared.origin:null,credentialStatus:{phase:prepared.persisted?'ready':'session',persisted:prepared.persisted,reason:prepared.persisted?'连接已实际保存到 macOS 钥匙串。':'连接在当前浏览器会话可用。'}});else if(credentialOrigin(previous.endpoint)!==prepared.origin)await chrome.storage.session.remove(['apiKey','apiKeyOrigin','credentialPersistedOrigin','credentialStatus']);});
-    if(!s.nativeEnabled&&!s.switcherEnabled&&!s.rememberKey){native?.postMessage({type:'hide'});native?.disconnect();native=null;}
-    emit();void resumeQueueAfterConnection().catch(()=>{});return {ok:true};
+    s.rememberKey = s.rememberKey === true;
+    s.credentialStorage = credentialStorage(s);
+    const persistsNewKey = s.rememberKey && (!!m.apiKey?.trim() || !previous.rememberKey ||
+      credentialStorage(previous) !== s.credentialStorage || credentialOrigin(previous.endpoint) !== credentialOrigin(s.endpoint));
+    if (persistsNewKey && m.rememberConsent !== true) throw Error('请选择密钥保存位置后再保存连接。');
+    const oldSession = await session();
+    const prepared = await keychain.prepareSave(s,m.apiKey,previous,{passphrase:m.syncPassphrase,expectedId:m.syncId,passkey:m.passkey,passkeyKey:m.passkeyKey});
+    const sameCredential = connectionKey(s)===connectionKey(previous) && prepared.apiKey===oldSession.apiKey;
+    if (s.credentialStorage!=='sync') s.credentialRevision = sameCredential && previous.credentialRevision || crypto.randomUUID();
+    await run(async () => {
+      const {settings:latest,records} = await load();
+      s.nativeEnabled = latest.nativeEnabled;
+      s.switcherEnabled = latest.switcherEnabled;
+      const {connectionCheck,connectionProfiles}=await chrome.storage.local.get(['connectionCheck','connectionProfiles']);
+      const verified=sameCredential&&connectionCheck?.ok&&connectionCheck.revision===previous.credentialRevision;
+      const changed=connectionKey(s)!==connectionKey(latest);
+      if(changed)s.autoAnalyze=false;
+      await chrome.storage.local.set({settings:s,connectionProfiles:copyProfiles(connectionProfiles,latest,s),
+        ...(changed?{records:clearAutoReview(records)}:{}),
+        ...(verified?{connectionCheck:{...connectionCheck,revision:s.credentialRevision}}:{})});
+      if (prepared.apiKey) {
+        await chrome.storage.session.set({apiKey:prepared.apiKey,apiKeyOrigin:prepared.origin,apiKeyRevision:s.credentialRevision,
+          credentialPersistedOrigin:prepared.persisted ? prepared.origin : null,
+          credentialStatus:{phase:prepared.persisted ? 'ready' : 'session',persisted:prepared.persisted,
+            storage:prepared.storage,reason:prepared.reason}});
+      } else {
+        await chrome.storage.session.remove(['apiKey','apiKeyOrigin','apiKeyRevision','credentialPersistedOrigin','credentialStatus']);
+      }
+    });
+    if(!s.nativeEnabled&&!s.switcherEnabled&&s.credentialStorage!=='keychain'){native?.postMessage({type:'hide'});native?.disconnect();native=null;}
+    emit();void resumeQueueAfterConnection().catch(()=>{});
+    if (m.scope==='connection' && m.verify===true && prepared.apiKey) await verifySavedConnection(s.credentialRevision);
+    return {ok:true};
+  }
+  if (m.type==='unlockSync') {
+    const passphrase=typeof m.syncPassphrase==='string'&&m.syncPassphrase.length<=256?m.syncPassphrase:'';
+    const passkeyKey=typeof m.passkeyKey==='string'&&m.passkeyKey.length===43?m.passkeyKey:'';
+    if (!passphrase&&!passkeyKey) throw Error('请验证此设备后恢复连接。');
+    const {revision} = await adoptSyncedConnection(m.syncId,{passphrase,passkeyKey});
+    await verifySavedConnection(revision);
+    return {ok:true};
   }
   if(m.type==='restoreKey'){const {settings}=await load();if(!await keychain.restore(settings,{interactive:true,force:true})){const {credentialStatus}=await chrome.storage.session.get('credentialStatus');throw Error(credentialStatus?.reason||'尚未保存连接。');}return {ok:true};}
-  if(m.type==='saveNative'){const {settings}=await load();await chrome.storage.local.set({settings:{...settings,nativeEnabled:m.enabled===true}});if(m.enabled){const port=await connectNative();port.postMessage({type:'hello'});}else {hideOverlay();const {records}=await load();for(const [id,record] of Object.entries(records))if(record.closeSurface==='native'&&['closing','paused'].includes(record.state))await cancelClose(Number(id));}emit();return {ok:true};}
-  if(m.type==='forgetKey'){const {settings}=await load();await keychain.forget(settings);await run(async()=>{const {settings:latest}=await load();await chrome.storage.local.set({settings:{...latest,rememberKey:false,credentialRevision:crypto.randomUUID()}});await chrome.storage.session.remove(['apiKey','apiKeyOrigin','credentialPersistedOrigin','connectionCheck','credentialStatus']);});emit();return {ok:true};}
+  if(m.type==='saveNative'){if(m.enabled===true)await requireNativeAccessibility();const {settings}=await load();await chrome.storage.local.set({settings:{...settings,nativeEnabled:m.enabled===true}});if(!m.enabled){hideOverlay();const {records}=await load();for(const [id,record] of Object.entries(records))if(record.closeSurface==='native'&&['closing','paused'].includes(record.state))await cancelClose(Number(id));}emit();return {ok:true};}
+  if(m.type==='forgetKey'){const {settings}=await load();await keychain.forget(settings);await run(async()=>{const {settings:latest}=await load();await chrome.storage.local.set({settings:{...latest,rememberKey:false,credentialStorage:'session',credentialRevision:crypto.randomUUID()}});await chrome.storage.session.remove(['apiKey','apiKeyOrigin','apiKeyRevision','credentialPersistedOrigin','connectionCheck','credentialStatus']);await chrome.storage.local.remove('connectionCheck');});emit();return {ok:true};}
   if(m.type==='snapshot'){const tab=await chrome.tabs.get(m.tabId);return boundedEvidence(tab,await readSnapshot(m.tabId));}
   if(m.type==='captureText'){return chrome.tabs.sendMessage(m.tabId,{type:'selection'});}
+  if(m.type==='watchPage'){
+    const tab=await chrome.tabs.get(m.tabId);
+    if(!trackableTab(tab)||tab.url!==m.url||backlogWaiting(tab))throw Error('等目标网页载入后再开始监听。');
+    if(!await chrome.permissions.contains({origins:[new URL(tab.url).origin+'/*']}))throw Error('请允许读取此网站。');
+    return openWatchPrompt(tab,{pick:m.pick===true,focus:true});
+  }
   if(m.type==='watch')return beginWatch(m.tabId,m.adapter);
   if(m.type==='stopWatch'){
     const {records}=await load();if(records[m.tabId])records[m.tabId]={...records[m.tabId],watching:false,state:'keep',reason:'已停止监听。'};
@@ -460,17 +819,19 @@ async function onMessage(message,sender) {
 chrome.runtime.onMessage.addListener((m,sender,reply)=>{
   if(m.type==='updated')return;
   const cloud=['analyze','testAPI'].includes(m.type);
-  const operation=cloud?cloudRun(async()=>{
-    if(sender.tab||sender.id!==chrome.runtime.id)throw new Error('此操作只能从扩展面板发起。');
-    return m.type==='testAPI'?testAPI():analyze(m.tabId,true,m.autoReview,m.expectedHash);
-  }):['saveSettings','forgetKey','restoreKey'].includes(m.type)?configRun(()=>onMessage(m,sender)):['backlogPlan','backlogStart','backlogPause','backlogResume'].includes(m.type)?onMessage(m,sender):run(()=>onMessage(m,sender));
+  const topics=m.type==='threadWorkspace'&&topicActions.includes(m.action);
+  const operation=topics?threadWorkspace.handle(m,sender):cloud?cloudRun(async()=>{
+    if(sender.id!==chrome.runtime.id||sender.tab&&!isPanelSender(sender))throw new Error('此操作只能从扩展面板发起。');
+    return m.type==='testAPI'?testAPI():analyze(m.tabId,true,m.autoReview,m.expectedHash,
+      {connection:m.expectedConnection});
+  }):['saveSettings','forgetKey','restoreKey','unlockSync'].includes(m.type)?configRun(()=>onMessage(m,sender)):['backlogPlan','backlogStart','backlogPause','backlogResume','backlogDismiss','backlogStop'].includes(m.type)?onMessage(m,sender):run(()=>onMessage(m,sender));
   operation.then(data=>reply({ok:true,data}),error=>reply({ok:false,error:error.message}));return true;
 });
 chrome.alarms.onAlarm.addListener(alarm=>{
   if(alarm.name==='backlog'){void backlog.tick().catch(()=>{});return;}
   if(alarm.name==='review') {
     cloudRun(async()=>{
-      const {settings,records}=await load();if(!settings.autoAnalyze)return;
+      const {settings,records}=await load();if(!settings.autoAnalyze||Date.now()<await modelCooldown(settings))return;
       const candidate=scheduledCandidate(await chrome.tabs.query({}),records);if(!candidate||privateURL(candidate.url))return;
       try{
         if(!await chrome.permissions.contains({origins:[new URL(candidate.url).origin+'/*']}))throw Error('网站读取授权已撤销。');
@@ -497,40 +858,117 @@ chrome.tabs.onActivated.addListener(({tabId})=>run(async()=>{
     emit();
   }
 }));
-chrome.tabs.onUpdated.addListener((tabId,change)=>{
-  if(change.status==='complete')void run(async()=>{
-    const {records}=await load(),record=records[tabId],tab=await chrome.tabs.get(tabId).catch(()=>null);
-    if(!tab||!record?.watching||tab.url!==record.url||!record.watchAdapter)return;
-    try{
-      await chrome.scripting.executeScript({target:{tabId},files:['sensor.js']});
-      await chrome.tabs.sendMessage(tabId,{type:'adapter',adapter:record.watchAdapter},{frameId:0});
-    }catch{
-      records[tabId]={...record,watching:false,state:'uncertain',reason:'需要重新右键开始监听。'};
-      await saveRecords(records);
-      emit();
+// 页面的监听随标签移动，关闭授权和计时只对原窗口有效。
+async function observeTabLifecycle(tabId, change={}) {
+  const tab=await chrome.tabs.get(tabId).catch(()=>null);
+  const {records,settings}=await load();
+  const previous=records[tabId];
+  if(!tab||!previous||tab.incognito)return;
+  if(tab.url!==previous.url){
+    await chrome.alarms.clear('close:'+tabId);
+    await chrome.tabs.sendMessage(tabId,{type:'adapter',adapter:null},{frameId:0}).catch(()=>{});
+    delete records[tabId];
+    await saveRecords(records);hideOverlay(tabId);emit();
+    return;
+  }
+  const moved=tab.windowId!==previous.windowId;
+  const closing=['closing','paused'].includes(previous.state);
+  let record=closing&&(moved||change.status==='loading'||tab.discarded||tab.audible||tab.pinned)
+    ? pardon(previous) : {...previous};
+  if(closing&&record.state==='keep'){await chrome.alarms.clear('close:'+tabId);hideOverlay(tabId);}
+  record.windowId=tab.windowId;record.title=tab.title;
+  if(record.watching&&record.watchAdapter&&record.observed!=='done'){
+    if(tab.discarded){
+      record.watchSuspended='sleeping';
+      record.watchDocumentId=null;
+      record.reason='唤醒这个标签后继续监听。';
+    }else if(change.status==='complete'||change.restored===true){
+      try{
+        const [frame]=await chrome.scripting.executeScript({target:{tabId},files:['sensor.js']});
+        const current=await chrome.tabs.get(tabId);
+        if(current.url!==record.url||current.incognito)return;
+        const target=frame?.documentId?{documentId:frame.documentId}:{frameId:0};
+        await chrome.tabs.sendMessage(tabId,{type:'adapter',adapter:record.watchAdapter,
+          wasWaiting:record.observed==='waiting'||record.state==='waiting'},target);
+        record.watchDocumentId=frame?.documentId||null;
+        record.watchSuspended=null;
+        if(previous.watchSuspended){record.state='waiting';record.reason='正在监听，完成后提醒。';}
+      }catch{
+        record.watchSuspended='unavailable';
+        record.watchDocumentId=null;
+        record.state='uncertain';
+        record.reason='暂时无法读取此页。右键「开始监听」即可恢复。';
+      }
     }
-  });
-  if(!change.url&&!change.audible)return;
-  run(async()=>{
-    await cancelClose(tabId);
-    if(change.url){await chrome.tabs.sendMessage(tabId,{type:'adapter',adapter:null}).catch(()=>{});const {records}=await load(),r=records[tabId];if(r&&r.url!==change.url){records[tabId]={...r,autoReview:false,watching:false,state:'keep',reason:'页面地址已变化，重新选择监听或分析。'};await saveRecords(records);}}
-    emit();
-  });
+  }
+  records[tabId]=record;
+  await saveRecords(records);
+  if(moved&&record.state==='resume'&&settings.nativeEnabled){
+    hideOverlay(tabId);
+    if(!tab.discarded)await nativeShow(tabId).catch(()=>{});
+  }
+  emit();
+}
+chrome.tabs.onUpdated.addListener((tabId,change)=>{
+  if(change.status==='complete'||change.discarded===false||'url' in change)void backlog.wake(tabId).catch(()=>{});
+  if(['url','status','audible','discarded','pinned','title'].some(key=>key in change))
+    void run(()=>observeTabLifecycle(tabId,change)).catch(()=>{});
 });
-chrome.tabs.onRemoved.addListener(tabId=>run(async()=>{const {records}=await load();delete records[tabId];await saveRecords(records);const {snapshots={}}=await session();delete snapshots[tabId];await chrome.storage.session.set({snapshots});await chrome.storage.session.remove('watchPrompt:'+tabId);hideOverlay(tabId);emit();}));
+chrome.tabs.onAttached?.addListener(tabId=>{ void run(()=>observeTabLifecycle(tabId)).catch(()=>{}); });
+chrome.tabs.onReplaced?.addListener((added,removed)=>{
+ void backlog.wake(removed).catch(()=>{});
+ void run(async()=>{
+  const tab=await chrome.tabs.get(added).catch(()=>null);
+  const {records}=await load(),record=records[removed];
+  if(!record)return;
+  delete records[removed];hideOverlay(removed);await chrome.alarms.clear('close:'+removed);
+  if(tab&&!tab.incognito&&tab.url===record.url){
+    const next=['closing','paused'].includes(record.state)?pardon(record):record;
+    records[added]={...next,tabId:added,windowId:tab.windowId,watchDocumentId:null};
+  }
+  await saveRecords(records);
+  if(records[added])await observeTabLifecycle(added,{restored:tab.status==='complete'});
+  emit();
+}).catch(()=>{});});
+
+chrome.tabs.onRemoved.addListener(tabId=>{void backlog.wake(tabId).catch(()=>{});return run(async()=>{const {records}=await load();delete records[tabId];await saveRecords(records);const {snapshots={}}=await session();delete snapshots[tabId];await chrome.storage.session.set({snapshots});await chrome.storage.session.remove('watchPrompt:'+tabId);hideOverlay(tabId);emit();});});
+chrome.tabs.onCreated?.addListener(()=>emit());
 chrome.runtime.onInstalled.addListener(()=>{chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true});void registerTabMenus().catch(()=>{});chrome.alarms.create('review',{periodInMinutes:5});});
 chrome.runtime.onStartup.addListener(()=>run(async()=>{
-  const {records}=await load();for(const [id,r]of Object.entries(records)){
-    records[id]={...r,autoReview:false};
-    if(['closing','paused'].includes(r.state))records[id]=pardon(records[id]);
-    if(r.watching)records[id]={...records[id],watching:false,state:'keep',reason:'浏览器已重启，选择“监听任务”以继续。'};
+  const {records:prior}=await load();
+  const tabs=(await chrome.tabs.query({})).filter(tab=>!tab.incognito);
+  const byId=new Map(tabs.map(tab=>[tab.id,tab]));
+  const byUrl=new Map();
+  for(const tab of tabs){
+    const same=byUrl.get(tab.url)||[];
+    same.push(tab);byUrl.set(tab.url,same);
   }
-  const queue=await backlog.read();if(queue){queue.autoReview=false;if(queue.phase==='running'||queue.phase==='blocked'){queue.phase='paused';queue.reason='浏览器已重启，可确认后继续本轮分析。';}await chrome.storage.local.set({analysisQueue:queue});}
-  await saveRecords(records);await chrome.alarms.create('review',{periodInMinutes:5});
+  const records={};
+  const watching=Object.values(prior).filter(record=>record.watching);
+  const restored=new Set();
+  for(const [id,record] of Object.entries(prior)){
+    let tab=byId.get(Number(id));
+    if(tab?.url!==record.url)tab=null;
+    // Chrome 重启可能换标签 ID。只在来源和目标均唯一时恢复原监听。
+    if(!tab&&record.watching&&byUrl.get(record.url)?.length===1&&
+       watching.filter(item=>item.url===record.url).length===1)tab=byUrl.get(record.url)[0];
+    if(!tab||records[tab.id])continue;
+    const next=['closing','paused'].includes(record.state)?pardon(record):record;
+    records[tab.id]={...next,tabId:tab.id,windowId:tab.windowId,autoReview:false,watchDocumentId:null};
+    if(next.watching&&tab.status==='complete')restored.add(tab.id);
+  }
+  const queue=await backlog.read();if(queue){queue.autoReview=false;if(['running','waiting','blocked'].includes(queue.phase)){queue.phase='paused';queue.reason='浏览器已重启，可确认后继续本轮分析。';}await chrome.storage.local.set({analysisQueue:queue});}
+  await saveRecords(records);
+  for(const id of restored)await observeTabLifecycle(id,{restored:true});
+  await chrome.alarms.create('review',{periodInMinutes:5});emit();
 }));
 mru.start().catch(()=>mru.report('unavailable','快捷切换未连接；在设置中重新保存后重试。'));
 
-Promise.all([chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}),chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'})]).then(async()=>{const {settings}=await load();if(settings.rememberKey)void keychain.restore(settings);}).catch(()=>{});
+chrome.storage.onChanged?.addListener((changes,area)=>{
+  if (area==='sync' && connectionSyncSlot in changes) void configRun(refreshSyncedConnection).catch(()=>{});
+});
+
+Promise.all([chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}),chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'})]).then(async()=>{await configRun(refreshSyncedConnection);const {settings}=await load();if(settings.rememberKey)void keychain.restore(settings);if(settings.nativeEnabled)await connectNative();}).catch(()=>{});
 
 chrome.windows.onFocusChanged?.addListener(windowId=>run(async()=>{await chrome.storage.session.set({chromeFocusedWindow:windowId});const {records,settings}=await load();if(windowId>=0&&settings.rememberKey)void keychain.restore(settings);for(const [id,r]of Object.entries(records))if(['closing','paused'].includes(r.state))await updateCountdownVisibility(Number(id));}));
 
@@ -541,19 +979,42 @@ chrome.permissions.onRemoved?.addListener(({origins=[]})=>{if(origins.includes('
 chrome.tabs.onRemoved.addListener(id=>{void run(()=>threadWorkspace.removeTab(id)).catch(()=>{});});
 
 
-async function beginWatch(tabId,input,expectedURL){
-  const adapter={waiting:typeof input?.waiting==='string'?input.waiting.trim():'',done:typeof input?.done==='string'?input.done.trim():''};
-  if(!adapter.waiting||!adapter.done||adapter.done===adapter.waiting||adapter.done.length>160||adapter.waiting.length>160){
-    throw Error('填写不同的等待与完成文案，每项最多 160 字。');
+function watchReadyReason(adapter){
+  if(adapter?.kind==='region')return '你选中的状态区域已变化，可以返回查看。';
+  return adapter?.kind?'页面显示任务已结束，可以返回检查。':'你设定的完成文案已出现，可以返回检查。';
+}
+async function beginWatch(tabId,input,expectedURL,documentId){
+  const tag=input?.kind;
+  const picked=tag==='region', automatic=tag==='busy'||tag==='chat';
+  const target=typeof input?.target==='string'?input.target.trim():'';
+  const baseline=typeof input?.baseline==='string'?input.baseline.trim():'';
+  let adapter;
+  if(picked||automatic){
+    if(tag!=='chat'&&(!target||target.length>1024)||picked&&(!baseline||baseline.length>160)){
+      throw Error('请选择页面中一小块可见的状态文字。');
+    }
+    adapter=tag==='chat'?{kind:tag}:picked?{kind:tag,target,baseline}:{kind:tag,target};
+  }else{
+    const waiting=typeof input?.waiting==='string'?input.waiting.trim():'';
+    const done=typeof input?.done==='string'?input.done.trim():'';
+    if(!waiting||!done||done===waiting||waiting.length>160||done.length>160){
+      throw Error('填写不同的等待与完成文案，每项最多 160 字。');
+    }
+    adapter={waiting,done};
   }
   const tab=await chrome.tabs.get(tabId);
   if(!safeURL(tab.url)||tab.incognito||expectedURL&&tab.url!==expectedURL)throw Error('页面已变化。请在目标网页重新开始监听。');
   await cancelClose(tabId);
-  await chrome.tabs.sendMessage(tabId,{type:'adapter',adapter},{frameId:0});
+  await chrome.tabs.sendMessage(tabId,{type:'adapter',adapter},documentId?{documentId}:{frameId:0});
   const {records,adapters}=await load(),url=new URL(tab.url),scope=url.origin+url.pathname;
   records[tabId]={...records[tabId],tabId,windowId:tab.windowId,title:tab.title,url:tab.url,state:'waiting',
-    observed:null,watching:true,watchAdapter:adapter,reason:'正在本地监听，完成后提醒。'};
-  await chrome.storage.local.set({records,adapters:[...adapters.filter(item=>item.scope!==scope),{...adapter,scope}].slice(-100)});
+    observed:null,watching:true,watchAdapter:adapter,watchSuspended:null,watchDocumentId:documentId||null,
+    reason:'正在本地监听，完成后提醒。'};
+  if(automatic)await saveRecords(records);
+  else{
+    const rule=picked?{kind:tag,target}:adapter;
+    await chrome.storage.local.set({records,adapters:[...adapters.filter(item=>item.scope!==scope),{...rule,scope}].slice(-100)});
+  }
   emit();
   return {ok:true};
 }
@@ -564,7 +1025,8 @@ async function submitWatchFromPage(message,sender){
     ||prompt.documentId!==sender.documentId||Date.now()-prompt.at>600000){
     throw Error('监听窗口已过期。请用右键菜单重新打开。');
   }
-  const result=await beginWatch(sender.tab.id,message.adapter,prompt.url);
+  if(message.adapter?.kind&&message.adapter.kind!=='region')throw Error('请重新选择状态区域。');
+  const result=await beginWatch(sender.tab.id,message.adapter,prompt.url,prompt.documentId);
   await chrome.storage.session.remove(key);
   return result;
 }
@@ -587,19 +1049,27 @@ async function registerTabMenus(){
     try{await createMenu({...watch,contexts:['page','selection']});}catch{}
   }
 }
-async function openWatchPrompt(tab){
-  if(!tab.active)await chrome.tabs.update(tab.id,{active:true});
-  await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js']});
-  const [{documentId}]=await chrome.scripting.executeScript({target:{tabId:tab.id},files:['watch-prompt.js']});
-  const {text:selection=''}=await chrome.tabs.sendMessage(tab.id,{type:'selection'},{documentId}).catch(()=>({}));
+async function openWatchPrompt(tab,{pick=false,focus=false}={}){
+  const [{documentId}]=await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js','watch-prompt.js']});
   const current=await chrome.tabs.get(tab.id);
   if(current.url!==tab.url)throw Error('网页已变化。请重新开始监听。');
   const url=new URL(current.url),{adapters}=await load(),scope=url.origin+url.pathname;
+  const saved=adapters.find(item=>item.scope===scope);
+  const detection=pick?null:await chrome.tabs.sendMessage(tab.id,{type:'watchRule',saved},{documentId});
+  if(detection?.adapter){
+    await beginWatch(tab.id,detection.adapter,current.url,documentId);
+    await chrome.tabs.sendMessage(tab.id,{type:'showWatchNotice',text:'已开始监听。'},{documentId}).catch(()=>{});
+    return {listening:true};
+  }
+  if(!current.active)await chrome.tabs.update(tab.id,{active:true});
+  if(focus)await chrome.windows.update(tab.windowId,{focused:true});
+  const {text:selection=''}=await chrome.tabs.sendMessage(tab.id,{type:'selection'},{documentId}).catch(()=>({}));
   const token=crypto.randomUUID(),key='watchPrompt:'+tab.id;
   await chrome.storage.session.set({[key]:{token,url:current.url,documentId,at:Date.now()}});
   try{
-    await chrome.tabs.sendMessage(tab.id,{type:'openWatchPrompt',token,selection,adapter:adapters.find(item=>item.scope===scope)},{documentId});
+    await chrome.tabs.sendMessage(tab.id,{type:'openWatchPrompt',token,selection,adapter:saved},{documentId});
   }catch(error){await chrome.storage.session.remove(key);throw error;}
+  return {listening:false};
 }
 async function showMenuError(tab,error){
   await chrome.action.setBadgeText({tabId:tab.id,text:'!'}).catch(()=>{});

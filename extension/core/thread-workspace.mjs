@@ -2,6 +2,11 @@
 const origin='https://chatgpt.com';
 const match=origin+'/*';
 const id='tabpilot-thread-workspace';
+const historyId='tabcadence-thread-history';
+const scripts=[
+ {id:historyId,matches:[match],js:['thread-history.js'],allFrames:false,runAt:'document_start',world:'MAIN',persistAcrossSessions:true},
+ {id,matches:[match],js:['threaddeck.js'],allFrames:false,runAt:'document_idle',world:'ISOLATED',persistAcrossSessions:true},
+];
 const flag='threadWorkspaceEnabled',prefs='threadWorkspacePreferences',cache='threadWorkspaceCache';
 const settingsKey='prompt-rail:settings';
 const cacheKey=key=>typeof key==='string'&&key.length<=420&&/^prompt-rail:cache:(owner-v2:chatgpt%3Achatgpt\.com%2F|chatgpt:)/.test(key);
@@ -13,20 +18,26 @@ function bounded(map,key,value,limit){
  while(entries.length>32||bytes(entries)>limit)entries.shift();
  return Object.fromEntries(entries);
 }
-export function createThreadWorkspace(chrome){
+export function createThreadWorkspace(chrome, handleTopics){
  const {local,session}=chrome.storage;
  const grants=()=>chrome.permissions.contains({origins:[match]});
  const status=async()=>({enabled:(await local.get(flag))[flag]===true&&await grants()});
- const registered=()=>chrome.scripting.getRegisteredContentScripts({ids:[id]});
+ const registered=()=>chrome.scripting.getRegisteredContentScripts({ids:[historyId,id]});
  async function register(){
-  const spec={id,matches:[match],js:['threaddeck.js'],allFrames:false,runAt:'document_idle',world:'ISOLATED',persistAcrossSessions:true};
-  if((await registered()).length)await chrome.scripting.updateContentScripts([spec]);
-  else await chrome.scripting.registerContentScripts([spec]);
+  const current=new Set((await registered()).map(script=>script.id));
+  const present=scripts.filter(script=>current.has(script.id));
+  const missing=scripts.filter(script=>!current.has(script.id));
+  if(present.length)await chrome.scripting.updateContentScripts(present);
+  if(missing.length)await chrome.scripting.registerContentScripts(missing);
  }
- async function unregister(){if((await registered()).length)await chrome.scripting.unregisterContentScripts({ids:[id]});}
+ async function unregister(){
+  const current=await registered();
+  if(current.length)await chrome.scripting.unregisterContentScripts({ids:current.map(script=>script.id)});
+ }
  async function refreshTabs(enabled){
   const tabs=await chrome.tabs.query({url:[match]});
   const results=await Promise.allSettled(tabs.filter(t=>Number.isInteger(t.id)&&!t.incognito&&!t.discarded).map(async t=>{
+   if(enabled)await chrome.scripting.executeScript({target:{tabId:t.id},files:['thread-history.js'],world:'MAIN'});
    const ping=()=>chrome.tabs.sendMessage(t.id,{type:'THREAD_PILOT_SWITCH',enabled},{frameId:0});
    try{await ping();return;}catch{if(!enabled)return;}
    await chrome.scripting.executeScript({target:{tabId:t.id},files:['threaddeck.js'],world:'ISOLATED'});
@@ -45,7 +56,8 @@ export function createThreadWorkspace(chrome){
   return {enabled,refreshNeeded:await refreshTabs(enabled)};
  }
  function trustedPanel(sender){
-  return sender.id===chrome.runtime.id&&sender.url===chrome.runtime.getURL('sidepanel.html');
+  const panel = chrome.runtime.getURL('sidepanel.html');
+  return sender.id===chrome.runtime.id&&(sender.url===panel||sender.url===panel+'?view=connection');
  }
  function trustedPage(sender){
   if(sender.id!==chrome.runtime.id||sender.frameId!==0||!Number.isInteger(sender.tab?.id)||sender.tab.incognito)return false;
@@ -68,6 +80,20 @@ export function createThreadWorkspace(chrome){
    await session.set({[tabSlot]:bounded(previous,m.key,m.value,1024000)});return true;
   }
   if(!active)throw Error('对话工作台未启用。');
+  if(m.action==='chatBackoff'){
+   const now=Date.now(),key='threadChatBackoffUntil';
+   const previous=(await session.get(key))[key]||0;
+   if(!Number.isFinite(m.value)||m.value<=now||m.value>now+86400000)return previous;
+   const until=Math.max(previous,m.value);
+   if(until>previous){
+    await session.set({[key]:until});
+    const tabs=await chrome.tabs.query({url:[match]});
+    void Promise.allSettled(tabs.filter(tab=>!tab.incognito&&!tab.discarded&&tab.id!==sender.tab.id).map(tab=>
+      chrome.tabs.sendMessage(tab.id,{type:'THREAD_PILOT_CHAT_BACKOFF',until},{frameId:0})));
+   }
+   return until;
+  }
+  if(['topicsRead','topicsOpen','topicsGenerate','topicsConnection','topicsCached'].includes(m.action)&&handleTopics)return handleTopics(m.action,m.value,sender);
   if(m.key===settingsKey){
    if(m.action==='get')return (await local.get(prefs))[prefs]||null;
    if(m.action==='set'&&m.value&&typeof m.value==='object'&&!Array.isArray(m.value)&&bytes(m.value)<=16384){await local.set({[prefs]:m.value});return true;}
@@ -86,5 +112,5 @@ export function createThreadWorkspace(chrome){
   if(!chrome.scripting?.getRegisteredContentScripts)return;
   if((await status()).enabled)await register();else await unregister();
  }
- return {handle,reconcile,revoke:()=>setEnabled(false),removeTab:tabId=>session.remove('threadWorkspaceTab:'+tabId)};
+ return {handle,status,reconcile,revoke:()=>setEnabled(false),removeTab:tabId=>session.remove('threadWorkspaceTab:'+tabId)};
 }

@@ -23,10 +23,38 @@ export function decodeResponse(provider,data) {
   let parsed;try{parsed=JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{throw new Error('模型没有返回有效 JSON；换用支持结构化输出的模型后重试。');}
   return parseDecision(parsed);
 }
+function retryDelay(value, now) {
+  if (!value) return 0;
+  if (/^\d+(?:\.\d+)?$/.test(value)) return Number(value) * 1000;
+  return Math.max(0, Date.parse(value) - now) || 0;
+}
+
+function resetDelay(value) {
+  if (!value || !/^(?:\d+(?:\.\d+)?(?:ms|s|m|h|d))+$/.test(value)) return 0;
+  const unit = {ms:1,s:1000,m:60000,h:3600000,d:86400000};
+  return Array.from(value.matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h|d)/g))
+    .reduce((total,[,amount,name])=>total + Number(amount) * unit[name],0);
+}
+
+function rateLimitDeadline(headers, now = Date.now()) {
+  const get = name => headers?.get(name)?.trim();
+  const provider = retryDelay(get('retry-after'),now);
+  const resets = ['requests','tokens'].map(name=>get('x-ratelimit-remaining-'+name) === '0'
+    ? resetDelay(get('x-ratelimit-reset-'+name)) : 0);
+  return now + (Math.max(provider,...resets) || 300000);
+}
+
+export async function postModelRequest(request,key,fetcher=fetch,timeoutMs=20000) {
+  if(!key)throw new Error('尚未填写 API Key；打开设置，在本机填写后重试。');
+  let response;try{response=await fetcher(request.url,{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(request.body),redirect:'error',signal:AbortSignal.timeout(timeoutMs)});}catch(cause){
+    const timeout=cause?.name==='TimeoutError'||cause?.name==='AbortError';
+    throw Object.assign(new Error(timeout?'OpenAI 响应超时，可重试。':'OpenAI 连接未完成，可重试。'),{code:'model_connection'});
+  }
+  if(!response.ok){const error=new Error(response.status===429?'API 额度或速率受限；检查账户余额，冷却后手动重试。':response.status===401?'服务商未接受当前密钥；请检查账户授权或密钥有效性。本机保存的连接不会被清除。':`API 返回 ${response.status}；检查模型、协议和权限后重试。`);error.status=response.status;if(response.status===429)error.retryAt=rateLimitDeadline(response.headers);throw error;}
+  return response.json();
+}
 export async function invoke(settings,key,evidence,fetcher=fetch) {
   if(!key)throw new Error('尚未填写 API Key；打开设置，在本机填写后重试。');
-  const request=buildRequest(settings,evidence);
-  let response;try{response=await fetcher(request.url,{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(request.body),redirect:'error',signal:AbortSignal.timeout(20000)});}catch{throw new Error('连接未完成；检查网络和 API 地址后手动重试。本次不会自动重发。');}
-  if(!response.ok){const error=new Error(response.status===429?'API 额度或速率受限；检查账户余额，冷却后手动重试。':response.status===401?'服务商未接受当前密钥；请检查账户授权或密钥有效性。本机保存的连接不会被清除。':`API 返回 ${response.status}；检查模型、协议和权限后重试。`);error.status=response.status;throw error;}
-  const data=await response.json();return {decision:decodeResponse(settings.provider,data),usage:data.usage||null};
+  const data=await postModelRequest(buildRequest(settings,evidence),key,fetcher);
+  return {decision:decodeResponse(settings.provider,data),usage:data.usage||null};
 }

@@ -14,7 +14,7 @@
   // Backward-compatible guard: prevents a hot-updated v0.5 tab from loading both products.
   window.__PROMPT_RAIL_LOADED__ = true;
 
-  const APP_VERSION = '1.11.0';
+  const APP_VERSION = '1.13.0';
   const PRODUCT_NAME = '对话工作台';
   const STORAGE_PREFIX = 'prompt-rail:';
   const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;
@@ -43,9 +43,8 @@
   const NAVIGATION_SETTLE_TIMEOUT_MS = 900;
   const REVIEW_SELECTION_MIN_CHARS = 1;
   const REVIEW_SELECTION_MAX_CHARS = 32768; // save limit; larger selections keep an explanatory action
-  const NATIVE_SELECTION_TOOLBAR_WAIT_MS = 8000;
-  const NATIVE_SELECTION_TOOLBAR_FALLBACK_MS = 260;
-  const NATIVE_SELECTION_TOOLBAR_HEARTBEAT_MS = 180;
+  const NATIVE_SELECTION_TOOLBAR_FALLBACK_MS = 150;
+  const NATIVE_SELECTION_TOOLBAR_DISCOVERY_MS = 900;
   const NATIVE_SELECTION_PENDING_TTL_MS = 30000;
   const NATIVE_SELECTION_TOOLBAR_MAX_DISTANCE_PX = 230;
   const QUEUE_POLL_MS = 80;
@@ -87,6 +86,11 @@
     more: '<circle cx="5" cy="10" r=".96"/><circle cx="10" cy="10" r=".96"/><circle cx="15" cy="10" r=".96"/>',
     close: '<path d="m6 6 8 8M14 6l-8 8"/>',
     check: '<path d="m5.25 10.2 3.05 3.05 6.45-6.55"/>',
+    search: '<circle cx="8.5" cy="8.5" r="4.75"/><path d="m12 12 3.5 3.5"/>',
+    pin: '<path d="m10 11-5 5m5-12 6 6-3 1.25-1.5 3.25-6-6L9 7z"/>',
+    settings: '<path d="M6 4v12m8-12v12M3.75 8h4.5m3.5 4h4.5"/>',
+    annotation: '<path d="M4.25 3.75h11.5v8.5H9l-3.75 3v-3H4.25zM10 6.5v3M8.5 8h3"/>',
+    chevron: '<path d="m8 5.5 4.5 4.5L8 14.5"/>',
     clock: '<circle cx="10" cy="10" r="6.25"/><path d="M10 6.55v3.75l2.55 1.55"/>',
   });
 
@@ -107,6 +111,8 @@
     allowBackgroundQueue: true,
     showQueueDock: true,
     navigationStyle: 'rail',
+    pinchTopics: true,
+    autoTopicSummary: true,
     rightOffset: 12,
     hideBelowWidth: 720,
     sites: Object.freeze({
@@ -223,9 +229,9 @@
   let selectionActionEl = null;
   let nativeSelectionButtonEl = null;
   let nativeSelectionToolbarEl = null;
+  let nativeSelectionFallbackTimer = null;
+  let nativeSelectionSearchTimer = null;
   let nativeSelectionObserver = null;
-  let nativeSelectionHeartbeatTimer = null;
-  let nativeSelectionRecentRoots = new Map();
   let nativeSelectionGestureStartedAt = 0;
   let nativeSelectionSuppressionObserver = null;
   let nativeSelectionSuppressionRaf = null;
@@ -489,7 +495,7 @@
   const TD_READ_LOCK='threaddeck:manual-read:v1';
   const TD_READ_PERMIT=Symbol('manual-read-permit');
   const TD_READ_LIMIT=8*1024*1024, TD_READ_GAP=60000;
-  const tdReads={own:0,job:null,snap:null,pending:null,timer:null,observing:0,seq:0,
+  const tdReads={own:0,job:null,snap:null,pending:[],seen:new Set(),graph:null,timer:null,observing:0,seq:0,
     appliedSeq:0,appliedEpoch:-1,token:'',tokenUntil:0,localUntil:0,storageOK:true,
     additional:0,observed:0,adopted:0,denied:0,limited:0,skipped:0,lastReason:''};
   function tdReadRetryAt(value,now=Date.now()) {
@@ -514,7 +520,7 @@
     return {mode:'local-only',additionalRequests:0};
   }
   function tdReadWaitText() {
-    return '仅显示 ChatGPT 已加载的内容。加载更早消息后，可刷新本地大纲。';
+    return '等待 ChatGPT 加载消息。可以在对话里往上滚动，已加载的内容会自动加入大纲。';
   }
   function tdReadResource(input,init={}) {
     const {method,url}=requestMethodAndUrl(input,init);if(method!=='GET')return null;
@@ -523,23 +529,42 @@
     }catch{return null;}
   }
   function tdReadBusy(){return tdSelectionBusy()||tdSendingCritical()||!!tdEditor.active;}
+  function tdQueueHistory(pending) {
+    if (pending.observerSequence) {
+      if (tdReads.seen.has(pending.observerSequence)) return;
+      tdReads.seen.add(pending.observerSequence);
+      if (tdReads.seen.size > 128) tdReads.seen.delete(tdReads.seen.values().next().value);
+    }
+    tdReads.pending.push(pending);
+    while (tdReads.pending.length > 8) tdReads.pending.shift();
+    tdReadAdoptLater();
+  }
   function tdReadAdoptLater(delay=100) {
-    if(tdReads.timer!==null||!tdReads.pending)return;
-    tdReads.timer=setTimeout(()=>{
-      tdReads.timer=null;
-      if(!settings.enabled){tdReads.pending=null;return;}
-      if(tdReadBusy()){tdReadAdoptLater(180);return;}
-      const pending=tdReads.pending;tdReads.pending=null;
-      if(!pending||pending.epoch!==td.epoch||pending.resource.key!==getChatGptConversationResource()?.key)return;
+    if (tdReads.timer !== null || !tdReads.pending.length) return;
+    tdReads.timer = setTimeout(async () => {
+      tdReads.timer = null;
+      if (!settings.enabled) { tdReads.pending.length = 0; return; }
+      if (tdReadBusy() || chatGptApiFetchPromise) { tdReadAdoptLater(180); return; }
+      const pending = tdReads.pending.shift();
       try {
-        const data=unwrapChatGptConversationPayload(JSON.parse(pending.text));
-        if(!tdPayloadBelongs(data,pending.resource))return;
-        if(!isPlainObject(data?.mapping)&&!Array.isArray(data?.linear_conversation))return;
-        if(tdReads.snap?.resource.key===pending.resource.key&&tdReads.snap.startedAt>pending.startedAt)return;
-        tdReads.snap={...pending,text:null,data,seq:++tdReads.seq};
-        void ensureChatGptConversationData({reason:'observed-host-response'});
-      }catch(error){tdLog('observed-json-unavailable',error?.name);}
-    },delay);
+        if (!pending || pending.epoch !== td.epoch ||
+            pending.resource.key !== getChatGptConversationResource()?.key) return;
+        const data = unwrapChatGptConversationPayload(JSON.parse(pending.text));
+        if (!tdPayloadBelongs(data, pending.resource)) return;
+        if (!isPlainObject(data?.mapping) && !Array.isArray(data?.linear_conversation)) return;
+        const previous = tdReads.snap;
+        const complete = tdSnapshotInfo(data, pending.resource).complete;
+        // 顺序只用来阻止旧整份会话覆盖新版。分页可乱序到达。
+        if (complete && previous?.resource.key === pending.resource.key &&
+            previous.complete && previous.startedAt > pending.startedAt) return;
+        tdReads.snap = {...pending, text:null, data, complete, seq:++tdReads.seq};
+        await ensureChatGptConversationData({reason:'observed-host-response'});
+      } catch (error) {
+        tdLog('observed-json-unavailable',error?.name);
+      } finally {
+        tdReadAdoptLater();
+      }
+    }, delay);
   }
   function tdObserveRead(response,resource,meta) {
     if(!settings.enabled||!resource)return;
@@ -559,8 +584,8 @@
           const {done,value}=await reader.read();
           if(meta.epoch!==td.epoch||resource.key!==getChatGptConversationResource()?.key)return;
           if(done){parts.push(decoder.decode());
-            if(!tdReads.pending||meta.startedAt>=tdReads.pending.startedAt)tdReads.pending={...meta,resource,text:parts.join('')};
-            tdReadAdoptLater();return;
+            tdQueueHistory({...meta,resource,text:parts.join('')});
+            return;
           }
           bytes+=value?.byteLength||0;if(bytes>TD_READ_LIMIT){tdReads.skipped++;return;}
           parts.push(decoder.decode(value,{stream:true}));
@@ -570,6 +595,62 @@
     })();
   }
   async function tdManualRead(){throw tdReadDenied('local-only');}
+  const tdReceiptBindings = new Map();
+  let tdChatBackoffUntil = 0;
+  function tdChatBackoff(until) {
+    if (!Number.isFinite(until) || until<=Date.now() || until>Date.now()+86400000) return;
+    tdChatBackoffUntil=Math.max(tdChatBackoffUntil,until);
+    tdWake(0);
+  }
+  function tdArmReceiptObserver(tx) {
+    const nonce = crypto.randomUUID();
+    if (!crypto.subtle) return;
+    const hash = crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalizeInlineReviewText(tx.payload)))
+      .then(bytes=>Array.from(new Uint8Array(bytes), byte=>byte.toString(16).padStart(2,'0')).join('')).catch(()=>'');
+    tdReceiptBindings.set(nonce,{tx,hash});
+    setTimeout(()=>tdReceiptBindings.delete(nonce),30000);
+    document.dispatchEvent(new CustomEvent('tab-cadence:send-arm',{detail:nonce}));
+  }
+  function tdListenHistory() {
+    document.addEventListener('tab-cadence:chat-backoff',event=>{
+      const value=event.detail, resource=getChatGptConversationResource();
+      if(!tdEnabled()||value?.id!==resource?.id) return;
+      tdChatBackoff(value.until);
+      void pilotRpc('chatBackoff',null,value.until).then(tdChatBackoff).catch(()=>{});
+    });
+    void pilotRpc('chatBackoff').then(tdChatBackoff).catch(()=>{});
+    document.addEventListener('tab-cadence:sent-id', async event => {
+      const value=event.detail;
+      const binding=tdReceiptBindings.get(value?.nonce);
+      if (!binding || typeof value.id!=='string' || value.id.length>220 ||
+          typeof value.hash!=='string' || !/^[a-f0-9]{64}$/.test(value.hash)) return;
+      const {tx,hash}=binding;
+      const {id,hash:observed,nonce}=value;
+      if (observed!==await hash || !tdAlive(tx.scope) || !tx.clicked) return;
+      const receipt=tx.item.sendReceipt;
+      if (!receipt || receipt.ackedAt || receipt.baselineIds.includes(id) || receipt.requestIds.length) return;
+      // 仍需以新出现的对应用户消息确认上屏，HTTP 成功只补足发送身份。
+      receipt.requestIds=[id];
+      receipt.requestState='ok';
+      tdReceiptBindings.delete(nonce);
+      saveWorkflowState();
+      td.activityDirty=true;
+      tdWake(0);
+    });
+    document.addEventListener('tab-cadence:history', event => {
+      if (!tdEnabled()) return;
+      const value=event.detail;
+      const resource=getChatGptConversationResource();
+      if (resource?.kind!=='conversation' || value?.id!==resource.id ||
+          typeof value.text!=='string' || value.text.length>TD_READ_LIMIT ||
+          !Number.isFinite(value.startedAt) || value.startedAt>Date.now()) return;
+      // 页面提供的历史只用于索引和概览，不能确认发送回执或解锁自动续发。
+      tdQueueHistory({resource:{...resource,partial:value.partial===true},text:value.text,startedAt:value.startedAt,
+        epoch:td.epoch,serial:tdTurn.serial,outlineOnly:true,observerSequence:value.sequence});
+    });
+  }
+  const tdRequestLoadedHistory=()=>document.dispatchEvent(new Event('tab-cadence:history-request'));
+
   const tdInteraction={skipped:0,fullMutationPasses:0,resumes:0,dirty:false,dirtyHighlights:false,dirtyCache:false};
   function tdDeferInteraction(reason='') {
     if(!tdSelectionBusy())return false;
@@ -656,8 +737,19 @@
     tdSafeTask('fallback-outline',()=>enforceAnswerOutlines(entries));
     tdSafeTask('fallback-render',()=>renderEntries(true));
   }
-  async function tdRecoverIndex(allowNetwork=false) {
-    if(!settings.enabled||!isCurrentPageEligible())return false; await refreshNow('local-recovery'); return true;
+  async function tdRecoverIndex(loadEarlier = false) {
+    if (!settings.enabled || !isCurrentPageEligible()) return false;
+    tdRequestLoadedHistory();
+    await ensureChatGptConversationData({reason:'local-recovery'});
+    await refreshNow('local-recovery');
+    if (loadEarlier) await tdOutlineLoadHistory(true);
+    return true;
+  }
+  function tdSetOutlinePinned(pinned) {
+    navigatorEl.dataset.pinned = String(pinned);
+    shadowRoot.querySelector('.td-pin')?.setAttribute('aria-pressed',String(pinned));
+    if (pinned) void tdOutlineLoadHistory();
+    else tdOutlineStopHistory();
   }
   function tdRecoveryStatus() {
     if(!shadowRoot||!navigatorEl||!railEl)return;
@@ -668,7 +760,7 @@
       const title=document.createElement('strong');title.className='td-recovery-title';
       const text=document.createElement('div');text.className='td-recovery-text';text.setAttribute('role','status');
       const controls=document.createElement('div');controls.className='td-recovery-actions';
-      for(const [label,fn] of [['刷新本地大纲',()=>tdRecoverIndex()],['选取正文诊断',()=>tdPickBodyDiagnostic()]]){
+      for(const [label,fn] of [['刷新大纲',()=>tdRecoverIndex(true)]]){
         const b=document.createElement('button');b.type='button';b.className='dialog-button';b.textContent=label;
         b.addEventListener('click',()=>{void fn();});controls.appendChild(b);
       }
@@ -692,13 +784,14 @@
     panel.hidden=!empty;navigatorEl.dataset.empty=String(empty);
     const old=railEl.querySelector('.td-recovery-trigger');
     if(!empty){old?.remove();return;}
-    const loading=chatGptApiStatus==='loading',cooldown=tdReadState();
+    const capture = tdHistory.capture;
+    const loading=chatGptApiStatus==='loading' || (capture && tdAlive(capture.scope) && capture.history.running),cooldown=tdReadState();
     panel.querySelector('.td-recovery-title').textContent=loading?'正在读取对话目录':chatGptApiStatus==='error'?'目录读取失败':'暂未取得会话目录';
     const request=tdHealth.requests.at(-1);
     panel.querySelector('.td-recovery-text').textContent=loading?'正在识别已加载的消息':tdReadWaitText();
-    const retry=panel.querySelector('button');retry.disabled=loading||Math.max(cooldown.until,cooldown.next)>Date.now();retry.textContent=loading?'读取中…':'补读一次';
-    const subtitle=shadowRoot.querySelector('.panel-subtitle');if(subtitle)subtitle.textContent=loading?'读取中':'需要核对页面适配';
-    if(!old){const b=document.createElement('button');b.type='button';b.className='td-recovery-trigger';b.textContent='⋮';b.title='对话目录状态';b.setAttribute('aria-label','对话目录状态');b.addEventListener('click',()=>{navigatorEl.dataset.pinned=String(navigatorEl.dataset.pinned!=='true');});railEl.appendChild(b);}
+    const retry=panel.querySelector('button');retry.disabled=Boolean(loading)||Math.max(cooldown.until,cooldown.next)>Date.now();retry.textContent=loading?'读取中…':'刷新大纲';
+    const subtitle=shadowRoot.querySelector('.panel-subtitle');if(subtitle)subtitle.textContent=loading?'读取中':'暂无可定位的消息';
+    if(!old){const b=document.createElement('button');b.type='button';b.className='td-recovery-trigger';b.textContent='⋮';b.title='对话目录状态';b.setAttribute('aria-label','对话目录状态');b.addEventListener('click',()=>tdSetOutlinePinned(navigatorEl.dataset.pinned!=='true'));railEl.appendChild(b);}
   }
 
   // Read-only identity discovery. A renamed data attribute is accepted ONLY when
@@ -905,6 +998,8 @@
 
   function tdAnswerCompletionEvidence(section) {
     if (!(section instanceof HTMLElement) || !section.isConnected || isReasoningOrCollapsedOutlineContext(section)) return '';
+    const imageTurn = tdGeneratedImageTurn(section);
+    if (imageTurn) return imageTurn.matches('[data-talvt-turn-state="complete"]') ? 'image-turn-terminal-state' : '';
     const terminal = '[data-state="complete"],[data-state="completed"],[data-status="complete"],[data-status="completed"],[data-status="finished_successfully"],[data-turn-status="completed"],[data-turn-status="complete"],[data-talvt-turn-state="complete"]';
     if (section.matches(terminal)) return 'message-terminal-state';
     const candidates = [section];
@@ -932,19 +1027,40 @@
         if (!isElementVisible(control) || control.closest('#threaddeck-host,#prompt-rail-host,pre,code,details,[hidden],[aria-hidden="true"],[data-user-message-bubble]')) continue;
         const hint = normalizeText([control.getAttribute('data-testid'), control.getAttribute('data-test-id'),
           control.getAttribute('data-action'), control.getAttribute('aria-label'), control.getAttribute('title')].filter(Boolean).join(' ')).toLowerCase();
-        if (/good-response-turn-action-button|bad-response-turn-action-button|thumbs[- ](?:up|down)|(?:good|bad|helpful|unhelpful)[ -]response|response[-_](?:good|bad|like|dislike)|(?:like|dislike)[-_]response|这个回答(?:有帮助|没有帮助)|回答(?:有帮助|无帮助)|赞同回答|反对回答/.test(hint)) return 'answer-feedback-controls';
+        if (/good-response-turn-action-button|bad-response-turn-action-button|thumbs[- ](?:up|down)|(?:good|bad|helpful|unhelpful)[ -]response|response[-_](?:good|bad|like|dislike)|(?:like|dislike)[-_]response|这个回答(?:有帮助|没有帮助)|回答(?:有帮助|无帮助)|赞同回答|反对回答|^(?:评价回复|rate this response|rate response)$/.test(hint)) return 'answer-feedback-controls';
       }
     }
     return '';
   }
 
+  function tdAnswerImages(section, content) {
+    const production = '[data-testid*="imagegen"],[data-testid*="generated-image"],[data-message-content]';
+    return tdDomQueryAll(section, 'img').filter(image => {
+      const authored = content?.contains(image);
+      const gallery = image.closest(production);
+      if (!authored && !gallery) return false;
+      // 打开大图的按钮也是回答内容。头像、引用小图和操作栏不参与判断。
+      if (image.closest('nav,aside,[hidden],[aria-hidden="true"],[data-testid*="citation"],[data-testid*="avatar"]'))
+        return false;
+      if (!gallery && image.closest('button') && Math.max(image.naturalWidth,image.width) < 64) return false;
+      return !isReasoningOrCollapsedOutlineContext(image, section);
+    });
+  }
+
   function tdFinalSnapshotFor(section) {
-    if (!(section instanceof HTMLElement)) return {section:null,root:null,key:'',text:'',signature:'',completed:false,completionReason:''};
+    if (!(section instanceof HTMLElement)) return {section:null,root:null,key:'',text:'',hasContent:false,signature:'',completed:false,completionReason:''};
     const root=findAssistantContentRoot(section);
     const text=root?normalizeText(root.textContent||''):'';
-    const key=tdNodeKey(section), signature=text?`${key}:${text.length}:${hashString(text.slice(-512))}`:'';
-    const reason=text?tdAnswerCompletionEvidence(section):'';
-    return {section,root,key,text,signature,completed:Boolean(reason),completionReason:reason};
+    const images=tdAnswerImages(section, root);
+    const loaded=images.filter(image=>image.complete && image.naturalWidth>=64 && image.naturalHeight>=64);
+    const hasContent=Boolean(text || loaded.length);
+    const loading=images.some(image=>!image.complete && (image.width>=64 || image.height>=64 ||
+      image.closest('[data-testid*="imagegen"],[data-testid*="generated-image"]')));
+    const key=tdNodeKey(section);
+    const signature=hasContent ? key+':'+text.length+':'+hashString(text.slice(-512))+
+      ':'+loaded.map(image=>hashString(image.currentSrc||image.src)).join(',') : '';
+    const reason=hasContent && !loading ? tdAnswerCompletionEvidence(section) : '';
+    return {section,root,key,text,hasContent,signature,completed:Boolean(reason),completionReason:reason};
   }
 
   function tdRecordDispatch(reason, activity = null) {
@@ -1091,7 +1207,7 @@
  // Completion/receipt checks are local consumers, never independent GET loops.
  if(!tdEnabled())return;
  const snap=tdReads.snap;
- if(snap&&snap.resource.key===getChatGptConversationResource()?.key&&snap.epoch===td.epoch&&snap.serial===tdTurn.serial&&
+ if(snap&&!snap.outlineOnly&&snap.resource.key===getChatGptConversationResource()?.key&&snap.epoch===td.epoch&&snap.serial===tdTurn.serial&&
     snap.seq!==tdTurn.passiveSequence&&!tdSelectionBusy()&&tdPayloadBelongs(snap.data,snap.resource)&&tdSnapshotInfo(snap.data,snap.resource).complete){
    tdTurn.passiveSequence=snap.seq;tdAcceptTurnProof(snap.data,snap.startedAt,snap.serial);
  }
@@ -1156,9 +1272,14 @@
     td.nativeIntent = null; td.enterGuard = null; td.beforeInputNewline = false;
     td.pointerHold = null; td.editingQueueId = ''; td.menuRenderKey = '';
     tdResetMinimap();
+    tdZoomReset();
     td.allowButton = null; td.allowForm = null; td.run = null; td.manualCompletion = '';
     td.lastUser = ''; td.lastFinal = ''; td.finalChangedAt = 0; td.settleSince = 0;
     td.activityDirty = true; td.activityCache = null; td.routeStartedAt = Date.now();
+    const search = shadowRoot?.querySelector('.td-search');
+    if (search) search.value = '';
+    const clearSearch = shadowRoot?.querySelector('.outline-search-clear');
+    if (clearSearch) clearSearch.hidden = true;
     td.search = ''; td.expandAll.clear(); td.outlineCache.clear();
     window.clearTimeout(td.wakeTimer); td.wakeTimer = null;
     tdDispatch.preflight=null;
@@ -1794,6 +1915,9 @@
  const began=performance.now();tdSelection.events++;
  try{const s=window.getSelection();if(!s||s.isCollapsed||s.rangeCount!==1)return null;
    if(tdSelectionBusy()){
+     const previous=tdSelection.sample;
+     if (previous?.anchor===s.anchorNode && previous.focus===s.focusNode &&
+         previous.ao===s.anchorOffset && previous.fo===s.focusOffset) return previous;
      tdSelection.sample={range:null,anchor:s.anchorNode,focus:s.focusNode,ao:s.anchorOffset,fo:s.focusOffset,epoch:td.epoch,serial:tdSelection.serial,at:performance.now()};
      return tdSelection.sample;
    }
@@ -1804,8 +1928,7 @@
 }
   function tdPauseSelectionIntegration() {
     nativeSelectionIntegrationToken++;
-    nativeSelectionObserver?.disconnect();nativeSelectionObserver=null;
-    clearInterval(nativeSelectionHeartbeatTimer);nativeSelectionHeartbeatTimer=null;
+    stopNativeSelectionSearch();
     if(nativeSelectionSuppressionRaf!==null){cancelAnimationFrame(nativeSelectionSuppressionRaf);nativeSelectionSuppressionRaf=null;}
     // Do not remove/reinsert the existing native toolbar's children mid-drag.
   }
@@ -1820,8 +1943,10 @@
     const root = tdDomClosest(nodeAsElement(range.startContainer),
       '[data-chatgpt-selection-message-id],[data-message-id],[data-conversation-role="assistant"],[data-message-author-role="assistant"]');
     if (!root || !root.contains(range.endContainer) || isInsideComposer(root)) return;
-    const quote = normalizeInlineReviewText(range.toString());
-    if (quote.length < REVIEW_SELECTION_MIN_CHARS || quote.length > REVIEW_SELECTION_MAX_CHARS) return;
+    if (range.startContainer !== range.endContainer || range.startContainer.nodeType !== Node.TEXT_NODE ||
+        range.endOffset - range.startOffset > REVIEW_SELECTION_MAX_CHARS) return;
+    const quote = normalizeInlineReviewText(range.startContainer.nodeValue.slice(range.startOffset,range.endOffset));
+    if (quote.length < REVIEW_SELECTION_MIN_CHARS) return;
     const path = node => { const p=[]; for(let n=node;n && n!==root;n=n.parentNode) {
       if (!n.parentNode || p.length >= 40) return null;
       p.unshift(Array.prototype.indexOf.call(n.parentNode.childNodes,n));
@@ -1869,7 +1994,8 @@
   function tdInstallSelectionGesture() {
     if(tdSelection.installed)return;tdSelection.installed=true;
     window.addEventListener('pointerdown',event=>{
-      if(!settings.enabled||event.button!==0||event.isPrimary===false)return;
+      // 触摸选区由系统长按和 selectionchange 处理。两指手势不能被划词状态截获。
+      if(!settings.enabled||event.pointerType==='touch'||event.button!==0||event.isPrimary===false)return;
       const node=event.composedPath?.()[0]||event.target;
       if(!tdSelectionAllowed(node)) {
         if (!tdDomClosest(nodeAsElement(node),'#threaddeck-host,[data-threaddeck-selection-comment]')) {tdSelectionReset();hideSelectionAction();}
@@ -1932,9 +2058,13 @@
   }
   function tdReadActiveUI(final) {
     const composer = getChatGptComposer();
-    const dock = tdComposerControlScope(composer).form || composer?.closest('form') || composer?.parentElement;
-    const stopControl = findChatGptStopControl();
-    let steerControl = null; let indicator = null;
+    const controls = tdComposerControlFacts(composer);
+    const dock = controls.scope.form || controls.scope.roots[0];
+    const stopControl = controls.facts.find(fact=>fact.kind==='stop' && fact.enabled)?.button || findChatGptStopControl();
+    const turn = final.section?.closest('[data-talvt-turn-state],[data-turn-status],[data-turn-key],article');
+    const turnState = turn?.getAttribute('data-talvt-turn-state') || turn?.getAttribute('data-turn-status') || '';
+    let steerControl = tdChooseComposerControl('steer',true,controls).button;
+    let indicator = /^(?:streaming|pending|in_progress|running|generating|awaiting_response)$/.test(turnState) ? turn : null;
     // Only current answer/composer chrome may prove activity. Never scan arbitrary
     // answer prose for words like "thinking" or "调整方向".
     for (const scope of [dock, final.section].filter(Boolean)) {
@@ -1954,8 +2084,8 @@
           const active = node.getAttribute('aria-busy') === 'true' || /\b(streaming|in_progress|running)\b/.test(state) ||
             node.classList.contains('result-streaming') || node.getAttribute('role') === 'progressbar';
           const inAuthoredBody = Boolean(node.closest(TD_DOM_CONTENT));
-          const statusText = !inAuthoredBody && node.getAttribute('role') === 'status' ? normalizeText(node.textContent).slice(0, 120) : '';
-          if (((!inAuthoredBody || node===final.section || node===final.root) && active) || /^(?:正在(?:思考|推理|规划|搜索)|(?:思考|推理|规划|搜索)中|thinking(?:\s|…|\.)|reasoning(?:\s|…|\.))/i.test(statusText)) indicator = node;
+          const statusText = !inAuthoredBody && node.getAttribute('role') === 'status' ? normalizeText(node.getAttribute('aria-label') || node.textContent).slice(0, 120) : '';
+          if (((!inAuthoredBody || node===final.section || node===final.root) && active) || /^(?:正在(?:思考|推理|规划|搜索|生成(?:图片|图像))|(?:思考|推理|规划|搜索|生图)中|thinking(?:\s|…|\.)|reasoning(?:\s|…|\.)|(?:generating|creating) (?:an? |your )?image)/i.test(statusText)) indicator = node;
         }
       }
     }
@@ -2022,7 +2152,7 @@
       isolation:{schema:TD_INDEX_OWNER_SCHEMA,rejectedNodes:tdRouteFence.blocked,rejectedPayloads:tdRouteFence.rejectedPayloads,quarantinedLegacyRows:tdRouteFence.quarantined,transitions:tdRouteFence.transitions,allEntriesOwned:entries.every(e=>e.ownerKey===routeKey)},
       newline:tdNewline.last,
       contracts: {
-        identity: 'native-address-v1', additionalReads: 'manual-only',
+        identity: 'native-address-v1', additionalReads: 'none',
         lastSnapshot: tdHealth.snapshot || null,
         indexedEvents: entries.length,
         addressedEvents: entries.filter(e=>tdNavRecordIds(e).length).length,
@@ -2344,7 +2474,8 @@ const TDAnswerOutline = (() => {
     function read(node) {
       if (!(node instanceof Element) || reject(node)) return [];
       const tag = node.tagName;
-      if (/^H[1-6]$/.test(tag)) return [{type:'heading', depth:Number(tag[1]), tokens:inline(node), target:node}];
+      const heading = /^H([1-6])$/.exec(tag)?.[1] || (node.getAttribute('role') === 'heading' ? node.getAttribute('aria-level') || '2' : '');
+      if (heading) return [{type:'heading', depth:Number(heading), tokens:inline(node), target:node}];
       if (tag === 'OL' || tag === 'UL') {
         const start = Number(node.getAttribute('start')) || 1;
         const items = Array.from(node.children).filter((n)=>n.tagName === 'LI').map((li)=> {
@@ -2363,7 +2494,9 @@ const TDAnswerOutline = (() => {
       }
       if (tag === 'P') return [{type:'paragraph', tokens:inline(node), text:inlineText(inline(node)), target:node}];
       if (tag === 'HR') return [{type:'hr'}];
-      const hasBlocks = Array.from(node.children).some((child)=>/^(P|DIV|SECTION|ARTICLE|H[1-6]|OL|UL|PRE|BLOCKQUOTE|TABLE|DETAILS)$/.test(child.tagName));
+      const hasBlocks = Array.from(node.children).some(child =>
+        /^(P|DIV|SECTION|ARTICLE|H[1-6]|OL|UL|PRE|BLOCKQUOTE|TABLE|DETAILS)$/.test(child.tagName) ||
+        child.getAttribute('role') === 'heading' || child.querySelector('[role="heading"]'));
       if (!hasBlocks && clean(node.textContent)) return [{type:'paragraph',tokens:inline(node),text:inlineText(inline(node)),target:node}];
       return Array.from(node.children).flatMap(read);
     }
@@ -2405,21 +2538,66 @@ const TDAnswerOutline = (() => {
     if (!shadowRoot || shadowRoot.querySelector('.td-search')) return;
     const panel = shadowRoot.querySelector('.preview-panel');
     const search = document.createElement('input'); search.className = 'td-search'; search.type = 'search';
-    search.placeholder = '搜索问题、任务和回答章节'; search.setAttribute('aria-label',search.placeholder);
-    panel.insertBefore(search, listEl);
-    search.addEventListener('input', () => { td.search = search.value.trim().toLocaleLowerCase(); renderEntries(true); });
-    search.addEventListener('keydown', (event) => { if (event.key === 'Escape' && search.value) { event.stopPropagation(); search.value = ''; td.search = ''; renderEntries(true); } });
+    search.placeholder = '搜索问答与章节'; search.setAttribute('aria-label',search.placeholder);
+    const searchBox = document.createElement('div');
+    searchBox.className = 'outline-search';
+    const searchIcon = document.createElement('span');
+    searchIcon.className = 'outline-search-icon';
+    searchIcon.innerHTML = threadDeckIcon('search');
+    const clear = document.createElement('button');
+    clear.type = 'button'; clear.className = 'outline-search-clear'; clear.hidden = true;
+    clear.setAttribute('aria-label','清除搜索');
+    clear.innerHTML = threadDeckIcon('close');
+    searchBox.append(searchIcon, search, clear);
+    panel.insertBefore(searchBox, listEl);
+    clear.addEventListener('click', () => {
+      search.value = ''; search.dispatchEvent(new Event('input')); search.focus();
+    });
+    const tools = panel.querySelector('.zoom-actions');
+    tools.querySelector('[data-action="open-settings"]').innerHTML = threadDeckIcon('settings');
+    search.addEventListener('input', () => { clear.hidden = !search.value; td.search = search.value.trim().toLocaleLowerCase(); renderEntries(true); });
+    search.addEventListener('keydown', (event) => { if (event.key === 'Escape' && search.value) { event.stopPropagation(); search.value = ''; search.dispatchEvent(new Event('input')); } });
     const pin = document.createElement('button'); pin.className = 'icon-button td-pin'; pin.type = 'button';
-    pin.innerHTML = '<svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12.7 3.5 3.8 3.8-2 1.1-2 3.8-4.7-4.7 3.8-2zM10 10l-6 6"/></svg>'; pin.setAttribute('aria-label','固定或收起大纲'); pin.title = '固定大纲';
-    pin.addEventListener('click', () => { navigatorEl.dataset.pinned = String(navigatorEl.dataset.pinned !== 'true'); pin.setAttribute('aria-pressed',navigatorEl.dataset.pinned); });
-    shadowRoot.querySelector('.panel-header').insertBefore(pin, shadowRoot.querySelector('[data-action="open-settings"]'));
+    pin.innerHTML = threadDeckIcon('pin');
+    pin.setAttribute('aria-label','固定大纲');
+    pin.setAttribute('aria-pressed','false');
+    pin.title = '固定大纲';
+    pin.addEventListener('click',()=>tdSetOutlinePinned(navigatorEl.dataset.pinned!=='true'));
+    tools.insertBefore(pin, tools.querySelector('[data-action="open-settings"]'));
     const style = document.createElement('style');
     style.textContent = `
       .preview-panel { width:min(400px,calc(100vw - 72px)); max-height:min(640px,calc(100dvh - 80px)); }
       .navigator[data-pinned="true"] .preview-panel {opacity:1;visibility:visible;pointer-events:auto;transform:translate(0,-50%) scale(1)}
-      .td-pin{margin-left:auto;font-size:20px}.td-pin[aria-pressed="true"]{background:var(--apr-hover);color:var(--apr-text)}
-      .td-search{display:block;box-sizing:border-box;width:calc(100% - 24px);margin:10px 12px 4px;padding:8px 10px;border:1px solid var(--apr-panel-border);border-radius:9px;background:var(--apr-panel-bg);color:var(--apr-text);font:inherit;font-size:12px;outline-offset:2px}
-      .td-search::placeholder{color:var(--apr-muted)}
+      .preview-panel .panel-header{padding:12px 12px 9px 16px;border-bottom:0;min-height:0;gap:8px}
+      .preview-panel .panel-title{font-size:14px;line-height:20px}
+      .preview-panel .panel-subtitle{font-size:11px;line-height:16px}
+      .preview-panel .zoom-actions{gap:2px}
+      .preview-panel .icon-button{width:28px;height:28px;border-radius:7px}
+      .preview-panel .zoom-button{font-weight:550;color:var(--apr-muted);min-height:28px;padding-inline:7px}
+      .preview-panel .icon-button svg{width:18px;height:18px;stroke-width:1.55}
+      .td-pin[aria-pressed="true"]{background:var(--apr-hover);color:var(--apr-text)}
+      .outline-search{flex:0 0 auto;display:flex;align-items:center;gap:7px;margin:0 16px 8px;padding:0 8px 0 10px;min-height:35px;border:1px solid transparent;border-radius:9px;background:var(--apr-input);color:var(--apr-muted)}
+      .outline-search:focus-within{border-color:var(--apr-muted);background:var(--apr-panel-bg)}
+      .outline-search-icon,.outline-search-clear{display:grid;place-items:center;flex:none}
+      .outline-search-icon svg,.outline-search-clear svg{display:block;width:16px;height:16px;stroke-width:1.55}
+      .td-search{appearance:none;display:block;flex:1;min-width:0;box-sizing:border-box;margin:0;border:0;outline:0;background:none;color:var(--apr-text);font:inherit;font-size:13px;line-height:20px;padding:5px 0}
+      .td-search::-webkit-search-cancel-button{appearance:none}
+      .td-search::placeholder{color:var(--apr-muted);opacity:1}
+      .outline-search-clear{appearance:none;border:0;padding:0;width:24px;height:24px;border-radius:6px;background:none;color:var(--apr-muted);cursor:pointer}
+      .outline-search-clear:hover{background:var(--apr-hover);color:var(--apr-text)}
+      .outline-search-clear:focus-visible{outline:1px solid currentColor}
+      .outline-search-clear[hidden]{display:none}
+      .preview-panel .preview-list{padding:0 8px 8px}
+      .preview-panel .question-row{border-radius:8px}
+      .preview-panel .preview-item{min-height:39px;padding:7px 8px}
+      .preview-panel .preview-text{font-size:13px;line-height:19px}
+      .preview-panel .answer-toggle{width:42px;flex-basis:42px;padding-right:7px}
+      .preview-panel .chevron{width:15px;height:15px;flex:none}
+      .preview-panel .empty-outline{padding:14px 8px;color:var(--apr-muted)}
+      .preview-panel .td-outline-coverage{padding:7px 12px 7px 16px;font-size:11px;line-height:16px;color:var(--apr-muted);border-top:1px solid var(--apr-panel-border)}
+      .td-outline-coverage:not([hidden]){display:flex;align-items:center;justify-content:space-between;gap:8px}
+      .td-outline-coverage button{padding:4px 8px;font:inherit;white-space:nowrap}
+      .td-outline-coverage[hidden]{display:none}
       .answer-list {margin:4px 10px 10px 22px;padding:2px 0 2px 10px}
       .answer-item{opacity:1;color:var(--apr-text);gap:8px;padding:5px 6px;line-height:20px;cursor:default}
       .answer-text{font-size:13px;line-height:21px;display:block;overflow:visible;white-space:normal;overflow-wrap:anywhere;-webkit-line-clamp:unset}
@@ -2501,7 +2679,7 @@ const TDAnswerOutline = (() => {
     if (autoRow) {
       const row = autoRow.cloneNode(true); row.querySelector('input').name='allowBackgroundQueue';
       row.querySelector('.setting-name').textContent='允许后台标签页继续队列';
-      row.querySelector('.setting-description').textContent='只在这个会话标签页内执行。浏览器后台调度可能延迟；关闭标签页不会继续发送。';
+      row.querySelector('.setting-description').textContent='在当前会话后台继续发送。关闭标签页后停止。';
       autoRow.after(row);
     }
     const diagnostics = document.createElement('button'); diagnostics.className = 'dialog-button'; diagnostics.type = 'button';
@@ -2549,6 +2727,8 @@ const TDAnswerOutline = (() => {
       'enabled',
       'smoothScroll',
       'enableAnswerJump',
+      'pinchTopics',
+      'autoTopicSummary',
       'prefetchHistoryOnOutline',
       'hideNativeChatGptRail',
       'rememberPrompts',
@@ -2685,7 +2865,7 @@ const TDAnswerOutline = (() => {
     ) {
       return true;
     }
-    if (Object.prototype.hasOwnProperty.call(message || {}, 'recipient') && message.recipient !== 'all') return true;
+    if (message?.recipient != null && message.recipient !== 'all') return true;
     const contentType = String(message?.content?.content_type || '').toLowerCase();
     if (CHATGPT_HIDDEN_CONTENT_TYPES.has(contentType)) return true;
     const semanticType = [
@@ -2965,10 +3145,6 @@ const TDAnswerOutline = (() => {
       else text = chatGptTextFromPart(content);
     }
     return String(text || '').replace(/\r\n?/g, '\n').replace(/[\u200B\uFEFF]/g, '');
-  }
-
-  function extractChatGptMessageText(message) {
-    return normalizeText(extractChatGptMessageRawText(message)) || chatGptAttachmentLabel(message);
   }
 
   function stripMarkdownForOutline(text) {
@@ -3265,38 +3441,25 @@ const TDAnswerOutline = (() => {
       if (!event) return;
       const candidate = event._bestVisibleAssistant;
       if (!candidate) {
-        if (event.kind === 'automation-run') {
+        if (event.anchorRole === 'assistant') {
           const index = records.indexOf(event);
           if (index >= 0) records.splice(index, 1);
         }
         return;
       }
 
-      const parsedBlocks = parseAnswerOutlineBlocks(candidate.rawText, {
-        answerNodeId: candidate.nodeId,
-        answerMessageId: candidate.messageId,
-        answerOrdinal: 0,
+      const useful = event._visibleAnswers.filter(answer => answer === candidate || answer.finalChannel || answer.completed);
+      event.answerRecords = useful.map((answer, answerOrdinal) => {
+        const blocks = parseAnswerOutlineBlocks(answer.rawText, {
+          answerNodeId: answer.nodeId, answerMessageId: answer.messageId, answerOrdinal,
+        });
+        return {...answer, answerOrdinal, blocks, outlineRawText:answer.rawText,
+          outlineSchema:ANSWER_OUTLINE_CACHE_SCHEMA, identityTokens:[answer.nodeId,answer.messageId].filter(Boolean),
+          skeletonTarget:null,turnId:''};
       });
-      const answerRecord = {
-        nodeId: candidate.nodeId,
-        messageId: candidate.messageId,
-        identityTokens: [candidate.nodeId, candidate.messageId].filter(Boolean),
-        answerOrdinal: 0,
-        rawText: candidate.rawText,
-        completed: candidate.completed,
-        outlineRawText: candidate.rawText,
-        outlineSchema: ANSWER_OUTLINE_CACHE_SCHEMA,
-        blocks: parsedBlocks,
-        skeletonTarget: null,
-        turnId: '',
-      };
-      event.answerRecords = [answerRecord];
-      event.answerBlocks = parsedBlocks.map((block, outlineIndex) => ({
-        ...block,
-        blockIndex: outlineIndex,
-        outlineIndex,
-        parentKey: event.key,
-        key: `chatgpt-answer:${candidate.nodeId || candidate.messageId || event.nodeId}:${outlineIndex}`,
+      event.answerBlocks = event.answerRecords.flatMap(answer => answer.blocks).map((block, outlineIndex) => ({
+        ...block, blockIndex:outlineIndex, outlineIndex, parentKey:event.key,
+        key:'chatgpt-answer:'+(block.answerNodeId||block.answerMessageId||event.nodeId)+':'+outlineIndex,
       }));
 
       if (event.kind === 'automation-run') {
@@ -3318,12 +3481,17 @@ const TDAnswerOutline = (() => {
         if (!event.exchangeId && candidate.exchangeId) event.exchangeId = candidate.exchangeId;
       }
 
+      if (event.kind === 'assistant-output') {
+        event.text = event.answerBlocks[0]?.label || outlineLabelFromText(candidate.rawText);
+      }
+      delete event._visibleAnswers;
       delete event._bestVisibleAssistant;
       delete event._bestVisibleAssistantScore;
     };
 
     const createPromptEvent = (nodeId, message) => {
-      const text = extractChatGptMessageText(message);
+      const rawQuestion = extractChatGptMessageRawText(message);
+      const text = normalizeText(rawQuestion) || chatGptAttachmentLabel(message);
       if (!text) return null;
       const messageId = typeof message.id === 'string' ? message.id : '';
       const event = {
@@ -3331,6 +3499,7 @@ const TDAnswerOutline = (() => {
         kind: 'prompt',
         anchorRole: 'user',
         text,
+        rawQuestion,
         nodeId,
         messageId,
         identityTokens: [nodeId, messageId].filter(Boolean),
@@ -3341,6 +3510,7 @@ const TDAnswerOutline = (() => {
         answerRecords: [],
         skeletonTarget: null,
         turnId: '',
+        _visibleAnswers: [],
         _bestVisibleAssistant: null,
         _bestVisibleAssistantScore: Number.NEGATIVE_INFINITY,
       };
@@ -3372,6 +3542,7 @@ const TDAnswerOutline = (() => {
         answerRecords: [],
         skeletonTarget: null,
         turnId: '',
+        _visibleAnswers: [],
         _bestVisibleAssistant: null,
         _bestVisibleAssistantScore: Number.NEGATIVE_INFINITY,
       };
@@ -3381,15 +3552,17 @@ const TDAnswerOutline = (() => {
 
     const considerAssistantCandidate = (event, nodeId, message, automation) => {
       if (!event || !chatGptMessageCanSupplyAnswerOutline(message)) return;
-      const rawText = extractChatGptMessageRawText(message);
+      const parts = Array.isArray(message.content?.parts) ? message.content.parts : [];
+      const imageReply = parts.some(part=>/^image(?:_|$)/i.test(part?.content_type || part?.type || ''));
+      const rawText = extractChatGptMessageRawText(message) || (imageReply ? '图片回复' : '');
       if (!rawText) return;
       const candidateScore = chatGptAssistantOutlineCandidateScore(message, rawText);
-      if (candidateScore < event._bestVisibleAssistantScore) return;
-      event._bestVisibleAssistantScore = candidateScore;
-      event._bestVisibleAssistant = {
+      const answer = {
         nodeId,
+        finalChannel: message.channel === 'final' || message.metadata?.is_final === true,
         messageId: typeof message.id === 'string' ? message.id : '',
         rawText,
+        imageReply,
         completed: message.end_turn === true || message.status === 'finished_successfully',
         createTime: Number.isFinite(Number(automation?.createTime))
           ? Number(automation.createTime)
@@ -3400,6 +3573,13 @@ const TDAnswerOutline = (() => {
         automationTitle: automation?.automationTitle || '',
         exchangeId: automation?.exchangeId || '',
       };
+      const prior = event._visibleAnswers.findIndex(item => item.nodeId === nodeId ||
+        (answer.messageId && item.messageId === answer.messageId));
+      if (prior < 0) event._visibleAnswers.push(answer); else event._visibleAnswers[prior] = answer;
+      if (candidateScore >= event._bestVisibleAssistantScore) {
+        event._bestVisibleAssistantScore = candidateScore;
+        event._bestVisibleAssistant = answer;
+      }
     };
 
     for (const { nodeId, node } of walkChatGptActiveBranch(conversation)) {
@@ -3434,7 +3614,12 @@ const TDAnswerOutline = (() => {
         finalizeEventAnswer(currentEvent);
         currentEvent = createAutomationEvent(nodeId, message, automation, true);
       }
-      if (!currentEvent) continue;
+      if (!currentEvent || (currentEvent.kind === 'assistant-output' && currentEvent._bestVisibleAssistant?.completed)) {
+        if (!chatGptMessageCanSupplyAnswerOutline(message)) continue;
+        finalizeEventAnswer(currentEvent);
+        currentEvent = createAutomationEvent(nodeId, message, automation, true);
+        Object.assign(currentEvent,{key:'chatgpt-output:'+nodeId,kind:'assistant-output',text:'回答',automationTitle:''});
+      }
 
       if (currentEvent.kind === 'automation-run' && automation) {
         if (!currentEvent.automationId && automation.automationId) currentEvent.automationId = automation.automationId;
@@ -3480,6 +3665,7 @@ const TDAnswerOutline = (() => {
     window.clearTimeout(chatGptApiRefreshTimer);
     chatGptApiRefreshTimer = null;
     tdHealth.payload=null;
+    tdHealth.snapshot=null;
     const resource = getChatGptConversationResource();
     chatGptConversationId = resource?.id || '';
     chatGptConversationKind = resource?.kind || '';
@@ -3511,6 +3697,51 @@ const TDAnswerOutline = (() => {
     }
     return {complete:false,reason:'cyclic-or-empty'};
   }
+  function tdStitchHistory(data, record, complete) {
+    if (!isPlainObject(data.mapping) || typeof data.current_node !== 'string') return null;
+    const old = tdReads.graph;
+    const branch = walkChatGptActiveBranch(data);
+    const knowsBeginning = complete || (data.has_more_before === false &&
+      tdSnapshotInfo({mapping:data.mapping,current_node:data.current_node}).complete);
+    const rootId = knowsBeginning ? branch[0]?.nodeId : '';
+    if (complete) {
+      if (!old || record.startedAt >= old.fullAt) {
+        tdReads.graph = {mapping:Object.assign(Object.create(null), data.mapping), tip:data.current_node,
+          tips:new Set([data.current_node]), rootId, fullAt:record.startedAt, rooted:true};
+      }
+      return null;
+    }
+    const graph = old || {mapping:Object.create(null), tip:data.current_node, tips:new Set(),
+      rootId:'', fullAt:0, rooted:false};
+    if (Object.keys(graph.mapping).length + Object.keys(data.mapping).length > 30000) return null;
+    for (const [id,node] of Object.entries(data.mapping)) {
+      if (!isPlainObject(node)) continue;
+      const prior = graph.mapping[id];
+      if (!prior || (!prior.message && node.message)) graph.mapping[id] = node;
+      else if (!prior.parent && typeof node.parent === 'string' && !graph.rooted) graph.mapping[id] = {...prior,parent:node.parent};
+    }
+    if (rootId) graph.rootId ||= rootId;
+    graph.tips.add(data.current_node);
+    if (graph.tips.size > 12) graph.tips.delete(graph.tips.values().next().value);
+    const joined = {mapping:graph.mapping,current_node:graph.tip};
+    let currentPath = walkChatGptActiveBranch(joined);
+    // 中段最后到达时，也可以连上此前已收到的末段。
+    for (const tip of graph.tips) {
+      if (tip === graph.tip) continue;
+      const path = walkChatGptActiveBranch({mapping:graph.mapping,current_node:tip});
+      if (path.length > currentPath.length && path.some(item => item.nodeId === graph.tip)) {
+        graph.tip = tip;
+        currentPath = path;
+      }
+    }
+    joined.current_node = graph.tip;
+    tdReads.graph = graph;
+    if (currentPath.length <= 1 || !currentPath.some(item => Object.hasOwn(data.mapping,item.nodeId))) return null;
+    const rooted = Boolean(graph.rootId && currentPath[0].nodeId === graph.rootId && tdSnapshotInfo(joined).complete);
+    if (rooted) graph.rooted = true;
+    return {data:joined, complete:rooted};
+  }
+
   function tdMergeObservedIndex(base, incoming, data, complete) {
     if(complete)return incoming;
     if(!base.length)return incoming;
@@ -3568,7 +3799,10 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
      // Preserve original request timestamp and serial; never turn old cached
      // content into a newly fetched completion proof.
      const snapshotInfo=tdSnapshotInfo(data,record.resource);record.partial=!snapshotInfo.complete;
-     if(record.epoch===td.epoch&&record.serial===tdTurn.serial) {
+     if (snapshotInfo.complete && tdReads.graph?.fullAt > record.startedAt) {
+       tdReads.appliedSeq=record.seq;tdReads.appliedEpoch=td.epoch;return false;
+     }
+     if(!record.outlineOnly&&record.epoch===td.epoch&&record.serial===tdTurn.serial) {
        if(snapshotInfo.complete)tdAcceptTurnProof(data,record.startedAt,record.serial);
        else tdReceiptObserveConversation(data,record.startedAt);
      }
@@ -3577,11 +3811,18 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
      tdHealth.payload={mapping:isPlainObject(data?.mapping),mappingNodes:isPlainObject(data?.mapping)?Object.keys(data.mapping).length:0,
        linearNodes:Array.isArray(data?.linear_conversation)?data.linear_conversation.length:0,hasCurrentNode:typeof data?.current_node==='string'};
      if(!tdHealth.payload.mapping&&!Array.isArray(data?.linear_conversation))throw Object.assign(new Error('响应结构尚未识别，原目录已保留'),{name:'UnsupportedPayloadError'});
-     const parsed=record.records||parseChatGptPromptRecords(data);record.records=parsed;
-     const base=chatGptApiRecords.length?chatGptApiRecords:cacheRecords.filter(e=>e.timelineSchema===TIMELINE_CACHE_SCHEMA&&tdNavRecordIds(e).length);
-     const merged=tdMergeObservedIndex(base,parsed,data,snapshotInfo.complete);
-     tdHealth.snapshot={complete:snapshotInfo.complete,reason:snapshotInfo.reason,incoming:parsed.length,retained:merged.length};
-     if(!merged.length&&base.length)return true;
+     const joined=tdStitchHistory(data,record,snapshotInfo.complete);
+     const indexData=joined?.data || data;
+     const parsed=record.records||parseChatGptPromptRecords(indexData);record.records=parsed;
+     const base = chatGptApiRecords.length ? chatGptApiRecords : cacheRecords.filter(entry =>
+       entry.source === 'conversation-api' && entry.timelineSchema === TIMELINE_CACHE_SCHEMA && tdNavRecordIds(entry).length);
+     const merged=tdMergeObservedIndex(base,parsed,indexData,snapshotInfo.complete);
+     const complete=snapshotInfo.complete || Boolean(joined?.complete && parsed.length >= merged.length) ||
+       Boolean(tdHealth.snapshot?.complete && merged.length === base.length);
+     tdHealth.snapshot={complete,reason:joined?.complete?'stitched-branch':snapshotInfo.reason,incoming:parsed.length,retained:merged.length};
+     if(!merged.length&&base.length){
+       tdReads.appliedSeq=record.seq;tdReads.appliedEpoch=td.epoch;return true;
+     }
      if(!tdAlive(scope)||resource.key!==getChatGptConversationResource()?.key)return false;
      chatGptConversationId=resource.id;chatGptConversationKind=resource.kind;tdAdaptive.at=-Infinity;
      tdSafeTask('index-live-reconcile',()=>tdLiveReconcileApi(merged));chatGptApiRecords=tdStampIndex(merged,scope.key);tdDomState.revision++;
@@ -3825,12 +4066,19 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
   // None of these selectors claims to be an official ChatGPT DOM contract.
   const TD_DOM_ROLE_ATTRS = ['data-conversation-role', 'data-message-author-role', 'data-message-role', 'data-author-role', 'data-turn', 'data-role'];
   const TD_DOM_ID_ATTRS = ['data-chatgpt-selection-message-id', 'data-turn-key', 'data-message-id', 'data-node-id', 'data-turn-id', 'data-turn-id-container', 'data-item-id', 'data-id', 'id'];
-  const TD_DOM_CONTENT = '[data-markdown-text-style][data-selected-text-overlay-target],.markdown,.prose,message-content,[data-message-content],[data-testid="message-content"]';
+  const TD_DOM_CONTENT = '[data-markdown-text-style="assistant-message"],[data-markdown-text-style][data-selected-text-overlay-target],[data-markdown-copy="contents"],.markdown,.prose,message-content,[data-message-content],[data-testid="message-content"]';
+  const TD_DOM_GENERATED_IMAGE = '[data-chatgpt-search-message-ids]:not([data-chatgpt-search-unit-key]):has([data-testid="generated-image-gallery"] [data-testid="generated-image-preview"] img)';
   const TD_DOM_BOUNDARY = '[data-chatgpt-selection-message-id],[data-chatgpt-search-message-ids],[data-conversation-role],[data-turn-key],[data-message-id],[data-node-id],[data-turn-id],[data-turn-id-container],[data-item-id],[data-testid^="conversation-turn-"],[data-testid="conversation-turn"],article,[role="article"]';
   const tdDomState = { revision: 0, roleMapRevision: -1, roleMap: new Map(), selection: 'not-selected', nav: 'none', lastShape: [] };
   const tdDomRoleSelector = role => TD_DOM_ROLE_ATTRS.map(attr => `[${attr}="${role}"]`).join(',') +
     `,[data-chatgpt-search-unit-key$=":${role}"][data-chatgpt-search-message-ids]` +
-    (role === 'user' ? ',user-query,[data-user-message-bubble]' : '');
+    (role === 'user' ? ',user-query,[data-user-message-bubble]' : role === 'assistant' ? ','+TD_DOM_GENERATED_IMAGE : '');
+  function tdGeneratedImageTurn(node) {
+    if (!(node instanceof Element) || !node.matches(TD_DOM_GENERATED_IMAGE) ||
+        tdDomSearchMessageIds(node).length!==1 ||
+        node.closest('[data-user-message-bubble],[data-chatgpt-search-unit-key$=":user"]')) return null;
+    return node.closest('[data-talvt-turn-state]');
+  }
   const tdDomExplicitRole = node => {
     if (!(node instanceof Element)) return '';
     for (const attr of TD_DOM_ROLE_ATTRS) {
@@ -3840,7 +4088,9 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     if(node.matches('user-query,[data-user-message-bubble]')) return 'user';
     // 真实消息搜索单元同时声明角色和原生消息 ID。聚合多个不同消息的容器不作证。
     const searchRole=node.getAttribute('data-chatgpt-search-unit-key')?.match(/^[a-zA-Z0-9_.:-]{1,180}:(assistant|user)$/)?.[1];
-    return searchRole && tdDomSearchMessageIds(node).length===1 ? searchRole : '';
+    if (searchRole && tdDomSearchMessageIds(node).length===1) return searchRole;
+    // 图片消息可能只有一个原生消息 ID 和图像预览，宿主未给它标记作者。
+    return tdGeneratedImageTurn(node) ? 'assistant' : '';
   };
   // One exact decoder for the observed scalar/array search-message attribute.
   // Membership is equality of complete tokens, never substring/UUID extraction.
@@ -3936,10 +4186,10 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     const top = nested.filter(n => !nested.some(p => p !== n && p.contains(n)));
     return top.length > 1 && top.some(n => !tdDomIds(n).some(id => ids.includes(id)));
   }
-  function tdDomMessageFromNode(node, role, expectedIds = []) {
+  function tdDomMessageFromNode(node, role, expectedIds = [], visibility) {
     let current = node instanceof Element ? node : node?.parentElement;
     const origin = current; let provisional = null;
-    if (!tdDomSafe(current) || !tdDomTreeShown(current) || isInsideComposer(current) || isReasoningOrCollapsedOutlineContext(current)) return null;
+    if (!tdDomSafe(current) || !tdDomTreeShown(current,visibility) || isInsideComposer(current) || isReasoningOrCollapsedOutlineContext(current)) return null;
     const conversation = getChatGptThreadRoot() || firstMatchingRoot(site.roots);
     // A zero-evidence shell must not veto a directly verified message elsewhere.
     if (conversation && !tdDomContains(conversation,current) && !tdDomIds(current).some(id=>tdDomKnownRoles().has(id))) return null;
@@ -3969,18 +4219,19 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     }
     return provisional;
   }
-  function tdDomRoleRoots(role) {
+  function tdDomRoleRoots(role, visibility = new WeakMap()) {
     const root = getChatGptThreadRoot() || firstMatchingRoot(site.roots);
     const candidates = tdDomQueryAll(root, tdDomRoleSelector(role) + ',[data-chatgpt-selection-message-id],[data-turn-key],[data-message-id],[data-node-id],[data-turn-id],[data-turn-id-container],[data-item-id],[data-id],[id^="message-"],[id^="message:"],[id^="turn-"],[id^="turn:"]');
     candidates.push(...tdAdaptive.nodes.filter(n=>tdDomContains(root,n)));
     const found = new Set();
     for (const node of candidates) {
       if (tdDomRole(node) !== role) continue;
-      const section = tdDomMessageFromNode(node, role);
+      const section = tdDomMessageFromNode(node, role, undefined, visibility);
       if (section) found.add(section);
     }
-    [...found].forEach(tdRouteRememberNode);
-    return [...found].filter(node => ![...found].some(other => other !== node && other.contains(node))).sort(compareDomOrder);
+    const sections = [...found];
+    sections.forEach(tdRouteRememberNode);
+    return sections.filter(node => !sections.some(other => other !== node && other.contains(node))).sort(compareDomOrder);
   }
   function tdDomFindExact(ids, role) {
     getChatGptThreadRoot();
@@ -4073,7 +4324,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
         identityNodes:safeQueryAll(r,plainIds).length,rendererNodes:safeQueryAll(r,TD_DOM_CONTENT).length})).slice(0,12),
       messageSamples:[...users.slice(-1),...assistants.slice(-2)].map(tdDomShape),
       selection:{stage:tdDomState.selection,lengthCheck:tdSelection.lengthCheck,
-        pending:Boolean(pendingSelection),integrationActive:Boolean(nativeSelectionObserver && nativeSelectionHeartbeatTimer!==null),hasRange:Boolean(range&&!range.collapsed),
+        pending:Boolean(pendingSelection),integrationActive:Boolean(nativeSelectionFallbackTimer!==null || nativeSelectionButtonEl?.isConnected),hasRange:Boolean(range&&!range.collapsed),
         nativeButton:Boolean(nativeSelectionButtonEl?.isConnected),nativeButtonVisible:tdDomActionVisible(nativeSelectionButtonEl),
         fallback:Boolean(selectionActionEl&&!selectionActionEl.hidden),currentAncestors,
         lastAttempt:saved(tdDomScopes.lastAttempt),lastAnswer:saved(tdDomScopes.lastAnswerSelection)},
@@ -4528,13 +4779,12 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
       normalizeText(node.textContent) && !isReasoningOrCollapsedOutlineContext(node, anchor) &&
       !node.closest('button,nav,aside,[data-testid*="action"]');
     const topmost = (nodes) => [...new Set(nodes)].filter((node) => !nodes.some((other) => other !== node && other.contains(node))).sort(compareDomOrder);
+    // 优先读取作者正文片段，避免把定时任务名称、复制和重载按钮收入章节。
+    const markdown = [ ...(anchor.matches(TD_DOM_CONTENT) ? [anchor] : []), ...tdDomQueryAll(anchor, TD_DOM_CONTENT) ].filter(allowed);
+    if (markdown.length) return topmost(markdown);
     const messages = [ ...(anchor.matches(tdDomRoleSelector('assistant') + ',message-content') ? [anchor] : []),
       ...tdDomQueryAll(anchor, tdDomRoleSelector('assistant') + ',message-content') ].filter(allowed);
     if (messages.length) return topmost(messages);
-    // Reading every clean sibling fragment avoids the old last-leaf-only bug.
-    // Descendant reasoning/action elements are excluded by the DOM tokenizer.
-    const markdown = [ ...(anchor.matches(TD_DOM_CONTENT) ? [anchor] : []), ...tdDomQueryAll(anchor, TD_DOM_CONTENT) ].filter(allowed);
-    if (markdown.length) return topmost(markdown);
     return allowed(anchor) ? [anchor] : [];
   }
 
@@ -4624,31 +4874,31 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
   }
 
   function attachGenericAnswerBlocks(promptEntries, assistantAnchors) {
-    if(!promptEntries.length||!assistantAnchors.length)return;
-    const mountedPrompts=promptEntries.filter(p=>p.target?.isConnected).sort((a,b)=>compareDomOrder(a.target,b.target));
-    let cursor=0;
-    for(let i=0;i<mountedPrompts.length;i++){
-      const prompt=mountedPrompts[i], next=mountedPrompts[i+1]?.target||null;
-      while(cursor<assistantAnchors.length&&compareDomOrder(assistantAnchors[cursor],prompt.target)<=0)cursor++;
-      let selected=null;
-      while(cursor<assistantAnchors.length&&(!next||compareDomOrder(assistantAnchors[cursor],next)<0)){
-        const anchor=assistantAnchors[cursor++];
-        if(findAssistantOutlineRoots(anchor).length)selected=anchor;
+    if (!promptEntries.length || !assistantAnchors.length) return;
+    const prompts = promptEntries.filter(prompt => prompt.target?.isConnected).sort((a,b) => compareDomOrder(a.target,b.target));
+    let cursor = 0;
+    for (const [index, prompt] of prompts.entries()) {
+      const next = prompts[index+1]?.target;
+      while (cursor < assistantAnchors.length && compareDomOrder(assistantAnchors[cursor],prompt.target) <= 0) cursor++;
+      const answers = [];
+      while (cursor < assistantAnchors.length && (!next || compareDomOrder(assistantAnchors[cursor],next) < 0)) {
+        const target = assistantAnchors[cursor++];
+        if (!findAssistantOutlineRoots(target).length && !tdAnswerImages(target,findAssistantContentRoot(target)).length) continue;
+        const address = tdMessageAddress(target,'assistant');
+        const answerOrdinal = answers.length;
+        const blocks = (settings.answerOutlineMode === 'off' ? [] : collectRenderedAnswerBlocks(target)).map((block, i) => ({
+          ...block, key:'dom-answer:'+prompt.key+':'+(address.messageId || answerOrdinal)+':'+i,
+          parentKey:prompt.key, answerOrdinal, answerNodeId:address.nodeId, answerMessageId:address.messageId,
+          identityTokens:address.identityTokens, turnId:address.turnId, skeletonTarget:null,
+        }));
+        answers.push({...address,answerOrdinal,target,skeletonTarget:null,completed:Boolean(tdAnswerCompletionEvidence(target)),
+          rawText:'',outlineRawText:'',outlineSchema:ANSWER_OUTLINE_CACHE_SCHEMA,blocks});
       }
-      if(!selected)continue;
-      const address=tdMessageAddress(selected,'assistant');
-      const blocks=(settings.answerOutlineMode==='off'?[]:collectRenderedAnswerBlocks(selected)).map((b,index)=>({...b,
-        key:`dom-answer:${prompt.key}:${address.messageId||'local'}:${index}`,parentKey:prompt.key,
-        outlineIndex:index,blockIndex:index,answerOrdinal:0,
-        answerNodeId:address.nodeId,answerMessageId:address.messageId,
-        identityTokens:address.identityTokens,turnId:address.turnId,skeletonTarget:null}));
-      prompt.answerBlocks=blocks;
-      prompt.answerRecords=[{...address,answerOrdinal:0,target:selected,skeletonTarget:null,
-        completed:Boolean(tdAnswerCompletionEvidence(selected)),rawText:'',outlineRawText:'',
-        outlineSchema:ANSWER_OUTLINE_CACHE_SCHEMA,blocks}];
+      if (!answers.length) continue;
+      prompt.answerRecords = answers;
+      prompt.answerBlocks = answers.flatMap(answer => answer.blocks);
     }
   }
-
 
   // v1.9.0 integration release:
   // - zero automatic metadata reads; native IDs work without a server role map;
@@ -5640,7 +5890,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
   // conversations via a private write endpoint.
   const tdHistory = {
     bridge: null, pending: null, timer: null, releaseTimer: null, uiTimer: null,
-    statusEl: null, sequence: 0, lastScroll: 0, gestureUntil: 0, ignoreScrollUntil: 0,
+    statusEl: null, capture: null, sequence: 0, lastScroll: 0, gestureUntil: 0, ignoreScrollUntil: 0,
     openedAt: 0, warmed: 0, lastResult: '', preserveCancel: null,
   };
   const TD_HISTORY_WINDOW = 3;
@@ -5664,6 +5914,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     tdHistory.statusEl.textContent = text; tdHistory.statusEl.hidden = !text;
   }
   function tdHistoryReset() {
+    tdOutlineStopHistory();
     tdHistory.sequence++; clearTimeout(tdHistory.timer); clearTimeout(tdHistory.releaseTimer);
     tdHistory.timer = null; tdHistory.pending = null; tdHistory.gestureUntil = 0;
     tdHistory.ignoreScrollUntil = 0; tdHistory.preserveCancel?.(); tdHistory.preserveCancel = null;
@@ -5749,7 +6000,12 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
         clearTimeout(tdHistory.timer); tdHistory.sequence++; tdHistory.bridge?.release('outline'); tdHistoryStatus('');
       }, 280);
     });
-    document.addEventListener('visibilitychange', () => { if (document.hidden) tdHistoryReset(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { tdHistoryReset(); return; }
+      const scene = tdZoom.scene;
+      if (scene?.topicState === 'connection' && settings.autoTopicSummary) scene.localCacheRead = false;
+      if (scene?.progress >= .999) tdZoomScheduleSettled(scene);
+    });
   }
 
   // A click is explicit navigation, unlike speculative warming. If a rollout
@@ -5758,24 +6014,49 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
   async function tdNavLoadMissingHistory(req, record) {
     const located=tdNavResolve(req);if(located)return located;
     if(!tdNavAlive(req)||tdReadState().until>Date.now())return null;
+    const capture = tdHistory.capture;
+    const captured = tdNavRecordIds(record).map(id=>capture?.history.messages.get(id))
+      .find(row=>row?.role === (req.block ? 'assistant' : entryAnchorRole(record)));
+    const scrollRoot = capture?.history.root;
+    if (captured && tdAlive(capture.scope) && scrollRoot?.isConnected) {
+      const mounted = await tdNavMountCaptured(req,captured,scrollRoot);
+      if (mounted || !tdNavAlive(req)) return mounted;
+    }
     const now=Date.now();
     if(now-Number(tdHistory.lastExplicitLoad||0)<2000){req.method='history-load-budget';return null;}
-    const positionById=new Map();
-    entries.forEach((e,i)=>{for(const id of tdNavRecordIds(e))positionById.set(`${entryAnchorRole(e)}:${id}`,i);});
+    const index = req.overviewRecords || entries;
+    const positionById = new Map();
+    for (const [position,entry] of index.entries()) {
+      for (const id of tdNavRecordIds(entry)) positionById.set(entryAnchorRole(entry)+':'+id,position);
+      for (const answer of entry.answerRecords || []) {
+        for (const id of tdNavRecordIds(answer)) positionById.set('assistant:'+id,position);
+      }
+    }
     const positions=[];
     for(const role of ['user','assistant'])for(const node of tdDomRoleRoots(role)) {
       for(const id of tdMessageAddress(node,role).identityTokens){const i=positionById.get(`${role}:${id}`);if(i!==undefined)positions.push(i);}
     }
-    const wanted=entries.findIndex(e=>e.key===req.entryKey);
+    const wanted=index.findIndex(e=>e.key===req.entryKey);
     if(wanted<0||!positions.length)return null;
     const direction=wanted<Math.min(...positions)?'up':wanted>Math.max(...positions)?'down':'';
     if(!direction)return null;
     tdHistory.lastExplicitLoad=now;
     const root=currentScrollRoot||findScrollRoot();tdNavLockRoot(req,root);
     req.method='one-native-history-step';
-    showToast('正在等待网页加载这一段历史，不会连续翻页重试',3000);
-    scrollRootTo(root,direction==='up'?0:getRootScrollMax(root),'auto');
-    const result=await tdNavWait(req,()=>tdNavResolve(req),2500);
+    req.paging = direction;
+    showToast('正在加载目标原文…',2600);
+    const info = tdNavScrollInfo(root), boundary = direction==='up' ? info.min : info.max;
+    tdSignalHostReadingScroll(root,boundary-info.top);
+    tdNavWriteScroll(req,root,boundary);
+    let corrections = 0;
+    const result=await tdNavWait(req,()=>{
+      const target = tdNavResolve(req);
+      if (!target && corrections < 2 && Math.abs(tdNavScrollInfo(root).top-boundary)>8) {
+        corrections++;
+        tdNavWriteScroll(req,root,boundary);
+      }
+      return target;
+    },2500);
     if(!tdNavAlive(req))return null;
     if(!result)await refreshNow('explicit-history-step');
     return result||tdNavResolve(req);
@@ -5935,6 +6216,32 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     return Boolean(section?.matches('[data-status="finished_successfully"],[data-status="complete"],[data-state="complete"],[data-state="completed"]') ||
       section?.querySelector('[data-testid="copy-turn-action-button"],[data-testid="good-response-turn-action-button"],[data-testid="bad-response-turn-action-button"]'));
   }
+  function tdMergeLiveOutline(existing, rendered) {
+    if (!existing.length) return rendered;
+    if (!rendered.length) return existing;
+    const matches = tdNavMatchOutline(existing, rendered);
+    const canonical = new Map([...matches].map(([old, match]) => [match.block, old]));
+    const existingPaths = tdNavParentPaths(existing);
+    const renderedPaths = tdNavParentPaths(rendered);
+    const known = new Set(existing.map(block => tdNavBlockSignature(block) + existingPaths.get(block)));
+    const ordered = rendered.flatMap(block => {
+      if (canonical.has(block)) return [canonical.get(block)];
+      return known.has(tdNavBlockSignature(block) + renderedPaths.get(block)) ? [] : [block];
+    });
+    const merged = tdMergeObservedOrder(existing,ordered);
+    const domByOrdinal = new Map(rendered.map(block => [block.outlineOrdinal, block]));
+    const apiByOrdinal = new Map(existing.map(block => [block.outlineOrdinal, block]));
+    const positions = new Map(merged.map((block, index) => [block, index]));
+    return merged.map((block, index) => {
+      const match = matches.get(block)?.block;
+      const authored = match || block;
+      const parents = match || domByOrdinal.get(block.outlineOrdinal) === block ? domByOrdinal : apiByOrdinal;
+      const parent = parents.get(authored.parentOutlineOrdinal);
+      return {...block, target:match?.target || block.target, outlineOrdinal:index,
+        parentOutlineOrdinal:positions.get(canonical.get(parent) || parent) ?? -1};
+    });
+  }
+
   function tdLiveApplyAnswers(records) {
     const anchors = scanAssistantAnchors(site), selected = new Map();
     const mountedPrompts = records.filter(e => isUserAnchoredEntry(e) && e.target?.isConnected).sort((a,b) => compareDomOrder(a.target,b.target));
@@ -5960,7 +6267,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
       // Only a final visible content root, not tool/reasoning/intermediate traces,
       // may become this event's live answer. Known answer IDs beat proximity.
       if (isReasoningOrCollapsedOutlineContext(section)) continue;
-      selected.set(owner.key, { owner, section, identity });
+      selected.set(identity.messageId || identity.nodeId, { owner, section, identity });
     }
     for (const { owner, section, identity } of selected.values()) {
       const roots = findAssistantOutlineRoots(section);
@@ -5974,25 +6281,30 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
       const alreadyManaged = tdLive.patches.has(identity.messageId || identity.nodeId);
       const busyHere = Boolean(section.matches('[data-status="in_progress"],[data-state="streaming"],[aria-busy="true"]') ||
         section.querySelector('[data-status="in_progress"],[data-state="streaming"],[aria-busy="true"],.result-streaming'));
-      const eligible = liveOwner || !previousAnswer || !apiHasCompleteRaw || alreadyManaged || changed || busyHere;
-      // Initial historical partial DOMs only get a baseline, never replace the
-      // full API outline. Future changes can drive a route-local live overlay.
-      if (!old || changed || old.completed !== completed) {
-        tdLive.domCache.set(section, { fingerprint, completed, identity, textLength: text.length });
-      }
-      if (!eligible || !text.trim() || (old && !changed && old.completed === completed && alreadyManaged)) continue;
+      if (old?.fingerprint === fingerprint && old.completed === completed &&
+          old.previousRaw === previousAnswer?.rawText && !changed) continue;
+      tdLive.domCache.set(section, { fingerprint, completed, identity, previousRaw:previousAnswer?.rawText });
+      if (!text.trim()) continue;
       const parsed = collectRenderedAnswerBlocks(section); tdLive.parses++;
-      const previousBlocks = (owner.answerBlocks || []).filter(b => !previousAnswer || b.answerOrdinal === previousAnswer.answerOrdinal);
-      const oldKeys = previousBlocks.map(tdNavBlockSignature), newKeys = parsed.map(tdNavBlockSignature);
-      let match = 0; for (const key of oldKeys) if (key === newKeys[match]) match++;
-      // Merely mounting a smaller historical fragment must not erase the rest.
-      if (!liveOwner && !busyHere && !alreadyManaged && newKeys.length < oldKeys.length && match === newKeys.length) continue;
-      if (!parsed.length && apiHasCompleteRaw && !alreadyManaged && !liveOwner) continue;
+      const previousBlocks = previousAnswer ? (owner.answerBlocks || []).filter(b => b.answerOrdinal === previousAnswer.answerOrdinal) : [];
+      const priorPatch = tdLive.patches.get(identity.messageId || identity.nodeId);
+      const keep = apiHasCompleteRaw || Boolean(previousAnswer && !liveOwner && !busyHere);
+      const baseline = keep ? previousBlocks : [];
+      const observed = tdMergeLiveOutline(baseline, parsed);
+      // 把已读到的历史章节保留到网页重新挂载后，默认按消息和标题位置拼接。
+      const completeBlocks = keep && priorPatch?.blocks.length > observed.length ?
+        tdMergeLiveOutline(priorPatch.blocks, observed) : observed;
+      if (keep && !alreadyManaged && completeBlocks.length === previousBlocks.length &&
+          completeBlocks.every((block, i) => tdNavBlockSignature(block) === tdNavBlockSignature(previousBlocks[i]))) continue;
       const revision = ++tdLive.revision;
-      const answer = { ...identity, answerOrdinal: previousAnswer?.answerOrdinal || 0, completed, target: section,
-        outlineSchema: ANSWER_OUTLINE_CACHE_SCHEMA, rawText: '', blocks: parsed };
+      const visibleRawText = roots.map(root => root.innerText || '').filter(Boolean).join('\n\n');
+      const answer = { ...previousAnswer, ...identity,
+        answerOrdinal: previousAnswer?.answerOrdinal ?? (owner.answerRecords || []).length,
+        completed: previousAnswer?.completed || completed, target: section,
+        outlineSchema: ANSWER_OUTLINE_CACHE_SCHEMA, rawText: previousAnswer?.rawText || '',
+        visibleRawText, blocks: completeBlocks };
       const patch = { entryKey: owner.key, owner: { nodeId: owner.nodeId, messageId: owner.messageId, identityTokens: tdLiveIds(owner) },
-        answer, blocks: parsed, fingerprint, textLength: text.length, revision, changedAt: Date.now() };
+        answer, blocks: completeBlocks, fingerprint, textLength: text.length, revision, changedAt: Date.now() };
       tdLive.patches.set(identity.messageId || identity.nodeId, patch);
       if (completed && (!old || !old.completed)) scheduleChatGptApiRefresh('live-final', 350);
       else tdLiveSettle();
@@ -6005,10 +6317,15 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
         answerMessageId: patch.answer.messageId, parentKey: owner.key,
         key: `strict-answer:${owner.key}:${ordinal}:${b.outlineOrdinal}:${b.fingerprint}`,
         outlineIndex: i, blockIndex: i }));
-      owner.answerBlocks = blocks;
-      // One selected final answer per event, matching the API's existing contract.
-      owner.answerRecords = [{ ...patch.answer, blocks, outlineSchema: ANSWER_OUTLINE_CACHE_SCHEMA, outlineRawText: '' }];
-      const extra = tdLive.extra.get(owner.key); if (extra) { extra.answerBlocks = blocks; extra.answerRecords = owner.answerRecords; }
+      const answer = {...patch.answer, blocks, outlineSchema: ANSWER_OUTLINE_CACHE_SCHEMA};
+      const others = (owner.answerRecords || []).filter(record => !tdLiveSame(record, answer));
+      if (others.some(record => record.answerOrdinal === ordinal)) continue;
+      owner.answerRecords = [...others, answer].sort((a, b) => a.answerOrdinal - b.answerOrdinal);
+      owner.answerBlocks = (owner.answerBlocks || []).filter(block => block.answerOrdinal !== ordinal)
+        .concat(blocks).sort((a, b) => a.answerOrdinal - b.answerOrdinal)
+        .map((block, index) => ({...block, outlineIndex:index,blockIndex:index}));
+      const extra = tdLive.extra.get(owner.key);
+      if (extra) { extra.answerBlocks = owner.answerBlocks; extra.answerRecords = owner.answerRecords; }
     }
     while (tdLive.patches.size > 128) tdLive.patches.delete(tdLive.patches.keys().next().value);
   }
@@ -6207,7 +6524,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
 
   function tdNavLiveEntry(req) {
     if (!tdAlive(req.scope)) return null;
-    const entry = entries.find((e) => e.key === req.entryKey);
+    const entry = req.overviewEntry || entries.find((e) => e.key === req.entryKey);
     if (!entry) return null;
     const ids = tdNavRecordIds(entry);
     if (req.entryIds.length && !req.entryIds.some((id) => ids.includes(id))) return null;
@@ -6510,22 +6827,22 @@ function tdNavScrollRoot(target) {
   return {scroll,desired,error:Math.abs(actual-desired),travel:Math.abs(scroll-s.top)*s.scale,
     limited:Math.abs(scroll-wanted)*s.scale>2};
 }
-  function tdNavLockRoot(req, root) {
+  function tdNavLockRoot(req, root, attribute = 'data-threaddeck-scroll-lock') {
     if (req.root === root) return;
     req.root = root;
     if (!document.getElementById('threaddeck-navigation-style')) {
       const style = document.createElement('style'); style.id = 'threaddeck-navigation-style';
-      style.textContent = `[data-threaddeck-scroll-lock]{scroll-behavior:auto!important;overflow-anchor:none!important;scroll-snap-type:none!important}
+      style.textContent = `:is([data-threaddeck-scroll-lock],[data-threaddeck-history-lock]){scroll-behavior:auto!important;overflow-anchor:none!important;scroll-snap-type:none!important}
         [data-threaddeck-nav-hit]{outline:2px solid color-mix(in srgb, currentColor 22%, transparent);outline-offset:5px;border-radius:3px}
         @media(prefers-reduced-motion:reduce){[data-threaddeck-nav-hit]{transition:none}}`;
       document.documentElement.appendChild(style);
     }
     const actual = isDocumentScrollRoot(root) ? (document.scrollingElement || document.documentElement) : root;
-    const prior = actual.getAttribute('data-threaddeck-scroll-lock'), tag = String(req.id);
-    actual.setAttribute('data-threaddeck-scroll-lock', tag);
+    const prior = actual.getAttribute(attribute), tag = String(req.id);
+    actual.setAttribute(attribute, tag);
     req.cleanups.add(() => {
-      if (actual.getAttribute('data-threaddeck-scroll-lock') !== tag) return;
-      if (prior === null) actual.removeAttribute('data-threaddeck-scroll-lock'); else actual.setAttribute('data-threaddeck-scroll-lock', prior);
+      if (actual.getAttribute(attribute) !== tag) return;
+      if (prior === null) actual.removeAttribute(attribute); else actual.setAttribute(attribute, prior);
     });
   }
   function tdNavFrame(req) {
@@ -6578,6 +6895,42 @@ function tdNavScrollRoot(target) {
     }
     return null;
   }
+  function tdSignalHostReadingScroll(root, delta) {
+    if (Math.abs(delta)<4 || !root?.querySelector('[data-thread-find-target="conversation"] [data-virtualized-turn]')) return;
+    // 先让宿主退出自动跟随末尾，再由浏览器滚到已知的阅读位置。
+    root.dispatchEvent(new WheelEvent('wheel',{deltaY:delta,bubbles:true,cancelable:true}));
+  }
+
+  async function tdNavMountCaptured(req, captured, root) {
+    const initial = tdNavScrollInfo(root);
+    const estimate = Math.max(initial.min,Math.min(initial.max,captured.top - Math.min(65,initial.height * .15)));
+    const boundary = estimate <= initial.top ? initial.min : initial.max;
+    tdNavLockRoot(req,root);
+    req.method = 'recorded-native-position';
+    for (const top of new Set([estimate,boundary])) {
+      if (!tdNavAlive(req) || !root.isConnected) return null;
+      tdSignalHostReadingScroll(root,top-tdNavScrollInfo(root).top);
+      tdNavWriteScroll(req,root,top);
+      let corrections = 0;
+      const target = await tdNavWait(req,() => {
+        const exact = tdNavResolve(req);
+        if (exact || corrections >= 2) return exact;
+        const info = tdNavScrollInfo(root);
+        const aim = Math.max(info.min,Math.min(info.max,top));
+        // 只有同一消息占位能把这次跳转细化为章节位置。
+        const anchor = tdNavFindTurn(captured.address,captured.role);
+        const desired = anchor ? tdNavGeometry(root,anchor).scroll : aim;
+        if (Math.abs(info.top-desired) >= 12) {
+          corrections++;
+          tdNavWriteScroll(req,root,desired,anchor);
+        }
+        return null;
+      },900);
+      if (target) return target;
+    }
+    return null;
+  }
+
   function tdNavHighlight(req, target) {
     if (req.lastTarget === target) return;
     if (req.lastTarget?.getAttribute('data-threaddeck-nav-hit') === String(req.id)) req.lastTarget.removeAttribute('data-threaddeck-nav-hit');
@@ -6626,11 +6979,35 @@ function tdNavScrollRoot(target) {
     if (entry.source !== 'native' && !(entry.nativeMappedIndex === index && ['exact-native-id','exact-native-label'].includes(entry.nativeMappingConfidence))) return null;
     return button;
   }
-  async function tdNavRun(entry, block = null) {
+  async function tdNavAfterHostLayout(req) {
+    const thread = tdZoom.scene?.root || tdZoomRoot();
+    if (thread && tdZoomEarlierMessagesPending(thread)) {
+      // 某些虚拟列表会先挂载章节，分页转场完毕后才应用最后一次宿主滚动校正。
+      const target = await tdNavWait(req,()=>tdZoomEarlierMessagesPending(thread) ? null : tdNavResolve(req),1800);
+      if (!target) return null;
+      if (req.paging && req.root?.isConnected && !tdNavVerification(target).ok) {
+        // 加载器退场时宿主有时重新锚定末尾。先恢复刚刚读过的同一端，再精确定位。
+        const info = tdNavScrollInfo(req.root);
+        const boundary = req.paging === 'up' ? info.min : info.max;
+        tdSignalHostReadingScroll(req.root,boundary-info.top);
+        tdNavWriteScroll(req,req.root,boundary);
+        if (!await tdNavFrame(req)) return null;
+      }
+    }
+    if (!await tdDelay(160,req.scope) || !tdNavAlive(req)) return null;
+    return tdNavVerifyArrival(req,tdNavResolve(req));
+  }
+
+  async function tdNavRun(entry, block = null, overviewRecords = null) {
     if (!entry || !settings.enabled || !isCurrentPageEligible() || getRouteKey() !== routeKey ||
         (block && !isNavigableAnswerBlock(block))) return { result: 'disabled' };
     tdHistory.preserveCancel?.();
+    tdOutlineStopHistory();
     const req = tdNavBegin(entry, block);
+    if (overviewRecords) {
+      req.overviewEntry = entry;
+      req.overviewRecords = overviewRecords;
+    }
     try {
       let target = tdNavResolve(req);
       if (!target && !tdDomRoleRoots('user').length && !tdDomRoleRoots('assistant').length) {
@@ -6678,6 +7055,11 @@ function tdNavScrollRoot(target) {
       exact = await tdNavVerifyArrival(req, exact);
       if (!tdNavAlive(req)) return {result:'cancelled'};
       if (!exact) throw new Error('scroll-did-not-reach-target');
+      if (overviewRecords || req.paging) {
+        exact = await tdNavAfterHostLayout(req);
+        if (!tdNavAlive(req)) return {result:'cancelled'};
+        if (!exact) throw new Error('scroll-did-not-reach-target');
+      }
       const error = req.verification.alignmentErrorPx;
       const live = tdNavLiveEntry(req), index = entries.indexOf(live);
       if (index >= 0) setActiveIndex(index, false);
@@ -7989,8 +8371,7 @@ function tdNavScrollRoot(target) {
   }
 
   function dismissNativeSelectionToolbar(toolbar = nativeSelectionToolbarEl, selectionRect = pendingSelection?.selectionRect) {
-    if (nativeSelectionObserver) nativeSelectionObserver.disconnect();
-    nativeSelectionObserver = null;
+    stopNativeSelectionSearch();
     if (nativeSelectionButtonEl?.isConnected) nativeSelectionButtonEl.remove();
     nativeSelectionButtonEl = null;
     nativeSelectionToolbarEl = null;
@@ -8002,11 +8383,17 @@ function tdNavScrollRoot(target) {
     keepNativeSelectionToolbarSuppressed(selectionRect, toolbar);
   }
 
-  function clearNativeSelectionAction() {
-    if (nativeSelectionObserver) nativeSelectionObserver.disconnect();
+  function stopNativeSelectionSearch() {
+    clearTimeout(nativeSelectionFallbackTimer);
+    clearTimeout(nativeSelectionSearchTimer);
+    nativeSelectionFallbackTimer = null;
+    nativeSelectionSearchTimer = null;
+    nativeSelectionObserver?.disconnect();
     nativeSelectionObserver = null;
-    if (nativeSelectionHeartbeatTimer !== null) window.clearInterval(nativeSelectionHeartbeatTimer);
-    nativeSelectionHeartbeatTimer = null;
+  }
+
+  function clearNativeSelectionAction() {
+    stopNativeSelectionSearch();
     if (nativeSelectionButtonEl?.isConnected) nativeSelectionButtonEl.remove();
     for (const orphan of safeQueryAll(document, '[data-threaddeck-selection-comment="true"]')) orphan.remove();
     nativeSelectionButtonEl = null;
@@ -8202,53 +8589,6 @@ function tdNavScrollRoot(target) {
     return best;
   }
 
-  function pruneNativeSelectionRecentRoots(now = Date.now()) {
-    for (const [root, timestamp] of nativeSelectionRecentRoots) {
-      if (!(root instanceof HTMLElement) || !root.isConnected || now - timestamp > 4200) {
-        nativeSelectionRecentRoots.delete(root);
-      }
-    }
-  }
-
-  function rememberNativeSelectionMutationRoots(mutations) {
-    const now = Date.now();
-    pruneNativeSelectionRecentRoots(now);
-    const inspect = (node) => {
-      if (!(node instanceof HTMLElement) || !node.isConnected) return;
-      const root = findCompactFloatingRoot(node);
-      if (root && !isNativeSelectionToolbarDecoy(root)) nativeSelectionRecentRoots.set(root, now);
-      if (isCompactFloatingOverlay(node) && !isNativeSelectionToolbarDecoy(node)) {
-        nativeSelectionRecentRoots.set(node, now);
-      }
-      for (const candidate of safeQueryAll(node, [
-        '[role="toolbar"]',
-        '[role="menu"]',
-        '[data-radix-popper-content-wrapper]',
-        '[data-floating-ui-portal]',
-        '[data-headlessui-portal]',
-        '[data-state="open"][data-side]',
-        '[data-slot*="popover" i]',
-        '[data-testid*="selection" i]',
-      ].join(','))) {
-        const candidateRoot = findCompactFloatingRoot(candidate) || candidate;
-        if (candidateRoot instanceof HTMLElement && !isNativeSelectionToolbarDecoy(candidateRoot)) {
-          nativeSelectionRecentRoots.set(candidateRoot, now);
-        }
-      }
-    };
-    for (const mutation of mutations || []) {
-      inspect(mutation.target);
-      for (const added of mutation.addedNodes || []) inspect(added);
-    }
-  }
-
-  function nativeSelectionRootIsRecent(element, now = Date.now()) {
-    pruneNativeSelectionRecentRoots(now);
-    if (!(element instanceof HTMLElement)) return false;
-    const timestamp = nativeSelectionRecentRoots.get(element) || 0;
-    return timestamp > 0 && now - timestamp <= 3000;
-  }
-
   function nativeToolbarGeometryScore(element, selectionRect) {
     if (!(element instanceof HTMLElement) || !selectionRect) return Number.NEGATIVE_INFINITY;
     const rect = element.getBoundingClientRect();
@@ -8302,12 +8642,11 @@ function tdNavScrollRoot(target) {
         element.matches('[popover]:popover-open, [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-headlessui-portal], [data-state="open"][data-side], [data-slot*="popover" i], [data-testid*="selection" i]')
       );
       const now = Date.now();
-      const recentRoot = nativeSelectionRootIsRecent(element, now);
       const recentGesture = nativeSelectionGestureStartedAt > 0 && now - nativeSelectionGestureStartedAt <= 3200;
-      if ((!explicitStructuralToolbar && !recentRoot) || !recentGesture || buttons.length < 1 || buttons.length > 8) {
+      if (!explicitStructuralToolbar || !recentGesture || buttons.length < 1 || buttons.length > 8) {
         return Number.NEGATIVE_INFINITY;
       }
-      score += recentRoot ? 8 : 3;
+      score += 3;
     }
     return score;
   }
@@ -8323,11 +8662,12 @@ function tdNavScrollRoot(target) {
 
     // First anchor on the native selection action itself. Unlike generic Copy
     // buttons, “Ask ChatGPT / 询问 ChatGPT” only belongs to the selection popover.
-    for (const control of tdDomQueryAll(document, 'button, [role="button"]')) {
-      if (!(control instanceof HTMLElement) || !isElementVisible(control)) continue;
-      if (control.matches('[data-threaddeck-selection-comment="true"]')) continue;
-      if (!isNativeSelectionPrimaryAction(control)) continue;
-      if (isNativeSelectionToolbarDecoy(control)) continue;
+    const labeledActions = 'button[aria-label*="chatgpt" i],[role="button"][aria-label*="chatgpt" i],'+
+      'button[data-testid*="ask-chatgpt" i],button[title*="chatgpt" i],[role="toolbar"] button,'+
+      '[popover]:popover-open button,[data-testid*="selection" i] button,[data-floating-ui-portal] button';
+    for (const control of tdDomQueryAll(document,labeledActions)) {
+      if (!isNativeSelectionPrimaryAction(control) || isNativeSelectionToolbarDecoy(control) ||
+          !isElementVisible(control)) continue;
       const root = findCompactFloatingRoot(control);
       if (!root) continue;
       const score = nativeToolbarCandidateScore(root, selectionRect, control);
@@ -8337,8 +8677,6 @@ function tdNavScrollRoot(target) {
     const semanticMatches = Array.from(candidates).filter((candidate) => candidate && candidate.root);
     if (semanticMatches.length) return semanticMatches;
     candidates.clear();
-    pruneNativeSelectionRecentRoots();
-    for (const root of nativeSelectionRecentRoots.keys()) addCompactRoots(root);
 
     // Strict structural fallback for locale/A-B variants where the primary action
     // is icon-only. It only considers detached compact overlays near the selection;
@@ -8412,47 +8750,50 @@ function tdNavScrollRoot(target) {
     if (!(button instanceof HTMLElement) || !isElementVisible(button)) return false;
     const r = button.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
     if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
-    for (let p = button.parentElement, depth = 0; p && depth < 12; p = p.parentElement, depth++) {
+    for (let p = button; p; p = tdDomParent(p)) {
       const style = getComputedStyle(p);
-      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) < .8) return false;
       const box = p.getBoundingClientRect();
       if (/(hidden|clip|auto|scroll)/.test(style.overflowX) && (x < box.left || x > box.right)) return false;
       if (/(hidden|clip|auto|scroll)/.test(style.overflowY) && (y < box.top || y > box.bottom)) return false;
       if (p.matches('body,html')) break;
     }
-    return true;
+    const tree = button.getRootNode();
+    const hit = (tree.elementsFromPoint?.(x,y) || document.elementsFromPoint(x,y))[0];
+    return hit === button || button.contains(hit);
   }
 
-  function createNativeSelectionButton(toolbar, templateButton = null) {
-    const template = templateButton instanceof HTMLElement
-      ? templateButton
-      : safeQueryAll(toolbar, 'button, [role="button"]').find(isElementVisible) || null;
+  function createNativeSelectionButton(toolbar, template) {
+    const tree = toolbar.getRootNode();
+    if (!tree.getElementById?.('threaddeck-selection-style')) {
+      const style = document.createElement('style');
+      style.id = 'threaddeck-selection-style';
+      style.textContent = [
+        '[data-threaddeck-selection-comment="true"]{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:5px;',
+        'margin:0;min-block-size:var(--td-selection-height,30px);padding:0 9px;border:0;border-radius:var(--td-selection-radius,8px);',
+        'font:inherit;font-size:var(--td-selection-size,13px);font-weight:550;line-height:1;',
+        'white-space:nowrap;cursor:pointer;flex:none;color:var(--td-selection-ink,currentColor);',
+        'opacity:1;background:transparent;transition:background-color 120ms cubic-bezier(.2,.7,.3,1)}',
+        '[data-threaddeck-selection-comment="true"]:hover,[data-threaddeck-selection-comment="true"]:active{',
+        'background:color-mix(in srgb,var(--td-selection-ink,currentColor) 10%,transparent)}',
+        '[data-threaddeck-selection-comment="true"]:focus-visible{outline:2px solid currentColor;outline-offset:-2px}',
+        '[data-threaddeck-selection-comment="true"] svg{width:16px;height:16px;flex:none}',
+        '@media(prefers-reduced-motion:reduce){[data-threaddeck-selection-comment="true"]{transition:none}}',
+      ].join('');
+      (tree instanceof ShadowRoot ? tree : document.documentElement).append(style);
+    }
     const button = document.createElement('button');
     button.type = 'button';
     button.dataset.threaddeckSelectionComment = 'true';
     tdDomState.selection = 'native-button-created';
-    button.setAttribute('aria-label', '添加到 Tab Cadence 批注');
-    button.title = '添加到 Tab Cadence 批注';
-    if (template instanceof HTMLElement && template.className) button.className = template.className;
-
-    button.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" style="width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round;flex:none"><path d="M4.25 3.75h11.5v8.5H9l-3.75 3v-3H4.25z"/><path d="M10 6.5v3M8.5 8h3"/></svg><span>批注</span>';
-    button.style.setProperty('display', 'inline-flex', 'important');
-    button.style.setProperty('align-items', 'center', 'important');
-    button.style.setProperty('justify-content', 'center', 'important');
-    button.style.setProperty('gap', '5px', 'important');
-    button.style.setProperty('white-space', 'nowrap', 'important');
-    button.style.setProperty('cursor', 'pointer', 'important');
-    button.style.setProperty('flex-shrink', '0', 'important');
-    button.style.setProperty('width', 'auto', 'important');
-    button.style.setProperty('min-width', '0', 'important');
-    if (!template) {
-      button.style.setProperty('min-height', '30px', 'important');
-      button.style.setProperty('padding', '0 9px', 'important');
-      button.style.setProperty('border', '0', 'important');
-      button.style.setProperty('border-radius', '8px', 'important');
-      button.style.setProperty('background', 'transparent', 'important');
-      button.style.setProperty('color', 'inherit', 'important');
-    }
+    button.setAttribute('aria-label', '添加批注');
+    button.innerHTML = threadDeckIcon('annotation') + '<span>批注</span>';
+    const sibling = template || toolbar;
+    const inherited = getComputedStyle(sibling);
+    button.style.setProperty('--td-selection-height', Math.max(28,Math.min(40,sibling.getBoundingClientRect().height))+'px');
+    button.style.setProperty('--td-selection-radius', inherited.borderTopLeftRadius === '0px' ? '8px' : inherited.borderTopLeftRadius);
+    button.style.setProperty('--td-selection-size', inherited.fontSize);
+    button.style.setProperty('--td-selection-ink', inherited.color);
 
     const preserveSelection = (event) => {
       event.preventDefault();
@@ -8463,9 +8804,7 @@ function tdNavScrollRoot(target) {
     button.addEventListener('mousedown', preserveSelection, true);
     button.addEventListener('click', (event) => {
       preserveSelection(event);
-      const captured = pendingSelection;
-      if (!captured) return;
-      addPendingReviewComment();
+      if (pendingSelection) addPendingReviewComment();
     }, true);
     return button;
   }
@@ -8501,102 +8840,54 @@ function tdNavScrollRoot(target) {
   }
 
   function scheduleNativeSelectionIntegration(selectionRect) {
-    if(tdSelectionBusy())return;
+    if (tdSelectionBusy()) return;
     const token = ++nativeSelectionIntegrationToken;
     clearNativeSelectionAction();
     if (selectionActionEl) selectionActionEl.hidden = true;
 
-    let attemptQueued = false;
-    let fallbackShown = false;
-    const startedAt = performance.now();
-    const integrationAlive = () => Boolean(
-      token === nativeSelectionIntegrationToken &&
-      pendingSelection &&
-      Date.now() - Number(pendingSelection.capturedAt || 0) < NATIVE_SELECTION_PENDING_TTL_MS
-    );
-    const attempt = () => {
-      if(tdSelectionBusy())return false;
-      if (!integrationAlive()) return false;
-      if (
-        nativeSelectionButtonEl?.isConnected &&
-        nativeSelectionToolbarEl?.isConnected &&
-        nativeSelectionToolbarEl.contains(nativeSelectionButtonEl) &&
-        tdDomActionVisible(nativeSelectionButtonEl) &&
-        !isNativeSelectionToolbarDecoy(nativeSelectionToolbarEl)
-      ) {
-        if (selectionActionEl) selectionActionEl.hidden = true;
-        return true;
-      }
+    const alive = () => token === nativeSelectionIntegrationToken && !tdSelectionBusy() && pendingSelection;
+    const attach = () => {
+      if (!alive()) return false;
+      if (tdDomActionVisible(nativeSelectionButtonEl)) return true;
       try {
         const match = findNativeSelectionToolbar(selectionRect);
-        const attached = match ? attachNativeSelectionAction(match) : false;
-        if (attached && selectionActionEl) selectionActionEl.hidden = true;
-        return attached;
-      } catch(error) {tdSelection.lastError=String(error?.name||'Error');return false;}
+        return Boolean(match && attachNativeSelectionAction(match));
+      } catch (error) {
+        tdSelection.lastError = String(error?.name || 'Error');
+        return false;
+      }
     };
-    const queueAttempt = () => {
-      if (attemptQueued || !integrationAlive()) return;
-      attemptQueued = true;
+
+    // 宿主会在文字选中之后异步挂载或替换菜单。合并这些变化，避免轮询整页。
+    const portal = 'button,[role="toolbar"],[popover],[data-state],[data-floating-ui-portal],[data-testid*="selection" i]';
+    let queued = false;
+    const queueAttach = () => {
+      if (queued) return;
+      queued = true;
       requestAnimationFrame(() => {
-        attemptQueued = false;
-        attempt();
+        queued = false;
+        if (attach() && selectionActionEl) selectionActionEl.hidden = true;
       });
     };
-
-    nativeSelectionRecentRoots.clear();
-    nativeSelectionObserver = new MutationObserver((mutations) => {
-      if(tdSelectionBusy())return;
-      const external=mutations.filter(m=>{
-        const n=nodeAsElement(m.target);
-        if(n?.closest('#threaddeck-host,[data-threaddeck-selection-comment]'))return false;
-        if(m.type==='childList'&&[...m.addedNodes,...m.removedNodes].length&&[...m.addedNodes,...m.removedNodes].every(c=>c instanceof Element&&c.matches('[data-threaddeck-selection-comment]')))return false;
-        return true;
-      });
-      if(!external.length)return;
-      rememberNativeSelectionMutationRoots(external);queueAttempt();
+    nativeSelectionObserver = new MutationObserver(records => {
+      if (!alive() || tdDomActionVisible(nativeSelectionButtonEl)) return;
+      if (records.some(record => [...record.addedNodes, record.target].some(node =>
+        node instanceof HTMLElement && !node.closest('#threaddeck-host,[data-threaddeck-selection-comment]') &&
+        (node.matches(portal) || record.type === 'childList' && node !== record.target && node.querySelector(portal))))) queueAttach();
     });
-    if (document.documentElement) {
-      nativeSelectionObserver.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        characterData: true,
-        attributeFilter: ['class', 'style', 'role', 'hidden', 'aria-label', 'aria-hidden', 'data-state', 'data-side', 'data-testid'],
-      });
-    }
-
-    // React can replace the native portal without producing a mutation on the node
-    // we previously watched. A short heartbeat reattaches the action and also makes
-    // the fallback deterministic instead of depending on one lucky observer tick.
-    nativeSelectionHeartbeatTimer = window.setInterval(() => {
-      if(tdSelectionBusy())return;
-      if (!integrationAlive()) {
-        clearNativeSelectionAction();
-        return;
-      }
-      const attached = attempt();
-      if (!attached && fallbackShown) positionSelectionAction(selectionRect);
-      const elapsed = performance.now() - startedAt;
-      if (!attached && !fallbackShown && elapsed >= NATIVE_SELECTION_TOOLBAR_FALLBACK_MS) {
-        fallbackShown = true;
-        positionSelectionAction(selectionRect);
-      }
-    }, NATIVE_SELECTION_TOOLBAR_HEARTBEAT_MS);
-
-    const retry = () => {
-      if(tdSelectionBusy())return;
-      if (!integrationAlive()) return;
-      const attached = attempt();
-      if (!attached && fallbackShown) positionSelectionAction(selectionRect);
-      const elapsed = performance.now() - startedAt;
-      if (!attached && !fallbackShown && elapsed >= NATIVE_SELECTION_TOOLBAR_FALLBACK_MS) {
-        fallbackShown = true;
-        positionSelectionAction(selectionRect);
-      }
-      if (elapsed >= NATIVE_SELECTION_TOOLBAR_WAIT_MS) return;
-      window.setTimeout(() => requestAnimationFrame(retry), elapsed < 800 ? 32 : 72);
-    };
-    if (!attempt()) requestAnimationFrame(retry);
+    nativeSelectionObserver.observe(document.body || document.documentElement, {
+      childList:true, subtree:true, attributes:true, attributeFilter:['class','hidden','style','data-state'],
+    });
+    nativeSelectionFallbackTimer = setTimeout(() => {
+      nativeSelectionFallbackTimer = null;
+      if (alive() && !attach()) positionSelectionAction(selectionRect);
+    }, NATIVE_SELECTION_TOOLBAR_FALLBACK_MS);
+    nativeSelectionSearchTimer = setTimeout(() => {
+      if (!alive()) return;
+      if (attach() && selectionActionEl) selectionActionEl.hidden = true;
+      stopNativeSelectionSearch();
+    }, NATIVE_SELECTION_TOOLBAR_DISCOVERY_MS);
+    queueAttach();
   }
 
   function tdSelectionAnchorRect(range) {
@@ -8660,7 +8951,7 @@ function tdNavScrollRoot(target) {
     if(!range || range.collapsed)return;
     const prior=tdSelection.lastAnalyzed;
     if(prior&&prior.epoch===td.epoch&&prior.serial===tdSelection.serial&&prior.a===range.startContainer&&prior.b===range.endContainer&&prior.ao===range.startOffset&&prior.bo===range.endOffset&&pendingSelection&&
-      (nativeSelectionObserver||tdDomActionVisible(nativeSelectionButtonEl)||selectionActionEl&&!selectionActionEl.hidden))return;
+      (tdDomActionVisible(nativeSelectionButtonEl)||selectionActionEl&&!selectionActionEl.hidden))return;
     tdSelection.lastAnalyzed={epoch:td.epoch,serial:tdSelection.serial,a:range.startContainer,b:range.endContainer,ao:range.startOffset,bo:range.endOffset};
     if(isInsideComposer(nodeAsElement(range.startContainer)) || tdDomClosest(nodeAsElement(range.startContainer),"#threaddeck-host,#prompt-rail-host")){hideSelectionAction();return;}
     tdDomState.lastShape = [];
@@ -8728,7 +9019,7 @@ function tdNavScrollRoot(target) {
     // first selection. Reinitialising here would remove the button we just injected.
     tdDomState.selection=tooLong?'selection-too-long':'selection-ready';
     tdDomRememberSelection(tdDomState.selection,range,true);
-    if (!sameSelection || !nativeSelectionObserver || nativeSelectionHeartbeatTimer === null) {
+    if (!sameSelection || !tdDomActionVisible(nativeSelectionButtonEl) && selectionActionEl.hidden && nativeSelectionFallbackTimer === null) {
       scheduleNativeSelectionIntegration(rectSnapshot);
     }
   }
@@ -8783,7 +9074,7 @@ function tdNavScrollRoot(target) {
   }
 
   function getChatGptComposer() {
-    const selectors = ['#prompt-textarea[contenteditable="true"]', 'textarea#prompt-textarea', '[data-testid="composer"] [contenteditable="true"]', 'form textarea[data-testid="prompt-textarea"]', 'form textarea[placeholder]', 'form [contenteditable="true"][role="textbox"]'];
+    const selectors = ['#prompt-textarea[contenteditable="true"]', 'textarea#prompt-textarea', '[data-testid="composer"] [contenteditable="true"]', 'form textarea[data-testid="prompt-textarea"]', '[data-composer-markdown][contenteditable="true"][role="textbox"]', 'form textarea[placeholder]', 'form [contenteditable="true"][role="textbox"]'];
     for (const selector of selectors) {
       const found = safeQueryAll(document, selector).find((node) => node instanceof HTMLElement && node.isConnected &&
         isElementVisible(node) && !node.closest('#threaddeck-host,#prompt-rail-host,[data-message-author-role],nav,aside,[role="dialog"]'));
@@ -8834,7 +9125,7 @@ function tdNavScrollRoot(target) {
 
   function composerHasAttachments(composer = getChatGptComposer()) {
     if (!composer) return false;
-    const container = composer.closest('form') || composer.parentElement?.parentElement || composer.parentElement;
+    const container = composer.closest('form,[data-composer-surface-variant]') || composer.parentElement?.parentElement || composer.parentElement;
     if (!(container instanceof Element)) return false;
     const selectors = [
       '[data-testid="composer-attachment"]',
@@ -8850,7 +9141,7 @@ function tdNavScrollRoot(target) {
 
   // v1.9.1: logical submission ownership must not depend on the visual dock's
   // height/width score. The queue dock remains presentation-only.
-  const TD_COMPOSER_SHELLS = '[data-testid="composer"],[data-composer-layout],[data-composer-input-variant]';
+  const TD_COMPOSER_SHELLS = '[data-testid="composer"],[data-composer-surface-variant],[data-composer-layout],[data-composer-input-variant]';
   const TD_CONTROL_EXCLUDED = '#threaddeck-host,#prompt-rail-host,nav,aside,[role="navigation"],'+
     '[data-message-author-role],[data-conversation-role],[data-user-message-bubble],'+
     '[data-chatgpt-selection-message-id],[data-chatgpt-search-message-ids],'+
@@ -8873,7 +9164,7 @@ function tdNavScrollRoot(target) {
       if (depth<2 || node.matches(TD_COMPOSER_SHELLS) || node===form) add(node);
       if (node===form) break;
     }
-    return {composer,form,roots:[...roots]};
+    return {composer,form,roots:[...roots].filter(root=>![...roots].some(other=>other!==root&&other.contains(root)))};
   }
 
   function tdControlBelongs(button, scope) {
@@ -9172,7 +9463,9 @@ function tdNavScrollRoot(target) {
   // UI identities remain usable during a failed read-only history/status request.
   // This is a same-tail check, not a "looks old enough" completion timeout.
   function tdCurrentPair(user, final, run) {
-    if (!user.section || !final.section || !final.text || compareDomOrder(user.section, final.section) >= 0) return false;
+    if (!user.section || !final.section || !final.hasContent || compareDomOrder(user.section, final.section) >= 0) return false;
+    const imageTurn = tdGeneratedImageTurn(final.section);
+    if (imageTurn && user.section.closest('[data-talvt-turn-state]') !== imageTurn) return false;
     const userIds = [...new Set([...tdSectionIdentity(user.section), ...tdReceiptUserIds(user.section)])];
     const answerIds = tdSectionIdentity(final.section);
     if (!userIds.length || !answerIds.length) return false;
@@ -9228,7 +9521,7 @@ function tdNavScrollRoot(target) {
     const finalAfterUser = Boolean(final.section && (!user.section || compareDomOrder(user.section, final.section) < 0));
     const finalIsVerifiedLatest=Boolean(tdProofApplies(tdTurn.proof,user,td.run) &&
       tdSectionIdentity(final.section).some(id=>tdTurn.proof.answer?.ids.includes(id)));
-    const hasAnswer = Boolean((finalAfterUser || finalIsVerifiedLatest) && final.text);
+    const hasAnswer = Boolean((finalAfterUser || finalIsVerifiedLatest) && final.hasContent);
     if (user.key) td.lastUser = user.key;
     if (final.signature && final.signature !== td.lastFinal) { td.lastFinal = final.signature; td.finalChangedAt = now; }
     const stable = hasAnswer && now - td.finalChangedAt >= 450;
@@ -9245,7 +9538,7 @@ function tdNavScrollRoot(target) {
     const sameVisibleMessage = Boolean(proofApplies && hasAnswer &&
       tdSectionIdentity(final.section).some(id => proof.answer?.ids.includes(id)));
     const currentPair = tdCurrentPair(user, final, td.run);
-    const exactDomEnd = !direct && hasAnswer && final.completed && (sameVisibleMessage || currentPair);
+    const exactDomEnd = !direct && stable && final.completed && (sameVisibleMessage || currentPair);
     if (!td.run && exactDomEnd) tdRememberCompletion('exact-final-controls');
     const receipt=tdTurn.receipt;
     const localReceipt = currentPair && [...tdReceiptUserIds(user.section),...tdSectionIdentity(user.section)].some(id => receipt?.userIds?.includes(id)) &&
@@ -9487,7 +9780,6 @@ function tdNavScrollRoot(target) {
       const reason=current.status==='ready'?'control-replaced':current.reason;
       tx.reason=tdSendPreflightText(reason);tdRecordDispatch(reason);return false;
     }
-    const button=current.button;
     tx.baseline = tdLocalUserSnapshot();
     tx.item.baselineKey = tx.baseline.key;
     tx.item.status = 'sending'; tx.item.attemptedAt = Date.now();
@@ -9497,12 +9789,14 @@ function tdNavScrollRoot(target) {
     const armedRun=td.run;
     const stored=await workspaceSession.flush();
     const finalCheck=tdAlive(tx.scope)&&pilotActive?tdInspectPreparedSend(tx,payload):null;
-    if(!stored||finalCheck?.status!=='ready'||finalCheck.button!==button||tdSelectionBusy()){
+    if(!stored||finalCheck?.status!=='ready'||finalCheck.choice?.kind!==current.choice?.kind||tdSelectionBusy()){
       if(td.run===armedRun && tdAlive(tx.scope))td.run=null;
       tx.reason=!stored?'队列未能保存，未发送':'页面或草稿已经变化，未发送';
       return false;
     }
+    const button = finalCheck.button;
     tx.clicked = true;
+    tdArmReceiptObserver(tx);
     if (tx.editorWrite) tx.editorWrite.committed = true;
     const priorReceipt=tdEditor.receipts.get(composer);
     if(priorReceipt && tdAlive(priorReceipt.scope))priorReceipt.committed=true;
@@ -9571,6 +9865,7 @@ function tdNavScrollRoot(target) {
     const item = itemId ? promptQueue.find(q => q.id === itemId) : promptQueue[0];
     if (!item || !normalizeMultilineText(item.text) || item.status==='uncertain' || (item.status==='failed' && intent!=='native-now')) return tdRecordDispatch(!item?'missing-item':item.status==='uncertain'?'uncertain-send':item.status==='failed'?'failed-preflight':'empty-prompt');
     if (!force && (!settings.autoRunQueue || queuePaused)) return tdRecordDispatch(queuePaused?'queue-paused':'auto-send-off');
+    if (!force && Date.now()<tdChatBackoffUntil) return tdRecordDispatch('chat-rate-limited');
     const activity = getChatGptActivitySnapshot();
     if (intent === 'queue' && tdIntentBusy(activity)) return tdRecordDispatch('waiting-for-turn',activity);
     if (!force && (Date.now() < queueHoldUntil || Date.now()-queueLastEditAt < 600 || td.pointerHold || queueMenuOpenId)) return tdRecordDispatch(queueMenuOpenId?'queue-menu-open':td.pointerHold?'pointer-gesture':'edit-grace');
@@ -9638,9 +9933,9 @@ function tdNavScrollRoot(target) {
         const pair=tdCurrentPair(user,final,run);
         // A final explicitly decorated by the host beats an orphaned local latch.
         if(pair&&final.completed)return false;
-        if(pair&&final.text&&Date.now()-td.finalChangedAt>=450&&!activity.networkPending)return false;
+        if(pair&&final.hasContent&&Date.now()-td.finalChangedAt>=450&&!activity.networkPending)return false;
         if(activity.networkPending)return true;
-        if(run.accepted && (!final.text||!pair))return true;
+        if(run.accepted && (!final.hasContent||!pair))return true;
         if(!run.accepted&&Date.now()-run.startedAt<1800)return true;
       }
       return false;
@@ -9966,7 +10261,7 @@ function tdNavScrollRoot(target) {
     const wrap=document.createElement('div');wrap.className='td-minimap';wrap.hidden=true;
     const tools=document.createElement('div');tools.className='td-minimap-tools';
     const outline=document.createElement('button');outline.type='button';outline.textContent='大纲';outline.title='展开或收起完整大纲';
-    outline.addEventListener('click',()=>{navigatorEl.dataset.pinned=String(navigatorEl.dataset.pinned!=='true');});
+    outline.addEventListener('click',()=>tdSetOutlinePinned(navigatorEl.dataset.pinned!=='true'));
     const mode=document.createElement('span');mode.className='td-minimap-mode';tools.append(outline,mode);
     const track=document.createElement('div');track.className='td-minimap-track';
     const canvas=document.createElement('canvas');canvas.setAttribute('aria-hidden','true');
@@ -10446,6 +10741,7 @@ function tdNavScrollRoot(target) {
     if (queueProcessing) return td.tx?.clicked ? '已点击发送，正在确认上屏' : td.tx?.intent === 'interrupt' ? '正在停止当前回答，随后插话' : '准备发送';
     if (head?.status === 'uncertain') return '提交结果待核对 · 不会自动重发';
     if (head?.status === 'failed') return head.error || '发送前校验未通过';
+    if (Date.now()<tdChatBackoffUntil) return 'ChatGPT 暂时限流 · 恢复后续发';
     if (queuePaused) return '已暂停 · 点击右侧 … 恢复';
     if (head && !normalizeMultilineText(head.text)) return '问题内容为空 · 请编辑或删除';
     if (!settings.enabled) return '对话工具已停用';
@@ -10641,7 +10937,7 @@ function tdNavScrollRoot(target) {
  window.setInterval(()=>{
    if(tdSelectionBusy()||td.tx||!settings.enabled||!settings.enableInlineComments||activeCommentMode==='compose')return;
    const s=window.getSelection();
-   if(s&&!s.isCollapsed&&s.rangeCount===1&&!tdDomActionVisible(nativeSelectionButtonEl)&&selectionActionEl?.hidden&&!nativeSelectionObserver)tdSelectionSchedule(24);
+   if(s&&!s.isCollapsed&&s.rangeCount===1&&!tdDomActionVisible(nativeSelectionButtonEl)&&selectionActionEl?.hidden&&nativeSelectionFallbackTimer===null)tdSelectionSchedule(24);
  },650);
 }
 
@@ -10656,6 +10952,1446 @@ function tdNavScrollRoot(target) {
     window.addEventListener('visibilitychange', () => { td.activityDirty = true; tdWake(); });
     window.addEventListener('pageshow', () => { td.activityDirty = true; tdWake(100); });
   }
+
+  const tdZoom = {
+    root: null, listener: null, surface: null, button: null, index: null, records: [],
+    scene: null, control: false, tail: null, frame: 0, settle: 0,
+  };
+  const tdZoomReducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const tdZoomExcluded = 'input,textarea,select,button,[contenteditable],[role="textbox"],[role="dialog"],nav,aside';
+  const tdZoomBubble = '.user-message-bubble-color,[class*="message-surface"],[data-user-message-bubble]';
+  const tdZoomChunk = 56;
+  const tdZoomHistoryBudget = 36;
+  const tdZoomHistoryTimeout = 12000;
+
+  function tdZoomRoot() {
+    const declared = document.querySelector('[data-thread-find-target="conversation"], [data-testid="conversation-thread"]');
+    if (declared instanceof HTMLElement && declared.offsetWidth > 0 && declared.offsetHeight > 0) return declared;
+    const detected = getChatGptThreadRoot();
+    if (detected instanceof HTMLElement && !detected.matches('body,html')) return detected;
+    return document.querySelector('main,[role="main"]');
+  }
+
+  function tdZoomHistoryPosition(root, node) {
+    const view = tdNavClientBox(root), info = tdNavScrollInfo(root);
+    return info.top + (node.getBoundingClientRect().top - view.top) / info.scale;
+  }
+
+  function tdZoomNativeScroll(root, top) {
+    const info = tdNavScrollInfo(root);
+    const options = {top:Math.min(info.max, Math.max(info.min, top)),behavior:'instant'};
+    if (info.doc) window.scrollTo(options);
+    else root.scrollTo(options);
+  }
+
+  function tdZoomCaptureHistory(scene, root) {
+    const capture = scene.history;
+    const viewport = tdNavClientBox(root), info = tdNavScrollInfo(root);
+    const revision = [tdDomState.revision,tdDomScopes.revision,info.range,info.height,viewport.width].join(':');
+    const last = capture.sample;
+    // 视口内滚动不会改变已挂载消息的内容或绝对位置。
+    if (last?.thread === scene.root && last.root === root && last.revision === revision) return false;
+    const visibility = new WeakMap();
+    const rows = ['user','assistant'].flatMap(role => tdDomRoleRoots(role,visibility)
+      .filter(target => tdDomContains(scene.root,target))
+      .map(target => ({target,role,address:tdMessageAddress(target,role)})))
+      .filter(row => row.address.messageId)
+      .sort((a,b) => compareDomOrder(a.target,b.target));
+    const encountered = new Set(), sample = [];
+    for (const {target, role, address} of rows) {
+      const id = address.messageId;
+      if (encountered.has(id)) continue;
+      encountered.add(id);
+      const previous = capture.messages.get(id);
+      let rendered = role === 'user' ? tdZoomQuestionText({target}) : tdZoomAnswerText({target});
+      if (!rendered && role === 'assistant') {
+        const exact = tdDomFindExact([id],role);
+        if (exact && exact !== target && tdDomContains(scene.root,exact)) rendered = tdZoomAnswerText({target:exact});
+      }
+      const raw = !rendered || role === 'user' && previous?.raw?.startsWith(rendered) ? previous?.raw || '' : rendered;
+      if (!raw && !target.closest('[data-talvt-turn-state="complete"]') && !target.querySelector('[data-talvt-turn-state="complete"]')) continue;
+      const blocks = role === 'assistant' && previous?.raw !== raw ? collectRenderedAnswerBlocks(target) : previous?.blocks || [];
+      const top = info.top + (target.getBoundingClientRect().top - viewport.top) / info.scale;
+      const turn = target.closest('[data-turn-key]')?.getAttribute('data-turn-key') || '';
+      sample.push({id,role,address,raw,blocks,target,top,turn});
+    }
+    if (!sample.length) return false;
+    capture.sample = {thread:scene.root,root,revision};
+    const same = sample.find(message => capture.messages.has(message.id));
+    capture.links ||= new Set();
+    const mounted = new Map(sample.map(({id},index) => [id,index]));
+    for (const link of capture.links) {
+      const [before,after] = link.split('\u001f');
+      if (mounted.has(before) && mounted.has(after) && mounted.get(before) >= mounted.get(after)) capture.links.delete(link);
+    }
+    for (let index = 1; index < sample.length; index++) capture.links.add(sample[index-1].id+'\u001f'+sample[index].id);
+    capture.mounted = mounted;
+    if (capture.complete && sample.some(message => capture.messages.get(message.id)?.raw !== message.raw)) {
+      capture.complete = false;
+      capture.attempted = false;
+      capture.resume = null;
+    }
+    if (same) {
+      const shift = same.top - capture.messages.get(same.id).top;
+      if (Math.abs(shift) > 2) for (const row of capture.messages.values()) row.top += shift;
+    }
+    capture.order = tdMergeObservedOrder(capture.order,sample.map(message => message.id));
+    for (const message of sample) capture.messages.set(message.id,message);
+    tdZoomReconcileHistoryOrder(capture);
+    return true;
+  }
+
+  function tdMergeObservedOrder(base, observed) {
+    // 原文中仍可核对的记录按网页顺序重排。未挂载的记录保留在相邻锚点之间。
+    const existing = new Set(base);
+    const anchors = observed.filter(item => existing.has(item));
+    const seen = new Set(anchors);
+    let anchorIndex = 0;
+    const ordered = base.map(item => seen.has(item) ? anchors[anchorIndex++] : item);
+    let pending = [], previous;
+    const before = new Map();
+    for (const item of observed) {
+      if (!existing.has(item)) { pending.push(item); continue; }
+      if (pending.length) { before.set(item,pending); pending = []; }
+      previous = item;
+    }
+    const result = ordered.flatMap(item => [...(before.get(item) || []), item, ...(item === previous ? pending : [])]);
+    if (!anchors.length) result.push(...pending);
+    return result;
+  }
+
+  function tdZoomReconcileHistoryOrder(capture) {
+    // 虚拟列表有时会先换掉整个视口。之后可见的相邻消息能重新连接这些片段。
+    const inbound=new Map(capture.order.map(id=>[id,0])), successors=new Map();
+    for (const link of capture.links) {
+      const [before,after]=link.split('\u001f');
+      if (!inbound.has(before) || !inbound.has(after) || before===after) continue;
+      const next=successors.get(before) || [];
+      next.push(after);
+      successors.set(before,next);
+      inbound.set(after,inbound.get(after)+1);
+    }
+    const ordered=capture.order.filter(id=>inbound.get(id)===0);
+    for (let index=0; index<ordered.length; index++) {
+      for (const id of successors.get(ordered[index]) || []) {
+        const remaining=inbound.get(id)-1;
+        inbound.set(id,remaining);
+        if (!remaining) ordered.push(id);
+      }
+    }
+    const linked=ordered.length===capture.order.length && ordered.every((id,index)=>!index ||
+      capture.links.has(ordered[index-1]+'\u001f'+id));
+    if (linked) capture.order = ordered;
+    capture.gap = !linked;
+    if (!linked) capture.complete = false;
+  }
+
+  function tdZoomCapturedRecords(scene) {
+    const records = [];
+    let entry = null;
+    for (const id of scene.history.order) {
+      const row = scene.history.messages.get(id);
+      if (!row.raw) { entry = null; continue; }
+      if (row.role === 'user' || !entry || entry.anchorRole === 'assistant' || (row.turn && entry.turnKey && row.turn !== entry.turnKey)) {
+        const title = row.role === 'user' ? row.raw : row.blocks[0]?.label || truncateText(row.raw.split('\n')[0],100);
+        entry = {...row.address,key:`overview:${row.role}:${id}`,kind:row.role==='user'?'prompt':'assistant-output',
+          anchorRole:row.role,text:title,rawQuestion:row.role==='user'?row.raw:'',target:row.target,turnKey:row.turn,
+          answerRecords:[],answerBlocks:[]};
+        records.push(entry);
+      }
+      if (row.role === 'user') continue;
+      const answerOrdinal = entry.answerRecords.length;
+      const blocks = row.blocks.map((block,index) => ({...block,key:`overview:${id}:${index}`,
+        parentKey:entry.key,answerOrdinal,answerMessageId:id,answerNodeId:row.address.nodeId}));
+      entry.answerRecords.push({...row.address,target:row.target,answerOrdinal,rawText:row.raw,blocks,
+        outlineSchema:ANSWER_OUTLINE_CACHE_SCHEMA,outlineRawText:row.raw});
+      entry.answerBlocks.push(...blocks);
+    }
+    return records;
+  }
+
+  function tdOutlineCapture(root) {
+    const thread = tdZoomRoot();
+    if (!thread) return null;
+    let capture = tdHistory.capture;
+    if (!capture || !tdAlive(capture.scope)) {
+      capture = {root:thread,scope:tdScope(),history:{messages:new Map(),order:[]}};
+      tdHistory.capture = capture;
+    }
+    capture.root = thread;
+    capture.history.root = root;
+    tdZoomCaptureHistory(capture,root);
+    return capture;
+  }
+
+  function tdOutlineMergeHistory(base, root) {
+    const capture = tdOutlineCapture(root);
+    if (!capture?.history.order.length) return base;
+    const authoritative = tdHealth.snapshot?.complete === true;
+    const observed = tdZoomCapturedRecords(capture);
+    const identity = (row,role=entryAnchorRole(row)) => tdNavRecordIds(row).map(id=>role+':'+id);
+    const same = (record,other,role) => identity(record,role).some(id => identity(other,role).includes(id));
+    const covered = new Map(base.flatMap(item=>identity(item).map(id=>[id,item])));
+    const previousOwner = new Map(base.flatMap(item=>(item.answerRecords || [])
+      .flatMap(answer=>identity(answer,'assistant').map(id=>[id,item]))));
+    const observedTurns = new Map(observed.flatMap(row=>identity(row).map(id=>[id,row.turnKey])));
+    const standalone = new Set(observed.filter(row=>{
+      if (entryAnchorRole(row)!=='assistant' || !row.turnKey) return false;
+      const owner = identity(row).map(id=>previousOwner.get(id)).find(Boolean);
+      if (!owner || entryAnchorRole(owner)==='assistant') return true;
+      // 如果提问尚未挂载，不能仅凭一条回复猜测它是独立轮次。
+      return identity(owner).some(id=>observedTurns.get(id) && observedTurns.get(id)!==row.turnKey);
+    }).flatMap(row=>identity(row)));
+    const merged = base.map(item=>{
+      const answers = item.answerRecords || [];
+      if (!isUserAnchoredEntry(item)) return item;
+      const attached = answers.filter(answer=>!identity(answer,'assistant').some(id=>standalone.has(id)));
+      if (attached.length === answers.length) return item;
+      const ordinals = new Set(attached.map(answer=>answer.answerOrdinal));
+      return {...item,answerRecords:attached,answerBlocks:(item.answerBlocks || []).filter(block=>ordinals.has(block.answerOrdinal))};
+    });
+    const byKey = new Map(merged.map(entry => [entry.key,entry]));
+    const ordered = [], visited = new Set();
+    for (const row of observed) {
+      const id = identity(row);
+      const match = id.map(key=>covered.get(key)).find(Boolean);
+      const oldOwner = id.map(key=>previousOwner.get(key)).find(Boolean);
+      // 分段正文的第一条回答可能属于上一段已索引的提问。由相同消息身份认领。
+      if (!match && oldOwner && !id.some(key=>standalone.has(key))) continue;
+      const current = match ? byKey.get(match.key) : {...row,source:'native-history'};
+      if (visited.has(current.key)) continue;
+      visited.add(current.key);
+      ordered.push(current);
+      if (!match) continue;
+      const known = current.answerRecords || [];
+      const nativeAnswers = row.answerRecords.map(answer=>known.find(record=>same(record,answer,'assistant')) || answer);
+      const answers = tdMergeObservedOrder(known,nativeAnswers);
+      current.answerRecords = answers.map((answer,answerOrdinal)=>{
+        const native = row.answerRecords.find(record=>same(record,answer,'assistant'));
+        const original = answer.blocks?.length ? answer.blocks :
+          (current.answerBlocks || []).filter(block=>block.answerOrdinal===answer.answerOrdinal);
+        const outline = native && native !== answer ? tdMergeLiveOutline(original,native.blocks) : original;
+        const blocks = outline.map(block=>({...block,parentKey:current.key,answerOrdinal}));
+        return {...answer, answerOrdinal, blocks, target:native?.target?.isConnected ? native.target : answer.target,
+          visibleRawText:native?.rawText || answer.visibleRawText};
+      });
+      current.answerBlocks = current.answerRecords.flatMap(answer=>answer.blocks);
+      if (!current.rawQuestion && row.rawQuestion) current.rawQuestion = row.rawQuestion;
+    }
+    // 完整网页采集可以替换旧的 DOM 缓存。当前会话原生快照仍用于未挂载的源记录。
+    return capture.history.complete && !authoritative ? ordered : tdMergeObservedOrder(merged,ordered);
+  }
+
+  async function tdOutlineLoadHistory(manual = false) {
+    if (site.id !== 'chatgpt' || !settings.enabled || !isCurrentPageEligible() || tdZoom.scene ||
+        (tdHealth.snapshot?.complete === true && entries.length)) return;
+    if (tdHistory.capture?.history.running || !manual && tdHistory.capture?.history.attempted) return;
+    const capture = tdOutlineCapture(currentScrollRoot || findScrollRoot());
+    if (!capture || capture.history.complete) return;
+    try { await tdZoomRecoverHistory(capture,manual); }
+    catch (error) { tdHealthFault('outline-history',error); }
+  }
+
+  function tdOutlineStopHistory() {
+    const capture = tdHistory.capture;
+    if (!capture?.history.running || capture.history.cancelled) return;
+    capture.history.cancelled = true;
+    tdZoomRestoreHistory(capture);
+  }
+
+  function tdZoomRestoreHistory(scene) {
+    const capture = scene.history;
+    const root = capture.root, origin = capture.origin;
+    capture.origin = null;
+    try {
+      if (!root?.isConnected || !tdAlive(scene.scope) || !origin) return;
+      const reference = capture.messages.get(origin.id);
+      const mounted = reference?.target;
+      const target = mounted?.isConnected && tdDomIds(mounted).includes(reference.id) ? mounted :
+        reference && tdNavFindTurn(reference.address,reference.role);
+      const info = tdNavScrollInfo(root);
+      const shift = target ? tdZoomHistoryPosition(root,target) - origin.absolute :
+        origin.atEnd ? info.max - origin.max : (reference ? reference.top - origin.absolute : 0);
+      tdZoomNativeScroll(root,origin.top + shift);
+    } finally {
+      for (const unlock of capture.scrollLock?.cleanups || []) unlock();
+      capture.scrollLock = null;
+    }
+  }
+
+  function tdZoomEarlierMessagesPending(thread) {
+    const indicator = thread.firstElementChild?.querySelector(':scope > [role="status"] > [data-loading-indicator]');
+    return Boolean(indicator && tdDomTreeShown(indicator));
+  }
+
+  async function tdZoomRecoverHistory(scene, manual = false) {
+    const capture = scene.history;
+    if (scene.complete || capture.running || (!manual && capture.attempted)) return;
+    const outline = scene === tdHistory.capture;
+    capture.cancelled = false;
+    const alive = () => (outline ? tdHistory.capture === scene && !tdZoom.scene : tdZoom.scene === scene) &&
+      tdAlive(scene.scope) && !document.hidden && !capture.cancelled;
+    const update = (state,text) => {
+      if (outline) {
+        tdRenderOutlineCoverage();
+        scheduleRefresh('outline-history',0);
+      } else tdZoomTopicControls(scene,state,text);
+    };
+    const parked = () => {
+      const now = Date.now();
+      if (tdZoomMoving(scene) || tdReadBusy() || Math.max(tdReadState().until,tdChatBackoffUntil) > now) return true;
+      const activity = !td.activityDirty && td.activityCache && now - td.activityAt < 1000
+        ? td.activityCache : getChatGptActivitySnapshot();
+      // 发送队列要求整轮终态。只读补载只在有确切的生成或发送迹象时让开。
+      return Boolean(activity.stopControl || activity.steerControl || activity.networkPending || activity.generationLease);
+    };
+    if (!alive() || parked()) {
+      update('history-retry',document.hidden?'回到此标签页后可继续补齐':'对话空闲后可继续补齐历史');
+      return;
+    }
+    capture.attempted = true;
+    const resume = capture.resume;
+    const root = findScrollRoot();
+    capture.root = root;
+    if (manual) capture.sample = null;
+    const first = tdNavScrollInfo(root);
+    tdZoomCaptureHistory(scene,root);
+    const reference = [...capture.messages.values()].find(row => Math.abs(row.top - first.top) <= first.height);
+    capture.origin = {top:first.top,max:first.max,atEnd:first.max-first.top<4,
+      id:reference?.id,absolute:reference?.top};
+    const initialCount = capture.order.length;
+    capture.running = true;
+    capture.scrollLock = {id: 'history', cleanups: new Set()};
+    tdNavLockRoot(capture.scrollLock,root,'data-threaddeck-history-lock');
+    update('history','正在补齐对话历史…');
+    const until = performance.now() + (outline ? 24000 : tdZoomHistoryTimeout);
+    let steps = 0, signaled = false;
+    let finish = false, refine = false;
+    const limits = {head:false,tail:capture.origin.atEnd && !capture.refined,...resume?.limits};
+    let sampleFrame = 0;
+    // 原生虚拟列表可能在两次滚动之间短暂挂载交叠的问答。
+    const remounts = new MutationObserver(() => {
+      if (sampleFrame || !alive() || scene.complete) return;
+      sampleFrame = requestAnimationFrame(() => {
+        sampleFrame = 0;
+        if (!alive() || scene.complete) return;
+        tdZoomCaptureHistory(scene,root);
+      });
+    });
+    try {
+      remounts.observe(scene.root,{childList:true,subtree:true,attributes:true,
+        attributeFilter:['hidden','data-turn-key','data-talvt-turn-state']});
+      // 概览覆盖正文期间驱动宿主滚动。每一步保留与上一个视口的重叠，既能挂载虚拟消息，
+      // 也能触发 ChatGPT 自己的分页；扩展不构造会话请求或翻页令牌。
+      if (resume?.top !== undefined) {
+        tdZoomNativeScroll(root,resume.top);
+        await tdDelay(190,scene.scope);
+      }
+      for (const edge of ['head','tail']) {
+        if (limits[edge] && (edge === 'head' || !capture.order.some(id=>!capture.messages.get(id)?.raw))) continue;
+        limits[edge] = false;
+        let idleAt = 0, previousMark = '';
+        let closest = Infinity, rebounds = 0, reachedEdge = false;
+        while (alive() && !parked() && !scene.complete && performance.now() < until && steps < (outline ? 72 : tdZoomHistoryBudget)) {
+          const info = tdNavScrollInfo(root);
+          const boundary = edge === 'head' ? info.min : info.max;
+          const remain = boundary - info.top;
+          const distance = Math.abs(remain);
+          const loadingEarlier = edge === 'head' && tdZoomEarlierMessagesPending(scene.root);
+          tdZoomCaptureHistory(scene,root);
+          if (distance < 4) {
+            reachedEdge = true;
+            const marker = `${info.min}:${info.max}:${capture.order.length}`;
+            const pending = loadingEarlier || tdReads.pending.length || chatGptApiFetchPromise ||
+              scene.root.matches('[aria-busy="true"]') || [...scene.root.querySelectorAll('[role="progressbar"],[aria-busy="true"]')].some(n=>tdDomTreeShown(n));
+            if (pending || marker !== previousMark) { idleAt = performance.now(); previousMark = marker; }
+            if (!pending && performance.now() - idleAt >= 760) { limits[edge] = true; break; }
+            if (!await tdDelay(180,scene.scope)) break;
+          } else {
+            idleAt = 0;
+            if (distance < closest - info.height * .12) { closest = distance; rebounds = 0; }
+            else rebounds++;
+            const stride = Math.max(80,info.height * (capture.refined ? .42 : .74));
+            // 无论是否仍在分页，宿主重挂载都可能反复改写滚动位置。
+            const jumpToBoundary = (reachedEdge && loadingEarlier) || rebounds >= 2;
+            if (jumpToBoundary) { closest = Infinity; rebounds = 0; }
+            if (!signaled) {
+              tdSignalHostReadingScroll(root,remain);
+              signaled = true;
+            }
+            tdZoomNativeScroll(root,jumpToBoundary ? boundary : info.top + Math.sign(remain)*Math.min(distance,stride));
+            steps++;
+            if (!await tdDelay(160,scene.scope)) break;
+          }
+        }
+      }
+      const missingText=capture.order.filter(id=>!capture.messages.get(id)?.raw).length;
+      const reachedBoth = limits.head && limits.tail;
+      finish = reachedBoth && capture.order.length > 0 && !capture.gap && !missingText;
+      // 两端都已访问后再用细步长补齐掉载的正文或片段之间的重叠。
+      refine = reachedBoth && (capture.gap || missingText > 0) && !capture.refined;
+      if (refine) capture.refined = true;
+      if (!outline && tdZoom.scene===scene) tdZoom.surface.dataset.historyCoverage=JSON.stringify({
+        head:limits.head,tail:limits.tail,messages:capture.order.length,gap:Boolean(capture.gap),missingText,
+      });
+      capture.resume = reachedBoth ? null : {limits,top:tdNavScrollInfo(root).top};
+    } finally {
+      remounts.disconnect();
+      cancelAnimationFrame(sampleFrame);
+      tdZoomRestoreHistory(scene);
+      capture.running = false;
+      if (outline) update('history-retry','');
+    }
+    if (!alive()) {
+      // 切走标签或反向捏合中断后，仍打开的概览可以继续补齐。
+      if (!outline && tdZoom.scene === scene && tdAlive(scene.scope) && !scene.complete) {
+        capture.attempted = false;
+        if (!document.hidden && !scene.pending && !tdZoomMoving(scene)) tdZoomScheduleSettled(scene);
+      }
+      return;
+    }
+    if (scene.complete) return;
+    if (finish) {
+      capture.complete = true;
+      if (outline) tdRenderOutlineCoverage();
+      else tdZoomRefreshHistory(scene);
+    } else if (refine || parked() || capture.order.length > initialCount && steps>0) {
+      // 有新内容才进入下一段；发送打断时等宿主的下一次状态变更。
+      capture.attempted = false;
+      if (!parked()) setTimeout(()=>{
+        if (alive()) void tdZoomRecoverHistory(scene).catch(()=>update('history-retry','可继续补齐早期问答'));
+      },350);
+    } else if (!outline) {
+      update('history-retry',capture.order.length ? '可继续补齐早期问答' : 'ChatGPT 暂未提供可读取的消息');
+    }
+  }
+
+  function tdZoomOpen() { return Boolean(tdZoom.scene); }
+
+  function tdZoomRecords() {
+    if (tdZoom.index === entries) return tdZoom.records;
+    const unique = new Map();
+    for (const entry of entries) {
+      const role = entryAnchorRole(entry);
+      if (role !== 'user' && !(entry.answerRecords || []).length) continue;
+      const id = entry.messageId || entry.nodeId || entry.answerRecords?.[0]?.messageId;
+      if (!id) continue;
+      const key = role + ':' + id;
+      const prior = unique.get(key);
+      if (!prior || (!prior.target?.isConnected && entry.target?.isConnected)) unique.set(key, entry);
+    }
+    tdZoom.index = entries;
+    tdZoom.records = [...unique.values()];
+    return tdZoom.records;
+  }
+
+  function tdZoomReady() {
+    return tdEnabled() && settings.sites[site.id] !== false;
+  }
+
+  function tdZoomMoving(scene = tdZoom.scene) {
+    return scene && tdZoom.scene === scene && (scene.gestureProgress !== undefined || tdZoom.frame !== 0);
+  }
+
+  function tdZoomScheduleSettled(scene) {
+    clearTimeout(scene.settledWork);
+    // 等合拢后的画面完成绘制，并留出反向捏合的输入窗口。
+    scene.settledWork = setTimeout(() => {
+      scene.settledWork = 0;
+      if (tdZoom.scene !== scene || !tdAlive(scene.scope) || tdZoomMoving(scene) || document.hidden) return;
+      tdZoomApplyTopics(scene);
+      tdZoomExtend();
+      void tdZoomLoadTopics(scene);
+      if (scene.deferredRefresh) {
+        scene.deferredRefresh = false;
+        scheduleRefresh('overview-motion-settled',0);
+      }
+    },110);
+  }
+
+  function tdZoomClearEffects(scene) {
+    for (const animation of scene.effects) animation.cancel();
+    scene.effects.length = 0;
+  }
+
+  function tdZoomFinish(scene = tdZoom.scene) {
+    if (!scene || tdZoom.scene !== scene) return;
+    clearTimeout(tdZoom.settle);
+    clearTimeout(scene.settledWork);
+    cancelAnimationFrame(tdZoom.frame);
+    tdZoom.frame = 0;
+    tdZoomStopHistory(scene);
+    tdZoomRestoreHistory(scene);
+    if (tdAlive(scene.scope) && scene.history.order.length) {
+      tdHistory.capture = {scope:scene.scope,root:scene.root,history:scene.history};
+    }
+    tdZoomClearEffects(scene);
+    tdZoomClearFades(scene);
+    scene.observer?.disconnect();
+    scene.resize?.disconnect();
+    scene.layoutEvents?.abort();
+    tdZoom.surface.hidden = true;
+    const summary = tdZoom.surface.querySelector('.zoom-conversation-summary');
+    summary.hidden = true;
+    summary.textContent = '';
+    const topics = tdZoom.surface.querySelector('.zoom-topic-index');
+    topics.hidden = true;
+    topics.replaceChildren();
+    delete navHost.dataset.overview;
+    tdZoom.surface.querySelector('.zoom-stream').replaceChildren();
+    tdZoom.button?.setAttribute('aria-expanded', 'false');
+    tdZoom.scene = null;
+    if (scene.deferredRefresh) scheduleRefresh('overview-motion-finished',0);
+    // 键盘关闭时恢复进入之前的焦点，保留输入框光标和草稿。
+    if (scene.restoreFocus && scene.previousFocus?.isConnected) scene.previousFocus.focus({preventScroll:true});
+  }
+
+  function tdZoomReset() {
+    tdZoomFinish();
+    tdZoom.listener?.abort();
+    tdZoom.root = null;
+    tdZoom.listener = null;
+    tdZoom.tail = null;
+    tdZoom.touch = null;
+    tdZoom.index = null;
+    tdZoom.records = [];
+  }
+
+  function tdZoomQuestionText(entry) {
+    const target = entry.target?.isConnected ? tdZoomUserBubble(entry.target) : null;
+    return normalizeMultilineText(entry.rawQuestion || target?.innerText || entry.text || '');
+  }
+
+  function tdZoomQuestionLabel(entry) {
+    const question = tdZoomQuestionText(entry);
+    // 批注拼接的引文依然保留在原文和摘要证据中。问句气泡直接呈现本轮问题。
+    const delimiter = '\n本轮问题：\n';
+    const start = question.startsWith('【注释 1】') ? question.lastIndexOf(delimiter) : -1;
+    return (start >= 0 ? question.slice(start + delimiter.length) : question) || '打开原提问';
+  }
+
+  function tdZoomNativeNode(record, role) {
+    return record?.target?.isConnected ? record.target : tdNavFindTurn(record, role);
+  }
+
+  function tdZoomUserBubble(target) {
+    return target?.matches(tdZoomBubble) ? target : target?.querySelector(tdZoomBubble) || target;
+  }
+
+  function tdZoomVisibleSources(scene) {
+    const sources = new Map();
+    for (const entry of mountedEntries) {
+      const user = entry.target;
+      if (!user?.isConnected || !tdZoomIntersects(user, scene.bounds)) continue;
+      sources.set(entry.messageId || entry.nodeId, tdZoomUserBubble(user));
+    }
+    for (const entry of scene.records.slice(scene.first, scene.last)) {
+      for (const answer of entry.answerRecords || []) {
+        const target = answer.target;
+        if (target?.isConnected && tdZoomIntersects(target, scene.bounds)) sources.set(answer.messageId || answer.nodeId, findAssistantContentRoot(target) || target);
+      }
+    }
+    return sources;
+  }
+
+  function tdZoomIntersects(node, bounds) {
+    const box = node.getBoundingClientRect();
+    return box.bottom > bounds.top && box.top < bounds.bottom && box.width > 0 && box.height > 0;
+  }
+
+  function tdZoomBackground(element, stop) {
+    for (let node = element; node && node !== stop; node = tdDomParent(node)) {
+      const color = getComputedStyle(node).backgroundColor;
+      if (color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') return color;
+    }
+    return '';
+  }
+
+  function tdZoomReadTheme(scene) {
+    const {root} = scene;
+    const userReference = scene.userReference?.isConnected ? scene.userReference :
+      mountedEntries.find(entry=>entry.target?.isConnected)?.target;
+    const bubble = tdZoomUserBubble(userReference);
+    const answer = scene.records.find(entry => entry.answerRecords?.some(record => record.target?.isConnected));
+    const target = answer?.answerRecords.find(record => record.target?.isConnected)?.target;
+    const body = findAssistantContentRoot(target) || root;
+    const text = getComputedStyle(body);
+    const message = getComputedStyle(bubble || root);
+    const page = getComputedStyle(root);
+    const bubbleScope = userReference?.closest('article,[data-turn-key],[data-turn="user"]');
+    const token = name => page.getPropertyValue(name).trim();
+    const values = {
+      '--zoom-background': tdZoomBackground(root) || token('--main-surface-primary') || 'Canvas',
+      '--zoom-ink': text.color,
+      '--zoom-muted': token('--text-secondary') || text.color,
+      '--zoom-font': text.fontFamily,
+      '--zoom-size': text.fontSize,
+      '--zoom-bubble-font': message.fontFamily,
+      '--zoom-bubble-ink': message.color,
+      '--zoom-bubble': tdZoomBackground(bubble, bubbleScope || root) || token('--message-surface') ||
+        'color-mix(in srgb, var(--zoom-ink) 8%, transparent)',
+      '--zoom-radius': message.borderTopLeftRadius !== '0px' ? message.borderTopLeftRadius : '1.25em',
+      '--zoom-scheme': page.colorScheme,
+    };
+    for (const [name, value] of Object.entries(values)) tdZoom.surface.style.setProperty(name, value);
+  }
+
+  function tdZoomLayout(scene) {
+    const {root} = scene;
+    if (!root.isConnected) return false;
+    if (!scene.reference.isConnected) scene.reference = mountedEntries.find(entry=>entry.target?.isConnected)?.target || root;
+    if (!scene.viewportRoot?.isConnected) scene.viewportRoot = findScrollRoot();
+
+    // 阅读区的可视边界属于滚动视口。挂载新消息时正文的外框会移动，但遮罩留在原处。
+    const view = tdNavViewport(root);
+    const viewport = tdNavClientBox(scene.viewportRoot);
+    const rootBox = root.getBoundingClientRect();
+    const inDocument = isDocumentScrollRoot(scene.viewportRoot);
+    const wrapper = scene.reference.closest('[class*="thread-content-max-width"],[class*="thread-content-width"],[class*="turn-messages"]');
+    const column = wrapper?.getBoundingClientRect() || rootBox;
+    const left = Math.max(view.left, inDocument ? rootBox.left : viewport.left, 0);
+    const right = Math.min(view.right, inDocument ? rootBox.right : viewport.right, innerWidth);
+    const top = Math.max(view.top, viewport.top, 0);
+    const composer = getComposerBoundary(), box = composer?.getBoundingClientRect();
+    const composerEdge = box && tdNavIsOverlay(composer) && box.height < innerHeight / 2 &&
+      box.top > top && box.left < right && box.right > left ? box.top : viewport.bottom;
+    const bottom = Math.min(viewport.bottom, composerEdge, innerHeight);
+    if (view.hidden || right-left < 140 || bottom-top < 100) return Boolean(scene.bounds);
+    scene.bounds = {left,top,right,bottom};
+    const size = Math.min(right-left,column.width > 320 && column.width < 930 ? column.width : 768);
+    const center = wrapper && column.width <= 930 ? (column.left + column.right) / 2 : (left + right) / 2;
+    const columnLeft = Math.max(left, Math.min(right-size,center-size/2));
+    Object.assign(tdZoom.surface.style,{left:left+'px',top:top+'px',width:right-left+'px',height:bottom-top+'px'});
+    tdZoom.surface.style.setProperty('--zoom-column-width',size+'px');
+    tdZoom.surface.style.setProperty('--zoom-column-left',columnLeft-left+'px');
+    tdZoomReadTheme(scene);
+    return true;
+  }
+
+  function tdZoomCanJump(scene, destination) {
+    return tdZoom.scene === scene && tdAlive(scene.scope) && !scene.pending &&
+      scene.records.some(entry => entry.key === destination.key);
+  }
+
+  function tdZoomPlace(scene, destination, screenY) {
+    const entry = scene.records.find(record => record.key === destination.key);
+    if (!entry) return false;
+    const answer = destination.answerId && entry.answerRecords?.find(record => (record.messageId || record.nodeId) === destination.answerId);
+    if (destination.answerId && !answer) return false;
+    const node = tdNavFindTurn(answer || entry, answer ? 'assistant' : entryAnchorRole(entry));
+    if (!node) return false;
+    tdZoomClearEffects(scene);
+    const root = tdNavScrollRoot(node);
+    const view = tdNavViewport(node);
+    const preferred = Math.min(view.bottom - 55, Math.max(view.top + 16, screenY));
+    const info = tdNavScrollInfo(root);
+    const max = info.doc ? getRootScrollMax(root) : info.max;
+    const top = Math.min(max, Math.max(info.min, info.top + (node.getBoundingClientRect().top - preferred) / info.scale));
+    const instant = {top, behavior:'instant'};
+    if (info.doc) window.scrollTo(instant);
+    else root.scrollTo(instant);
+    const placed = node.getBoundingClientRect();
+    if (placed.top < view.top-3 || placed.top+Math.min(18, placed.height) > view.bottom) return false;
+    scene.reference = tdNavFindTurn(entry, entryAnchorRole(entry)) || scene.reference;
+    scene.userReference = scene.reference;
+    return true;
+  }
+
+  async function tdZoomJump(scene, destination, chapter = null) {
+    if (!tdZoomCanJump(scene,destination)) return;
+    const entry = scene.records.find(record=>record.key===destination.key);
+    const answer = destination.answerId && entry.answerRecords?.find(record=>
+      (record.messageId || record.nodeId) === destination.answerId);
+    if (destination.answerId && !answer) return;
+    const target = answer && !chapter ? {...entry,...answer,anchorRole:'assistant',kind:'assistant-output'} : entry;
+    tdZoomStopHistory(scene);
+    scene.pending = true;
+    tdZoom.surface.dataset.locating = 'true';
+    try {
+      let result = await tdZoomSeekCaptured(scene,destination,chapter);
+      if (result.result === 'unavailable') result = await tdNavRun(target,chapter,scene.records);
+      if (tdZoom.scene !== scene || !tdAlive(scene.scope)) return;
+      if (result.result !== 'located') {
+        tdZoomTopicControls(scene,scene.topicState,'原文暂未定位，可再试一次');
+        return;
+      }
+      scene.reference = tdNavFindTurn(answer || entry,answer ? 'assistant' : entryAnchorRole(entry)) || scene.reference;
+      if (entryAnchorRole(entry) === 'user') scene.userReference = tdNavFindTurn(entry,'user') || scene.userReference;
+      // 点击已核对的章节只做视觉交接，避免位移动画改变原文的几何定位。
+      tdZoomClearEffects(scene);
+      tdZoomAnimate(scene,0);
+    } finally {
+      if (tdZoom.scene === scene) {
+        scene.pending = false;
+        delete tdZoom.surface.dataset.locating;
+      }
+    }
+  }
+
+  function tdZoomStopHistory(scene) {
+    if (!scene.history.running || scene.history.cancelled) return;
+    scene.history.cancelled = true;
+    scene.history.attempted = false;
+    tdZoomRestoreHistory(scene);
+    tdZoomTopicControls(scene,'history-retry','已暂停补齐历史');
+  }
+
+  async function tdZoomSeekCaptured(scene, destination, chapter = null) {
+    const entry = scene.records.find(record => record.key === destination.key);
+    if (!entry) return {result:'unavailable'};
+    const id = destination.answerId || entry.messageId || entry.nodeId;
+    const captured = scene.history.messages.get(id);
+    const root = scene.history.root;
+    if (!captured || !root?.isConnected) return {result:'unavailable'};
+    const initial = tdNavScrollInfo(root).top;
+    const focusEntry = chapter ? entry : {...entry,...captured.address,anchorRole:captured.role,target:captured.target};
+    const req = tdNavBegin(focusEntry,chapter);
+    req.overviewEntry = focusEntry;
+    const scope = scene.scope;
+    let arrived = false;
+    try {
+      for (let pass=0; pass<2 && tdNavAlive(req); pass++) {
+        const target = tdNavResolve(req) || await tdNavMountCaptured(req,captured,root);
+        if (!target || !await tdNavPlace(req,target)) break;
+        const verified = await tdNavVerifyArrival(req,tdNavResolve(req));
+        if (!verified) continue;
+        const landed = await tdNavAfterHostLayout(req);
+        if (!tdNavAlive(req)) return {result:'cancelled'};
+        if (!landed) continue;
+        arrived = true;
+        tdNavHighlight(req,landed);
+        tdNavRecordResult(req,'located',req.verification.alignmentErrorPx);
+        tdNavGuard(req);
+        return {result:'located'};
+      }
+      return {result:'unavailable'};
+    } finally {
+      if (!arrived && tdNavigation.current === req) tdNavCancel('overview-target-unavailable');
+      if (!arrived && tdZoom.scene === scene && tdAlive(scope)) tdZoomNativeScroll(root,initial);
+    }
+  }
+
+  function tdZoomLine(scene, record, text, role, answerId = '', digest = false) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'zoom-line';
+    row.dataset.role = role;
+    if (digest) row.dataset.digest = 'true';
+    const label = document.createElement('span');
+    label.className = 'zoom-line-label';
+    label.textContent = text;
+    row.append(label);
+    row.title = text;
+    const destination = {key:record.key, answerId};
+    scene.destinations.set(row, destination);
+    const id = answerId || record.messageId || record.nodeId;
+    if (id) scene.rows.set(id, row);
+    row.addEventListener('click', () => { void tdZoomJump(scene,destination); });
+    return row;
+  }
+
+  function tdZoomChapters(entry, answer = null) {
+    return (entry.answerBlocks || []).filter(block => isAnswerOutlineBlock(block) && (!answer ||
+      block.answerOrdinal === answer.answerOrdinal));
+  }
+
+  function tdZoomAnswerText(answer) {
+    const raw = normalizeMultilineText(answer.rawText || answer.outlineRawText || '')
+      .replace(/[\uE000-\uF8FF][^\n\uE000-\uF8FF]*[\uE000-\uF8FF]/g, '');
+    const rendered = normalizeMultilineText(answer.visibleRawText || '');
+    const host = answer.target?.isConnected ? answer.target : null;
+    if (answer.imageReply || host && tdGeneratedImageTurn(host)?.matches('[data-talvt-turn-state="complete"]')) {
+      const marker = '此轮已生成图片。';
+      if (raw.endsWith(marker)) return raw;
+      const authored = raw && raw !== '图片回复' ? raw : '';
+      return [authored, marker].filter(Boolean).join('\n\n');
+    }
+    if (raw && rendered) {
+      // 网页可能补上较早快照尚无的章节正文。保留源文本，并按规范化后的行去重。
+      const plain = stripMarkdownForOutline(raw);
+      const additions = new Map();
+      for (const text of rendered.split(/\n+/)) {
+        const line = stripMarkdownForOutline(text);
+        if (line && !plain.includes(line)) additions.set(line,text.trim());
+      }
+      return [raw,...additions.values()].join('\n\n');
+    }
+    if (raw || rendered) return raw || rendered;
+    if (!host) return '';
+    const content = findAssistantContentRoot(host);
+    const text = findAssistantOutlineRoots(host).map(root => root.matches(TD_DOM_CONTENT) ? root.innerText || '' :
+      extractCleanText(root).replace(/^(?:ChatGPT 说|ChatGPT said)\s*[:：]?\s*/i,'')).filter(Boolean).join('\n\n');
+    return normalizeMultilineText(text) || (tdAnswerImages(host, content).length ? '此轮包含图片回复。' : '');
+  }
+
+  function tdZoomEntryId(entry) {
+    return entry?.messageId || entry?.nodeId || entry?.answerRecords?.[0]?.messageId;
+  }
+
+  function tdZoomTopicRequest(scene) {
+    const locator = getChatGptConversationLocator();
+    if (locator.kind !== 'conversation') return null;
+    return {
+      conversation: locator.id,
+      format: 'summary-v3',
+      turns: scene.records.map(entry => ({
+        id: tdZoomEntryId(entry),
+        question: entryAnchorRole(entry) === 'assistant' ? '' : tdZoomQuestionText(entry) || '附件或图片提问',
+        answer: (entry.answerRecords || []).map(tdZoomAnswerText).filter(Boolean).join('\n\n'),
+        sections: tdZoomChapters(entry).map(block => [block.marker,block.label].filter(Boolean).join(' ')),
+        navigation: {
+          role:entryAnchorRole(entry),nodeId:entry.nodeId,
+          answers:(entry.answerRecords || []).map(answer=>({
+            id:answer.messageId || answer.nodeId, nodeId:answer.nodeId,
+            sections:tdZoomChapters(entry,answer).map(block=>({kind:block.kind,label:block.label,marker:block.marker,
+              ordinal:block.outlineOrdinal,parent:block.parentOutlineOrdinal,depth:block.outlineDepth,level:block.headingLevel})),
+          })),
+        },
+      })),
+    };
+  }
+
+  function tdZoomCachedOverview(scene) {
+    const locator = getChatGptConversationLocator();
+    if (locator.kind !== 'conversation') return Promise.resolve(null);
+    const present = scene.complete ? scene.records : scene.records.filter(entry =>
+      entry.target?.isConnected || entry.answerRecords?.some(answer=>answer.target?.isConnected));
+    if (!present.length) return Promise.resolve(null);
+    const observed = present.map(entry=>({id:tdZoomEntryId(entry),role:entryAnchorRole(entry),
+      answerIds:(entry.answerRecords || []).filter(answer=>scene.complete || answer.target?.isConnected)
+        .map(answer=>answer.messageId || answer.nodeId).filter(Boolean)}));
+    const viewport = tdNavScrollInfo(scene.viewportRoot);
+    const atTail = !scene.complete && viewport.range > 4 && viewport.max-viewport.top < 4;
+    return chrome.runtime.sendMessage({type:'threadWorkspace',action:'topicsCached',
+      value:{conversation:locator.id,complete:scene.complete,atTail,observed}})
+      .then(reply=>reply?.ok && reply.data?.state==='ready' ? reply.data : null).catch(()=>null);
+  }
+
+  function tdZoomRecordsFromCache(saved, records) {
+    const byId = new Map(records.flatMap(entry=>tdNavRecordIds(entry).map(id=>[entryAnchorRole(entry)+':'+id,entry])));
+    const origins = {'heading':'dom-document-heading','section-title':'dom-section-title','numbered-section':'dom-list-section'};
+    return saved.map(entry=>{
+      const exact = byId.get(entry.role+':'+entry.id) || byId.get(entry.role+':'+entry.nodeId);
+      const key = exact?.key || 'cached-overview:'+entry.role+':'+entry.id;
+      const answerRecords = entry.answers.map((answer,answerOrdinal)=>{
+        const original = exact?.answerRecords?.find(record=>tdNavRecordIds(record).some(id=>id===answer.id || id===answer.nodeId));
+        const blocks = answer.sections.map(section=>({
+          key:key+':'+answerOrdinal+':'+section.ordinal,
+          kind:section.kind, outlineOrigin:origins[section.kind],label:section.label,sectionTitle:section.label,
+          marker:section.marker,headingLevel:section.level,outlineOrdinal:section.ordinal,
+          parentOutlineOrdinal:section.parent,outlineDepth:section.depth,
+          answerOrdinal,answerMessageId:answer.id,answerNodeId:answer.nodeId,parentKey:key,
+        }));
+        return {...original,messageId:answer.id,nodeId:answer.nodeId,answerOrdinal,blocks};
+      });
+      return {...exact,key,anchorRole:entry.role,messageId:entry.id,nodeId:entry.nodeId,
+        answerRecords,answerBlocks:answerRecords.flatMap(answer=>answer.blocks)};
+    });
+  }
+
+  function tdZoomDisplayGroups(scene, start, end) {
+    if (!scene.topics) return [{start,end:end-1}];
+    return scene.topics.flatMap(group => {
+      const from = Math.max(start,group.start - 1), to = Math.min(end - 1,group.end - 1);
+      return from <= to ? [{...group,start:from,end:to}] : [];
+    });
+  }
+
+  function tdZoomApplyTopics(scene) {
+    if (!scene.nextTopics || scene.progress < .999 || scene.pending || tdZoomMoving(scene) || scene.settledWork) return;
+    const list = tdZoom.surface.querySelector('.zoom-list');
+    const top = list.getBoundingClientRect().top;
+    let anchor;
+    for (const [id, row] of scene.rows) {
+      const box = row.getBoundingClientRect();
+      if (box.bottom <= top || box.top >= top + list.clientHeight) continue;
+      if (!anchor || box.top < anchor.y) anchor = {id, y: box.top, focused: shadowRoot.activeElement === row};
+    }
+    const oldScroll = list.scrollTop;
+    tdZoomClearEffects(scene);
+    scene.topics = scene.nextTopics.groups;
+    if (scene.nextTopics.entries) {
+      const first = tdZoomEntryId(scene.records[scene.first]);
+      const records = tdZoomRecordsFromCache(scene.nextTopics.entries,scene.records);
+      const shift = records.findIndex(entry=>tdZoomEntryId(entry)===first);
+      scene.first = Math.max(0,shift);
+      scene.last = Math.min(records.length,scene.first+tdZoomChunk);
+      scene.records = records;
+    }
+    const summary = tdZoom.surface.querySelector('.zoom-conversation-summary');
+    summary.textContent = scene.nextTopics.summary || '';
+    summary.hidden = !summary.textContent;
+    tdZoomRenderTopicIndex(scene);
+    scene.summaries = new Map((scene.nextTopics.summaries || []).map(turn => [turn.turn - 1, turn]));
+    scene.nextTopics = null;
+    scene.rows.clear();
+    list.querySelector('.zoom-stream').replaceChildren();
+    tdZoomRender(scene, scene.first, scene.last);
+    const row = scene.rows.get(anchor?.id);
+    if (row) {
+      list.scrollTop += row.getBoundingClientRect().top - anchor.y;
+      if (anchor.focused) row.focus({preventScroll: true});
+    }
+    // 更新分组标题时保持原来的阅读位置，也保留用户已滚动过的状态。
+    scene.initialScroll += list.scrollTop - oldScroll;
+  }
+
+  function tdZoomRenderTopicIndex(scene) {
+    const index = tdZoom.surface.querySelector('.zoom-topic-index');
+    index.replaceChildren();
+    for (const group of scene.topics || []) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = group.title;
+      button.addEventListener('click', () => {
+        if (tdZoom.scene !== scene || scene.pending) return;
+        const start = group.start - 1;
+        const list = tdZoom.surface.querySelector('.zoom-list');
+        if (start < scene.first || start >= scene.last) {
+          scene.first = start;
+          scene.last = Math.min(scene.records.length, start + tdZoomChunk);
+          scene.rows.clear();
+          list.querySelector('.zoom-stream').replaceChildren();
+          tdZoomRender(scene, scene.first, scene.last);
+        }
+        const section = list.querySelector('.zoom-topic[data-topic-start="' + start + '"]');
+        if (section) list.scrollTop += section.getBoundingClientRect().top - list.getBoundingClientRect().top - 13;
+      });
+      index.append(button);
+    }
+    index.hidden = !index.childElementCount;
+  }
+
+  function tdZoomTopicControls(scene, state, description = '') {
+    const button = tdZoom.surface.querySelector('.zoom-ai');
+    const status = tdZoom.surface.querySelector('.zoom-ai-status');
+    const labels = {connection:'模型连接', error:'重试', cooldown:'重试', 'history-retry':'继续补齐'};
+    const coverage = scene.complete ? (scene.history.complete ? '网页历史' : '完整会话') : '已载入部分';
+    tdZoom.surface.querySelector('.zoom-coverage').textContent = coverage + ' · ' + scene.records.length + ' 轮';
+    button.hidden = !labels[state];
+    if (labels[state]) button.textContent = labels[state];
+    button.dataset.action = state === 'connection' ? 'topic-connection' : state === 'history-retry' ? 'recover-topics-history' : 'generate-topics';
+    status.textContent = description;
+    status.hidden = !description;
+    scene.topicState = state;
+  }
+
+  async function tdZoomLoadTopics(scene, retry = false) {
+    if (tdZoomMoving(scene) || scene.topicRequestPending || (!retry && (scene.settledWork || scene.localCacheRead)) ||
+        (retry && !['error','cooldown'].includes(scene.topicState))) return;
+    scene.topicRequestPending = true;
+    try {
+      if (!retry && scene.cacheLookup) {
+        const cached = await scene.cacheLookup;
+        scene.cacheLookup = null;
+        if (tdZoom.scene !== scene || !tdAlive(scene.scope)) return;
+        if (cached) {
+          scene.complete = true;
+          scene.cachedOverview = true;
+          scene.localCacheRead = true;
+          scene.nextTopics = cached;
+          tdZoomApplyTopics(scene);
+          tdZoomTopicControls(scene,'ready');
+          return;
+        }
+      }
+      if (!scene.complete) {
+        if (!scene.history.attempted && !scene.history.running) {
+          void tdZoomRecoverHistory(scene).catch(()=>{
+            if (tdZoom.scene === scene) tdZoomTopicControls(scene,'history-retry','可继续读取早期问答');
+          });
+        }
+        return;
+      }
+      const activity = getChatGptActivitySnapshot();
+      if (activity.stopControl || activity.busyIndicator || td.tx || td.run?.accepted) {
+        tdZoomTopicControls(scene,'working','回复完成后更新摘要');
+        return;
+      }
+      const request = scene.topicRequest ||= tdZoomTopicRequest(scene);
+      if (!request) { tdZoomTopicControls(scene,'local','原文索引'); return; }
+      scene.localCacheRead = true;
+      const useModel = settings.autoTopicSummary !== false;
+      tdZoomTopicControls(scene,'working',useModel ? '正在生成摘要…' : '正在读取摘要…');
+      const action = retry ? 'topicsGenerate' : useModel ? 'topicsOpen' : 'topicsRead';
+      const reply = await chrome.runtime.sendMessage({type:'threadWorkspace',action,value:request});
+      if (tdZoom.scene !== scene || !tdAlive(scene.scope) || request !== scene.topicRequest) return;
+      if (!reply?.ok) throw new Error(reply?.error || '摘要暂未生成。');
+      const result = reply.data;
+      if (result.state === 'ready') {
+        scene.nextTopics = result;
+        tdZoomApplyTopics(scene);
+        tdZoomTopicControls(scene,'ready');
+      } else if (['empty','stale'].includes(result.state)) {
+        tdZoomTopicControls(scene,'local','原文索引');
+      } else tdZoomTopicControls(scene,result.state,result.description);
+    } catch (error) {
+      if (tdZoom.scene === scene && tdAlive(scene.scope)) tdZoomTopicControls(scene,'error',error.message||'摘要暂未生成。');
+    } finally {
+      scene.topicRequestPending = false;
+    }
+  }
+
+  function tdZoomRender(scene, start, end, prepend = false) {
+    const list = tdZoom.surface.querySelector('.zoom-list');
+    const stream = list.querySelector('.zoom-stream');
+    const fragment = document.createDocumentFragment();
+    if (!scene.records.length) {
+      const empty = document.createElement('p');
+      empty.className = 'zoom-empty';
+      empty.textContent = '找到的问答与章节会显示在这里。';
+      fragment.append(empty);
+    }
+    for (const group of tdZoomDisplayGroups(scene, start, end)) {
+      const section = document.createElement('section');
+      section.className = 'zoom-topic';
+      section.dataset.topicStart = String(group.start);
+      if (group.title) {
+        const title = document.createElement('h3');
+        title.textContent = group.title;
+        section.append(title);
+      }
+      if (group.summary) {
+        const overview = document.createElement('p');
+        overview.className = 'zoom-summary';
+        overview.textContent = group.summary;
+        section.append(overview);
+      }
+      for (let index = group.start; index <= group.end; index++) {
+        const entry = scene.records[index];
+        const summary = scene.summaries?.get(index);
+        const question = summary?.question || tdZoomQuestionLabel(entry);
+        const exchange = document.createElement('div');
+        exchange.className = 'zoom-exchange';
+        if (entryAnchorRole(entry) === 'user') exchange.append(tdZoomLine(scene,entry,question,'user','',Boolean(summary?.question)));
+        const answers = entry.answerRecords || [];
+        if (answers.length > 1 && summary?.answer) {
+          const digest = document.createElement('p');
+          digest.className = 'zoom-turn-summary';
+          digest.textContent = summary.answer;
+          exchange.append(digest);
+        }
+        for (const [answerIndex, answer] of answers.entries()) {
+          const id = answer.messageId || answer.nodeId;
+          if (!id) continue;
+          const chapters = tdZoomChapters(entry, answer);
+          const digest = answers.length === 1 && summary?.answer;
+          const label = digest || (answers.length > 1 ? '回复 '+(answerIndex+1)+' · 查看原文' : '查看原回复');
+          exchange.append(tdZoomLine(scene,entry,label,'assistant',id,Boolean(digest)));
+          if (chapters.length) {
+            const chapterList = document.createElement('details');
+            chapterList.className = 'zoom-chapters';
+            const expandedChapters = scene.expandedChapters ||= new Set();
+            chapterList.open = expandedChapters.has(id);
+            chapterList.addEventListener('toggle',()=>{
+              if (!chapterList.isConnected) return;
+              if (chapterList.open) { expandedChapters.add(id); renderChapters(); }
+              else expandedChapters.delete(id);
+            });
+            const toggle = document.createElement('summary');
+            toggle.textContent = '查看 ' + chapters.length + ' 个章节';
+            chapterList.append(toggle);
+            toggle.addEventListener('click',renderChapters,{once:true});
+            function renderChapters() {
+              if (chapterList.childElementCount > 1) return;
+              for (const chapter of chapters) {
+                const navigation = document.createElement('button');
+                navigation.type = 'button';
+                navigation.className = 'zoom-chapter';
+                navigation.textContent = chapter.label;
+                navigation.style.setProperty('--chapter-level', Math.min(4, chapter.outlineDepth || 0));
+                navigation.addEventListener('click',()=>{ void tdZoomJump(scene,{key:entry.key,answerId:id},chapter); });
+                chapterList.append(navigation);
+              }
+            }
+            if (chapterList.open) renderChapters();
+            exchange.append(chapterList);
+          }
+        }
+        section.append(exchange);
+      }
+      fragment.append(section);
+    }
+    const before = prepend ? list.scrollHeight : 0;
+    if (prepend) {
+      stream.prepend(fragment);
+      const insertedHeight = list.scrollHeight - before;
+      list.scrollTop += insertedHeight;
+      scene.initialScroll += insertedHeight;
+    } else {
+      stream.append(fragment);
+    }
+  }
+
+  function tdZoomExtend() {
+    const scene = tdZoom.scene;
+    if (!scene || scene.progress < .999 || scene.pending || tdZoomMoving(scene)) return;
+    const list = tdZoom.surface.querySelector('.zoom-list');
+    if (list.scrollTop < 180 && scene.first > 0) {
+      const start = Math.max(0, scene.first - tdZoomChunk);
+      const prior = scene.first;
+      scene.first = start;
+      tdZoomRender(scene, start, prior, true);
+    }
+    if (list.scrollHeight - list.clientHeight - list.scrollTop < 240 && scene.last < scene.records.length) {
+      const prior = scene.last;
+      scene.last = Math.min(scene.records.length, prior + tdZoomChunk);
+      tdZoomRender(scene, prior, scene.last);
+    }
+  }
+
+  function tdZoomBuildEffects(scene) {
+    tdZoomClearEffects(scene);
+    if (tdZoomReducedMotion.matches || !tdZoomLayout(scene)) return;
+    const sources = tdZoomVisibleSources(scene);
+    for (const [id, node] of sources) {
+      const row = scene.rows.get(id);
+      if (!row?.isConnected || !tdZoomIntersects(row, scene.bounds)) continue;
+      const original = node.getBoundingClientRect(), compact = row.getBoundingClientRect();
+      const rightAligned = row.dataset.role === 'user';
+      const x = rightAligned ? original.right-compact.right : original.left-compact.left;
+      const y = original.top-compact.top;
+      const origin = rightAligned ? 'right top' : 'left top';
+      const source = node.animate([
+        {translate:'none', scale:'none', transformOrigin:origin},
+        {translate:(-x)+'px '+(-y)+'px', scale:'.87', transformOrigin:origin},
+      ], {duration:1000, fill:'both'});
+      const preview = row.animate([
+        {translate:x+'px '+y+'px', scale:'1.15', transformOrigin:origin},
+        {translate:'none', scale:'none', transformOrigin:origin},
+      ], {duration:1000, fill:'both'});
+      for (const effect of [source, preview]) {
+        effect.pause();
+        effect.currentTime = scene.progress*1000;
+        scene.effects.push(effect);
+      }
+    }
+  }
+
+  function tdZoomClearFades(scene) {
+    for (const fade of scene.sourceFades) fade.cancel();
+    scene.sourceFades.length = 0;
+  }
+
+  function tdZoomFadeOriginal(scene) {
+    if (scene.sourceFades.length) return;
+    const {root} = scene;
+    const composer = getComposerBoundary();
+    const headers = root.querySelectorAll('header,[role="banner"],[data-app-shell-page-header],[data-testid="conversation-header"]');
+    const includesChrome = (composer && tdDomContains(root, composer)) || [...headers].some(node=>!elementBelongsToConversationTurn(node));
+    // 有些页面的 main 同时拥有输入框。只在独立正文节点上整体淡出。
+    const sources = includesChrome ? [...tdZoomVisibleSources(scene).values()] : [root];
+    const blocks = [...new Set(sources.map(node => {
+      if (!includesChrome) return node;
+      const turn = node.closest('article,[data-turn-key],[data-testid^="conversation-turn-"]');
+      return turn && (!composer || !tdDomContains(turn, composer)) ? turn : node;
+    }))];
+    for (const node of blocks) {
+      const opacity = getComputedStyle(node).opacity;
+      // 文字只交接一次，避免相同文字以不同字号同时绘制造成重影。
+      const fade = node.animate([{opacity, offset:0}, {opacity, offset:.15}, {opacity:0, offset:.77}, {opacity:0, offset:1}],
+        {duration:1000, fill:'both'});
+      fade.pause();
+      fade.currentTime = scene.progress*1000;
+      scene.sourceFades.push(fade);
+    }
+  }
+
+  function tdZoomPaint(scene, value) {
+    scene.progress = Math.max(0, Math.min(1, value));
+    const p = scene.progress;
+    const surface = tdZoom.surface;
+    surface.style.setProperty('--zoom-progress', p.toFixed(4));
+    surface.dataset.settled = String(p >= .999);
+    surface.querySelector('.zoom-list').inert = p < .999;
+    for (const effect of scene.effects) effect.currentTime = p*1000;
+    for (const fade of scene.sourceFades) fade.currentTime = p*1000;
+  }
+
+  function tdZoomAnimate(scene, destination) {
+    if (tdZoom.scene !== scene) return;
+    cancelAnimationFrame(tdZoom.frame);
+    if (destination === 0) tdZoomFadeOriginal(scene);
+    const from = scene.progress;
+    const duration = (tdZoomReducedMotion.matches ? 90 : destination === 0 ? 210 : 270) *
+      Math.max(.54, Math.abs(destination-from));
+    const started = performance.now();
+    function frame(time) {
+      if (tdZoom.scene !== scene || !tdAlive(scene.scope)) return;
+      const fraction = Math.max(0, Math.min(1, (time-started)/duration));
+      const eased = 1-Math.pow(1-fraction, 3);
+      tdZoomPaint(scene, from+(destination-from)*eased);
+      if (fraction < 1) tdZoom.frame = requestAnimationFrame(frame);
+      else if (destination === 0) tdZoomFinish(scene);
+      else {
+        tdZoom.frame = 0;
+        tdZoomClearEffects(scene);
+        // 概览背景已盖住正文，释放过渡透明度，让宿主正常渲染懒载正文。
+        tdZoomClearFades(scene);
+        const list = tdZoom.surface.querySelector('.zoom-list');
+        if (scene.keyboard) list.focus({preventScroll:true});
+        tdZoomScheduleSettled(scene);
+      }
+    }
+    tdZoom.frame = requestAnimationFrame(frame);
+  }
+
+  function tdZoomShow(y, keyboard = false) {
+    if (tdZoom.scene || !tdZoomReady() || !tdZoom.root || !settingsLayerEl?.hidden || activeCommentMode || tdSelectionBusy()) return null;
+    tdOutlineStopHistory();
+    const records = tdZoomRecords();
+    let nearest = null;
+    const consider = (entry, message) => {
+      if (!message.target?.isConnected || !message.target.getClientRects().length) return;
+      const box = message.target.getBoundingClientRect();
+      const distance = y < box.top ? box.top-y : Math.max(0, y-box.bottom);
+      if (!nearest || distance < nearest.distance) nearest = {entry,message,distance};
+    };
+    for (const entry of records) {
+      consider(entry, entry);
+      for (const answer of entry.answerRecords || []) consider(entry, answer);
+    }
+    const reference = nearest?.message.target || (records[0] && tdZoomNativeNode(records[0],entryAnchorRole(records[0]))) || tdZoom.root;
+    const recordIndex = Math.max(0, records.indexOf(nearest?.entry));
+    const userReference = records[recordIndex]?.target;
+    const outline = tdHistory.capture;
+    const history = outline && tdAlive(outline.scope) ? outline.history : null;
+    const scene = {root:tdZoom.root,viewportRoot:findScrollRoot(),scope:tdScope(),reference,userReference,keyboard,progress:0,initialScroll:0,
+      records,complete:records.length > 0 && (tdHealth.snapshot?.complete === true || history?.complete === true),
+      rows:new Map(),destinations:new WeakMap(),effects:[],sourceFades:[],pending:false,
+      first:Math.max(0,recordIndex-18),last:Math.min(records.length,recordIndex+19),
+      previousFocus:shadowRoot.activeElement || document.activeElement,restoreFocus:keyboard,
+      history:history ? {...history,origin:null,running:false,cancelled:false,messages:new Map(history.messages),
+        order:[...history.order],links:new Set(history.links)} :
+        {messages:new Map(),order:[],attempted:false,running:false,complete:false,gap:false}};
+    if (!tdZoomLayout(scene)) return null;
+    tdZoom.scene = scene;
+    delete tdZoom.surface.dataset.historyCoverage;
+    tdZoom.surface.hidden = false;
+    navHost.dataset.overview = 'true';
+    tdZoom.button?.setAttribute('aria-expanded', 'true');
+    tdZoomRender(scene, scene.first, scene.last);
+    const list = tdZoom.surface.querySelector('.zoom-list');
+    const anchor = nearest?.message || records[recordIndex];
+    const row = scene.rows.get(anchor?.messageId || anchor?.nodeId);
+    if (row) list.scrollTop = Math.max(0, row.getBoundingClientRect().top-y);
+    tdZoom.surface.style.setProperty('--zoom-origin-y',Math.min(scene.bounds.bottom - scene.bounds.top,Math.max(0,y-scene.bounds.top))+'px');
+    scene.initialScroll = list.scrollTop;
+    tdZoomBuildEffects(scene);
+    tdZoomFadeOriginal(scene);
+    tdZoomPaint(scene, 0);
+    const relayout = () => {
+      if (tdZoom.scene !== scene) return;
+      const old = scene.bounds;
+      if (!tdZoomLayout(scene)) tdZoomFinish(scene);
+      else if (scene.progress < .999 && Object.keys(old).some(key=>Math.abs(old[key]-scene.bounds[key])>1))
+        tdZoomBuildEffects(scene);
+    };
+    scene.observer = new MutationObserver(() => tdZoomReadTheme(scene));
+    const themeNodes = new Set([tdZoomUserBubble(userReference)]);
+    for (let node=scene.root; node; node=tdDomParent(node)) themeNodes.add(node);
+    for (const element of themeNodes) {
+      if (element) scene.observer.observe(element, {attributes:true});
+    }
+    scene.resize = new ResizeObserver(relayout);
+    scene.resize.observe(scene.viewportRoot);
+    const composer = getComposerBoundary();
+    if (composer) scene.resize.observe(composer);
+    scene.layoutEvents = new AbortController();
+    const resizeOptions = {passive:true,signal:scene.layoutEvents.signal};
+    window.addEventListener('resize',relayout,resizeOptions);
+    window.visualViewport?.addEventListener('resize',relayout,resizeOptions);
+    scene.cacheLookup = tdZoomCachedOverview(scene);
+    tdZoomTopicControls(scene,'checking');
+    return scene;
+  }
+
+  function tdZoomClose() {
+    const scene = tdZoom.scene;
+    if (!scene) return;
+    if (scene.pending) {
+      tdNavCancel('zoom-dismissed');
+      tdZoomFinish(scene);
+      return;
+    }
+    tdZoomStopHistory(scene);
+    clearTimeout(tdZoom.settle);
+    delete scene.gestureProgress;
+    tdZoomBuildEffects(scene);
+    tdZoomAnimate(scene, 0);
+  }
+
+  function tdZoomDestinationAt(scene, target, y) {
+    const direct = scene.destinations.get(target?.closest?.('.zoom-line'));
+    if (direct) return direct;
+    let nearest = null, distance = Infinity;
+    for (const row of scene.rows.values()) {
+      const bounds = row.getBoundingClientRect();
+      if (bounds.bottom <= scene.bounds.top || bounds.top >= scene.bounds.bottom) continue;
+      const delta = Math.min(Math.abs(bounds.top-y), Math.abs(bounds.bottom-y));
+      if (delta < distance) { nearest = row; distance = delta; }
+    }
+    return nearest && scene.destinations.get(nearest);
+  }
+
+  function tdZoomGestureTarget(event) {
+    if (!settings.pinchTopics || !tdZoomReady() || !settingsLayerEl?.hidden || activeCommentMode ||
+        tdSelectionBusy() || window.getSelection()?.isCollapsed === false) return null;
+    const path = event.composedPath();
+    const target = path[0];
+    const transcript = target instanceof Element && tdDomContains(tdZoom.root,target) &&
+      !isInsideComposer(target) && !tdDomClosest(target,tdZoomExcluded);
+    const overview = tdZoom.scene && path.includes(tdZoom.surface);
+    return transcript || overview ? {target,transcript} : null;
+  }
+
+  function tdZoomScrub(delta, y, target, transcript) {
+    let scene = tdZoom.scene;
+    if (!scene) {
+      if (delta < 0 || !transcript) return;
+      scene = tdZoomShow(y);
+      if (!scene) return;
+    }
+    if (!tdAlive(scene.scope)) { tdZoomFinish(scene); return; }
+    if (scene.pending) return;
+    clearTimeout(tdZoom.settle);
+    if (scene.gestureProgress === undefined) {
+      clearTimeout(scene.settledWork);
+      scene.settledWork = 0;
+      cancelAnimationFrame(tdZoom.frame);
+      tdZoom.frame = 0;
+      tdZoomStopHistory(scene);
+      if (scene.progress >= .999 && delta < 0) {
+        const list = tdZoom.surface.querySelector('.zoom-list');
+        const destination = tdZoomDestinationAt(scene,target,y);
+        if (destination && Math.abs(list.scrollTop - scene.initialScroll) > 4) tdZoomPlace(scene,destination,y);
+        tdZoomFadeOriginal(scene);
+        tdZoomBuildEffects(scene);
+      }
+    }
+    scene.gestureProgress = Math.max(0,Math.min(1,(scene.gestureProgress ?? scene.progress) + delta));
+    if (!tdZoom.frame) tdZoom.frame = requestAnimationFrame(()=>{
+      tdZoom.frame = 0;
+      if (tdZoom.scene === scene) tdZoomPaint(scene,scene.gestureProgress);
+    });
+    tdZoom.settle = setTimeout(()=>{
+      if (tdZoom.scene !== scene) return;
+      const targetProgress = scene.gestureProgress;
+      cancelAnimationFrame(tdZoom.frame);
+      tdZoom.frame = 0;
+      delete scene.gestureProgress;
+      tdZoomPaint(scene,targetProgress);
+      tdZoomAnimate(scene,targetProgress >= .44 ? 1 : 0);
+    },110);
+  }
+
+  function tdZoomWheel(event) {
+    if (!event.isTrusted || !event.ctrlKey || tdZoom.control || event.altKey || event.shiftKey ||
+        event.metaKey || event.deltaMode !== 0 || !event.deltaY || !event.cancelable) return;
+    const now = performance.now(), direction = Math.sign(event.deltaY);
+    const continuing = tdZoom.tail && now - tdZoom.tail.time < 165;
+    const hit = tdZoomGestureTarget(event);
+    if (!continuing && (!hit || Math.abs(event.deltaX) > Math.abs(event.deltaY))) return;
+    // 一次已接管的手势直到结束都由对话处理。物理 Control 和浏览器缩放快捷键照常。
+    event.preventDefault();
+    tdZoom.tail = {direction,time:now};
+    tdZoomScrub(Math.max(-80,Math.min(80,event.deltaY))/62,event.clientY,hit?.target,hit?.transcript);
+  }
+
+  function tdZoomTouch(event) {
+    if (event.type === 'touchcancel' || event.type === 'touchend' && event.touches.length < 2) {
+      tdZoom.touch = null;
+      return;
+    }
+    if (!event.isTrusted || event.touches.length !== 2 || !event.cancelable) return;
+    const hit = tdZoom.touch?.hit || tdZoomGestureTarget(event);
+    if (!hit) return;
+    const [a,b] = event.touches;
+    const separation = Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+    if (!tdZoom.touch && separation < 24) return;
+    event.preventDefault();
+    const prior = tdZoom.touch?.separation;
+    tdZoom.touch = {hit,separation};
+    if (prior) tdZoomScrub(Math.max(-.35,Math.min(.35,Math.log(prior/separation)*3.6)),
+      (a.clientY+b.clientY)/2,hit.target,hit.transcript);
+  }
+
+  function tdZoomRefreshHistory(scene) {
+    if (!scene || scene.progress < .999 || scene.pending || tdZoomMoving(scene) || scene.history.running) return;
+    const indexed = tdZoomRecords();
+    const authoritative = tdHealth.snapshot?.complete === true && indexed.length > 0;
+    const captured = tdZoomCapturedRecords(scene);
+    const records = authoritative || (!scene.history.complete && captured.length < indexed.length) ? indexed : captured;
+    const complete = authoritative || scene.history.complete;
+    const identity = entry=>[tdZoomEntryId(entry),...(entry.answerRecords || []).map(answer=>answer.messageId || answer.nodeId)].join('/');
+    const current = new Set(scene.records.map(identity));
+    const visible = indexed.filter(entry=>entry.target?.isConnected || entry.answerRecords?.some(answer=>answer.target?.isConnected));
+    if (scene.cachedOverview && !authoritative && visible.every(entry=>current.has(identity(entry)))) return;
+    const revision = entry=>hashString([entry.rawQuestion || entry.text,
+      ...tdZoomChapters(entry).map(block=>block.label),
+      ...(entry.answerRecords || []).map(answer=>answer.rawText || answer.visibleRawText || '')].join('\n'));
+    const sameOrder = records.length === scene.records.length && records.every((entry,index)=>{
+      const previous = scene.records[index];
+      return identity(entry)===identity(previous) && (scene.cachedOverview || revision(entry)===revision(previous));
+    });
+    if (!records.length || sameOrder && complete === scene.complete) {
+      if (scene.complete) void tdZoomLoadTopics(scene);
+      return;
+    }
+    const list = tdZoom.surface.querySelector('.zoom-list');
+    const listTop = list.getBoundingClientRect().top;
+    const anchor = [...scene.rows].find(([,row]) => row.getBoundingClientRect().bottom > listTop);
+    const priorTop = anchor?.[1].getBoundingClientRect().top;
+    const oldScroll = list.scrollTop;
+    const shift = records.findIndex(record => record.key === scene.records[scene.first]?.key);
+    scene.first = Math.max(0, shift - Math.floor(tdZoomChunk / 2));
+    scene.last = Math.min(records.length, scene.first + tdZoomChunk);
+    scene.records = records;
+    scene.complete = complete;
+    scene.cachedOverview = false;
+    scene.localCacheRead = false;
+    scene.topicRequest = null;
+    scene.nextTopics = null;
+    scene.topics = null;
+    scene.summaries = null;
+    tdZoom.surface.querySelector('.zoom-conversation-summary').hidden = true;
+    tdZoomRenderTopicIndex(scene);
+    scene.rows.clear();
+    list.querySelector('.zoom-stream').replaceChildren();
+    tdZoomRender(scene, scene.first, scene.last);
+    const row = scene.rows.get(anchor?.[0]);
+    if (row) list.scrollTop += row.getBoundingClientRect().top - priorTop;
+    scene.initialScroll += list.scrollTop - oldScroll;
+    void tdZoomLoadTopics(scene);
+  }
+
+  function tdSyncSemanticZoom() {
+    if (!tdZoom.button || !tdZoom.surface) return;
+    const ready = tdZoomReady();
+    tdZoom.button.hidden = !ready;
+    tdZoom.button.title = settings.autoTopicSummary ? '打开概览并使用已配置的 OpenAI 连接生成摘要' : '打开概览';
+    if (!ready) {
+      if (tdZoom.root || tdZoom.scene) tdZoomReset();
+      return;
+    }
+    const root = tdZoomRoot();
+    if (tdZoom.scene?.root.isConnected && tdAlive(tdZoom.scene.scope)) {
+      tdZoomRefreshHistory(tdZoom.scene);
+      return;
+    }
+    if (root === tdZoom.root) { tdZoomRefreshHistory(tdZoom.scene); return; }
+    tdZoomReset();
+    tdZoom.root = root;
+    if (root) {
+      tdZoom.listener = new AbortController();
+      const gestureOptions = {capture:true,passive:false,signal:tdZoom.listener.signal};
+      window.addEventListener('wheel',tdZoomWheel,gestureOptions);
+      for (const type of ['touchstart','touchmove','touchend','touchcancel'])
+        window.addEventListener(type,tdZoomTouch,gestureOptions);
+    }
+  }
+
+
   function ensureUi() {
     if (navHost?.isConnected) return;
 
@@ -10671,27 +12407,33 @@ function tdNavScrollRoot(target) {
         :host {
           all: initial;
           --apr-right: 12px;
-          --apr-panel-bg: #fbfcf9;
+          --apr-panel-bg: #fff;
           --apr-dialog-bg: #ffffff;
           --apr-panel-border: rgba(13, 13, 13, 0.10);
-          --apr-text: #202b26;
-          --apr-muted: #566159;
+          --apr-text: #171717;
+          --apr-muted: #606060;
           --apr-faint: rgba(13, 13, 13, 0.38);
           --apr-hover: rgba(13, 13, 13, 0.06);
           --apr-active-row: rgba(13, 13, 13, 0.095);
           --apr-input: rgba(13, 13, 13, 0.045);
           --apr-bar: rgba(13, 13, 13, 0.32);
           --apr-bar-hover: rgba(13, 13, 13, 0.58);
-          --apr-bar-active: #235c45;
-          --apr-accent: #235c45;
+          --apr-bar-active: #171717;
+          --apr-accent: #171717;
+          --apr-on-accent: #fff;
+          --apr-accent-hover: #333;
+          --apr-focus: #3c638f;
           --apr-shadow: 0 14px 40px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.08);
           --apr-font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
 
         :host([data-theme="dark"]) {
-          --apr-panel-bg: #292e2b;
-          --apr-dialog-bg: #262b28;
-          --apr-accent: #4d9e7f;
+          --apr-panel-bg: #252525;
+          --apr-dialog-bg: #232323;
+          --apr-accent: #f4f4f4;
+          --apr-on-accent: #171717;
+          --apr-accent-hover: #dcdcdc;
+          --apr-focus: #aecbf2;
           --apr-panel-border: rgba(255, 255, 255, 0.11);
           --apr-text: #f7f7f8;
           --apr-muted: rgba(255, 255, 255, 0.62);
@@ -10724,6 +12466,8 @@ function tdNavScrollRoot(target) {
           -webkit-font-smoothing: antialiased;
           text-rendering: geometricPrecision;
         }
+
+        :host([data-overview="true"]) .navigator { visibility:hidden; pointer-events:none; }
 
         .compact-rail {
           position: relative;
@@ -10788,6 +12532,7 @@ function tdNavScrollRoot(target) {
         }
 
         .preview-panel {
+          color:var(--apr-text);
           position: absolute;
           z-index: 1;
           right: 25px;
@@ -10801,8 +12546,6 @@ function tdNavScrollRoot(target) {
           border-radius: 16px;
           background: var(--apr-panel-bg);
           box-shadow: var(--apr-shadow);
-          backdrop-filter: blur(18px) saturate(1.15);
-          -webkit-backdrop-filter: blur(18px) saturate(1.15);
           opacity: 0;
           visibility: hidden;
           pointer-events: none;
@@ -10817,6 +12560,137 @@ function tdNavScrollRoot(target) {
           pointer-events: auto;
           transform: translate(0, -50%) scale(1);
         }
+
+
+        .zoom-actions { display:flex; align-items:center; gap:3px; flex:none; }
+        .zoom-button {
+          min-height:32px; border-radius:7px; padding:3px 9px; border:0;
+          color:var(--apr-accent); background:transparent; font-size:12px; font-weight:650; cursor:pointer;
+        }
+        .zoom-button:hover, .zoom-button:focus-visible { background:var(--apr-hover); }
+        .semantic-zoom {
+          --zoom-progress:0;
+          --zoom-preview-opacity:clamp(0, calc((var(--zoom-progress) - .16) * 1.72), 1);
+          position:fixed; z-index:2147483644; isolation:isolate;
+          display:grid; grid-template-rows:auto minmax(0,1fr);
+          overflow:hidden; color:var(--zoom-ink); color-scheme:var(--zoom-scheme, normal);
+          font-family:var(--zoom-font); font-size:var(--zoom-size); line-height:1.5;
+          pointer-events:auto;
+        }
+        .semantic-zoom::before {
+          content:""; position:absolute; inset:0; z-index:-1; pointer-events:none;
+          background-color:Canvas;
+          background-image:linear-gradient(var(--zoom-background),var(--zoom-background));
+          opacity:clamp(0, calc((var(--zoom-progress) - .32) * 1.7), 1);
+        }
+        .semantic-zoom[data-settled="true"]::before { opacity:1; }
+        .zoom-list {
+          position:relative; min-height:0; overflow:auto; overscroll-behavior:contain;
+          outline:none; scrollbar-width:thin; opacity:var(--zoom-preview-opacity);
+          scroll-padding-block:12px 24px;
+        }
+        .semantic-zoom[data-settled="true"] .zoom-list { opacity:1; }
+        .zoom-stream {
+          display:grid; gap:24px; box-sizing:border-box; width:var(--zoom-column-width); margin-left:var(--zoom-column-left);
+          padding:16px clamp(14px, 2.4vw, 26px) 36px;
+          transform-origin:50% var(--zoom-origin-y,50%);
+          transform:scaleY(calc(.96 + .04 * var(--zoom-progress)));
+        }
+        .zoom-topic {
+          display:flex; flex-direction:column; align-items:start; gap:9px;
+          border-top:1px solid color-mix(in srgb, var(--zoom-ink) 14%, transparent); padding-top:17px;
+        }
+        .zoom-topic:only-child:not(:has(h3)) { border-top:0; padding-top:0; }
+        .zoom-topic h3 {
+          margin:0; color:var(--zoom-ink); font-size:1em; line-height:1.35;
+          font-weight:650; letter-spacing:-.018em; overflow-wrap:anywhere;
+          opacity:clamp(0, calc((var(--zoom-progress) - .34) * 1.72), 1);
+        }
+        .zoom-empty { margin:4px 0; color:var(--zoom-muted); font-size:.83em; line-height:1.55; }
+        .zoom-exchange { display:flex; flex-direction:column; width:100%; align-items:start; gap:7px; }
+        .zoom-exchange + .zoom-exchange { margin-top:8px; }
+        .zoom-line {
+          display:block; border:0; text-align:left; width:fit-content; max-width:88%;
+          font-size:.87em; line-height:1.5; overflow-wrap:anywhere; cursor:pointer;
+          transform-origin:left center;
+        }
+        .zoom-line[data-role="user"] {
+          align-self:end; padding:.45em .9em; background:var(--zoom-bubble);
+          color:var(--zoom-bubble-ink); border-radius:var(--zoom-radius); font-family:var(--zoom-bubble-font);
+          transform-origin:right center;
+        }
+        .zoom-line[data-role="assistant"] {
+          max-width:100%; padding:.3em 0; color:var(--zoom-ink); background:transparent;
+        }
+        .zoom-line-label { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; white-space:pre-line; }
+        .zoom-line[data-role="assistant"] .zoom-line-label { -webkit-line-clamp:4; }
+        .zoom-line[data-digest="true"] .zoom-line-label { display:block; overflow:visible; }
+        .zoom-turn-summary { margin:0; color:var(--zoom-ink); font-size:.87em; line-height:1.55; overflow-wrap:anywhere; }
+        .zoom-line:focus-visible { outline:2px solid var(--zoom-muted); outline-offset:3px; }
+        @media (prefers-reduced-motion:reduce) { .zoom-stream { transform:none; } }
+        .zoom-line:hover { text-decoration:underline; text-underline-offset:.22em; }
+        .zoom-summary { margin:0 0 6px; color:var(--zoom-muted); font-size:.82em; line-height:1.55; }
+        .zoom-conversation-summary {
+          box-sizing:border-box;width:var(--zoom-column-width);margin:0 0 0 var(--zoom-column-left);
+          padding:11px clamp(12px,2.4vw,24px) 12px;font-size:.84em;line-height:1.55;
+          max-height:9em;overflow:auto;scrollbar-width:thin;overflow-wrap:anywhere;
+          color:var(--zoom-ink);background:var(--zoom-background);
+        }
+        .zoom-conversation-summary[hidden], .zoom-topic-index[hidden] { display:none; }
+        .zoom-topic-index{
+          box-sizing:border-box;width:var(--zoom-column-width);margin-left:var(--zoom-column-left);
+          display:flex;gap:7px;overflow-x:auto;scrollbar-width:thin;padding:0 clamp(12px,2.4vw,24px) 7px;
+          background:var(--zoom-background);
+        }
+        .zoom-topic-index button{
+          appearance:none;flex:0 0 auto;max-width:min(260px,75%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+          min-height:26px;border:0;border-radius:6px;padding:4px 8px;font:inherit;font-size:.75em;line-height:1.35;
+          color:var(--zoom-ink);background:color-mix(in srgb,var(--zoom-ink) 7%,transparent);cursor:pointer;
+        }
+        .zoom-topic-index button:hover{background:color-mix(in srgb,var(--zoom-ink) 13%,transparent)}
+        .zoom-topic-index button:focus-visible{outline:1px solid currentColor;outline-offset:-2px}
+        .zoom-toolbar {
+          position:relative; z-index:2;
+          display:flex; justify-content:space-between; align-items:center; gap:10px;
+          min-height:46px; padding:6px clamp(12px, 2.4vw, 24px);
+          background:var(--zoom-background);
+          border-bottom:1px solid color-mix(in srgb, var(--zoom-ink) 13%, transparent);
+          visibility:hidden;
+        }
+        .semantic-zoom[data-settled="true"] .zoom-toolbar { visibility:visible; }
+        .semantic-zoom:not([data-settled="true"]) .zoom-conversation-summary,
+        .semantic-zoom:not([data-settled="true"]) .zoom-topic-index { visibility:hidden; }
+        .zoom-context, .zoom-controls { display:flex; min-width:0; align-items:center; gap:9px; }
+        .zoom-context strong { font-size:.83em; white-space:nowrap; }
+        .zoom-coverage { color:var(--zoom-muted); font-size:.72em; white-space:nowrap; }
+        .zoom-return, .zoom-ai {
+          flex:none; min-height:30px; padding:4px 9px; border:0; border-radius:8px;
+          color:var(--zoom-ink); background:color-mix(in srgb, var(--zoom-ink) 7%, transparent);
+          font-size:.75em; font-weight:600; cursor:pointer;
+        }
+        .zoom-return { width:30px; padding:6px; background:transparent; line-height:0; }
+        .zoom-return svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; }
+        .zoom-ai-status {
+          color:var(--zoom-muted); font-size:.73em; line-height:1.25; max-width:32ch;
+          overflow-wrap:anywhere;
+        }
+        .zoom-chapters { width:100%; padding-left:5px; margin-bottom:4px; color:var(--zoom-muted); font-size:.76em; }
+        .zoom-chapters summary { width:fit-content; cursor:pointer; padding:3px 0; }
+        .zoom-chapter {
+          display:block; max-width:100%; min-height:25px; text-align:start; padding:4px calc(13px + var(--chapter-level) * 9px);
+          border:0; border-radius:6px; background:transparent; color:var(--zoom-ink); cursor:pointer;
+        }
+        .zoom-return:hover, .zoom-ai:hover, .zoom-chapter:hover { background:color-mix(in srgb, var(--zoom-ink) 13%, transparent); }
+        .zoom-line:focus-visible, .zoom-return:focus-visible, .zoom-ai:focus-visible, .zoom-chapter:focus-visible, .zoom-chapters summary:focus-visible {
+          outline:2px solid currentColor; outline-offset:2px;
+        }
+        @media (max-width:620px) {
+          .zoom-context { display:grid; gap:1px; }
+          .zoom-context strong, .zoom-coverage { line-height:1.2; }
+          .zoom-ai-status { max-width:20ch; }
+        }
+        .semantic-zoom[data-locating="true"] { cursor:progress; }
+
 
         .panel-header {
           flex: 0 0 auto;
@@ -11020,22 +12894,29 @@ function tdNavScrollRoot(target) {
         .selection-action {
           position: fixed;
           z-index: 2147483647;
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
           min-height: 34px;
-          padding: 0 12px;
-          border: 1px solid var(--apr-panel-border);
-          border-radius: 10px;
+          padding: 0 10px;
+          border: 0;
+          border-radius: 9px;
           background: var(--apr-panel-bg);
           color: var(--apr-text);
           box-shadow: var(--apr-shadow);
-          backdrop-filter: blur(14px);
-          -webkit-backdrop-filter: blur(14px);
           cursor: pointer;
           font-family: var(--apr-font);
           font-size: 12px;
           font-weight: 620;
           white-space: nowrap;
         }
-        .selection-action:hover, .selection-action:focus-visible { background: var(--apr-hover); outline: none; }
+        .selection-action { transition:background-color 120ms cubic-bezier(.2,.7,.3,1); }
+        .selection-action svg { width:16px; height:16px; flex:none; }
+        .selection-action:hover, .selection-action:active {
+          background:color-mix(in srgb,var(--apr-text) 8%,var(--apr-panel-bg));
+        }
+        .selection-action:focus-visible { outline:2px solid var(--apr-text); outline-offset:2px; }
+        @media (prefers-reduced-motion:reduce) { .selection-action { transition:none; } }
 
         .queue-dock {
           position: fixed;
@@ -11232,8 +13113,6 @@ function tdNavScrollRoot(target) {
           color: var(--apr-text);
           box-shadow: 0 16px 44px rgba(0, 0, 0, .16), 0 2px 8px rgba(0, 0, 0, .07);
           font-family: var(--apr-font);
-          backdrop-filter: blur(18px) saturate(1.1);
-          -webkit-backdrop-filter: blur(18px) saturate(1.1);
         }
         .comment-popover[data-mode="compose"] { border-radius: 24px; }
         .comment-popover[data-mode="compose"][data-multiline="true"] { border-radius: 16px; }
@@ -11267,7 +13146,12 @@ function tdNavScrollRoot(target) {
           line-height: 21px;
           font-weight: 550;
         }
-        .comment-compose-input::placeholder { color: var(--apr-faint); }
+        .comment-compose-input::placeholder { color: var(--apr-muted); }
+        .comment-compose-shell:focus-within { box-shadow: inset 0 0 0 1px var(--apr-panel-border); }
+        .queue-dock-icon:focus-visible, .comment-compose-send:focus-visible,
+        .comment-aggregate-badge:focus-visible, .selection-action:focus-visible {
+          outline:2px solid currentColor; outline-offset:2px;
+        }
         .comment-compose-send {
           appearance: none;
           width: 34px;
@@ -11358,85 +13242,141 @@ function tdNavScrollRoot(target) {
         }
 
         .settings-layer {
+          --settings-gutter: clamp(18px, 5vw, 26px);
           position: fixed;
           z-index: 2147483647;
           inset: 0;
           display: grid;
           place-items: center;
-          padding: 22px;
+          padding: clamp(10px, 3vw, 22px);
           font-family: var(--apr-font);
           color: var(--apr-text);
           pointer-events: auto;
         }
-        .settings-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.34); backdrop-filter: blur(2px); }
+        .settings-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .36); }
         .settings-dialog {
           position: relative;
-          width: min(590px, calc(100vw - 32px));
-          max-height: min(720px, calc(100vh - 32px));
+          width: min(610px, 100%);
+          container-type: inline-size;
+          max-height: min(760px, 100%);
+          min-height: 0;
           overflow: hidden;
           display: flex;
           flex-direction: column;
-          border: 1px solid var(--apr-panel-border);
-          border-radius: 18px;
+          border-radius: 16px;
           background: var(--apr-dialog-bg);
-          box-shadow: 0 24px 80px rgba(0, 0, 0, 0.27);
+          box-shadow: var(--apr-shadow);
         }
-        .settings-header { padding: 17px 18px 13px; border-bottom: 1px solid var(--apr-panel-border); display: flex; gap: 12px; justify-content: space-between; }
-        .settings-title { margin: 0; font-size: 17px; line-height: 23px; font-weight: 680; letter-spacing: -0.015em; }
-        .settings-intro { margin-top: 3px; color: var(--apr-muted); font-size: 12px; line-height: 18px; }
-        .settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px 18px 4px; scrollbar-width: thin; }
-        .settings-section { padding: 0 0 13px; }
-        .settings-section + .settings-section { padding-top: 13px; border-top: 1px solid var(--apr-panel-border); }
-        .section-title { margin: 0 0 8px; font-size: 12px; line-height: 17px; font-weight: 650; color: var(--apr-muted); }
-        .setting-row {
-          min-height: 47px;
-          padding: 7px 0;
+        .settings-header {
+          flex: 0 0 auto;
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 18px;
+          gap: 12px;
+          padding: 12px var(--settings-gutter);
+          border-bottom: 1px solid var(--apr-panel-border);
+        }
+        .settings-title { margin: 0; font-size: 19px; line-height: 26px; font-weight: 650; letter-spacing: -.02em; }
+        .settings-scroll {
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          padding: 19px var(--settings-gutter) 10px;
+          scrollbar-width: thin;
+        }
+        .settings-section { margin: 0; padding: 0 0 14px; }
+        .settings-section + .settings-section { padding-top: 18px; border-top: 1px solid var(--apr-panel-border); }
+        .settings-dialog .section-title { margin: 0 0 4px; font-size: 15px; line-height: 22px; font-weight: 650; color: var(--apr-text); }
+        .setting-row {
+          min-height: 48px;
+          padding: 8px 0;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: start;
+          gap: 3px 16px;
         }
         .setting-copy { min-width: 0; }
-        .setting-name { font-size: 13px; line-height: 18px; font-weight: 560; }
-        .setting-description { margin-top: 2px; color: var(--apr-muted); font-size: 11px; line-height: 16px; }
-        .switch { position: relative; flex: 0 0 auto; width: 38px; height: 22px; }
-        .switch input { position: absolute; opacity: 0; pointer-events: none; }
-        .switch-track { position: absolute; inset: 0; border-radius: 999px; background: color-mix(in srgb, var(--apr-muted) 35%, transparent); transition: background 120ms ease; cursor: pointer; }
-        .switch-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgba(0,0,0,.24); transition: transform 130ms ease; }
-        .switch input:checked + .switch-track { background: var(--apr-accent); }
-        .switch input:checked + .switch-track::after { transform: translateX(16px); }
-        .switch input:focus-visible + .switch-track { outline: 2px solid color-mix(in srgb, var(--apr-accent) 55%, transparent); outline-offset: 2px; }
-        .number-input {
-          width: 82px;
-          height: 34px;
-          padding: 0 9px;
-          border: 1px solid var(--apr-panel-border);
-          border-radius: 9px;
-          background: var(--apr-input);
-          color: var(--apr-text);
-          outline: none;
-          text-align: right;
-        }
-        .number-input:focus { border-color: color-mix(in srgb, var(--apr-accent) 65%, var(--apr-panel-border)); }
-        .select-input {
-          width: min(250px, 46vw);
-          min-height: 36px;
-          padding: 7px 30px 7px 10px;
-          border: 1px solid var(--apr-panel-border);
-          border-radius: 9px;
-          background: var(--apr-input);
-          color: var(--apr-text);
-          outline: none;
+        .setting-name { display: block; font-size: 14px; line-height: 21px; font-weight: 570; }
+        .setting-description {
+          display: block;
+          margin: 4px 0 0;
+          color: var(--apr-muted);
           font-size: 12px;
-          line-height: 17px;
+          line-height: 1.55;
+          overflow-wrap: anywhere;
         }
-        .select-input:focus { border-color: color-mix(in srgb, var(--apr-accent) 65%, var(--apr-panel-border)); }
-        .settings-status { margin-top: 8px; padding: 9px 10px; border-radius: 10px; background: var(--apr-input); color: var(--apr-muted); font-size: 11px; line-height: 16px; }
-        .settings-footer { flex: 0 0 auto; padding: 12px 14px; border-top: 1px solid var(--apr-panel-border); display: flex; justify-content: space-between; gap: 10px; }
-        .footer-group { display: flex; gap: 8px; }
-        .dialog-button { appearance: none; min-height: 35px; padding: 0 13px; border: 1px solid var(--apr-panel-border); border-radius: 9px; background: transparent; color: var(--apr-text); cursor: pointer; }
+        .switch { position: relative; width: 38px; height: 22px; margin-top: 1px; }
+        .switch input { position: absolute; opacity: 0; pointer-events: none; }
+        .switch-track {
+          position: absolute;
+          inset: 0;
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--apr-muted) 37%, transparent);
+          transition: background 120ms ease;
+          cursor: pointer;
+        }
+        .switch-track::after {
+          content: "";
+          position: absolute;
+          top: 3px;
+          left: 3px;
+          width: 16px;
+          height: 16px;
+          border-radius: 50%;
+          background: white;
+          box-shadow: 0 1px 2px rgba(0,0,0,.22);
+          transition: transform 130ms ease;
+        }
+        .switch input:checked + .switch-track { background: var(--apr-accent); }
+        .switch input:checked + .switch-track::after { transform: translateX(16px); background: var(--apr-on-accent); }
+        .switch input:focus-visible + .switch-track { outline: 2px solid var(--apr-focus); outline-offset: 2px; }
+        .number-input, .select-input {
+          min-height: 32px;
+          min-width: 0;
+          padding: 5px 9px;
+          border: 1px solid var(--apr-panel-border);
+          border-radius: 8px;
+          background: var(--apr-input);
+          color: var(--apr-text);
+          font-size: 13px;
+          line-height: 20px;
+        }
+        .number-input { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+        .select-input { width: min(184px, 34vw); max-width: 100%; }
+        .settings-dialog :is(button, input, select, summary):focus-visible { outline: 2px solid var(--apr-focus); outline-offset: 2px; }
+        .settings-status { margin-top: 8px; color: var(--apr-muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+        .settings-footer {
+          flex: 0 0 auto;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          padding: 12px var(--settings-gutter);
+          border-top: 1px solid var(--apr-panel-border);
+        }
+        .footer-group { display: flex; gap: 7px; }
+        .dialog-button {
+          appearance: none;
+          min-height: 34px;
+          padding: 0 12px;
+          border: 1px solid var(--apr-panel-border);
+          border-radius: 999px;
+          background: transparent;
+          color: var(--apr-text);
+          font-size: 13px;
+          white-space: nowrap;
+          cursor: pointer;
+        }
         .dialog-button:hover, .dialog-button:focus-visible { background: var(--apr-hover); }
-        .dialog-button.primary { border-color: var(--apr-accent); background: var(--apr-accent); color: white; }
+        .dialog-button.primary { border-color: var(--apr-accent); background: var(--apr-accent); color: var(--apr-on-accent); }
+        .dialog-button.primary:hover { background: var(--apr-accent-hover); }
+        .settings-footer > .dialog-button { padding-inline: 2px; border-color: transparent; color: var(--apr-muted); }
+        :host([data-theme="dark"]) .settings-dialog { color-scheme: dark; }
+        @container (max-width: 380px) {
+          .setting-row:has(.select-input) { grid-template-columns: minmax(0, 1fr); }
+          .setting-row .select-input { width: min(100%, 210px); margin-top: 4px; }
+        }
 
         @media (prefers-reduced-motion: reduce) {
           .preview-panel, .rail-item::after, .toast, .chevron, .switch-track, .switch-track::after { transition: none !important; }
@@ -11449,17 +13389,34 @@ function tdNavScrollRoot(target) {
               <div class="panel-title">对话大纲</div>
               <div class="panel-subtitle">0 个会话事件</div>
             </div>
-            <button class="icon-button" type="button" data-action="open-settings" aria-label="打开 对话设置" title="设置">
+            <div class="zoom-actions"><button class="zoom-button" type="button" data-action="open-topics" aria-expanded="false" aria-controls="td-conversation-zoom" hidden>概览</button>
+            <button class="icon-button" type="button" data-action="open-settings" aria-label="对话设置" title="设置">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.25A3.25 3.25 0 1 0 12 8.75a3.25 3.25 0 0 0 0 6.5Z"/><path d="M19.4 13.5a7.8 7.8 0 0 0 .05-3l1.62-1.26-1.9-3.28-1.98.8a8.2 8.2 0 0 0-2.59-1.5L14.3 3h-3.8l-.3 2.26a8.2 8.2 0 0 0-2.59 1.5l-1.98-.8-1.9 3.28 1.62 1.26a7.8 7.8 0 0 0 .05 3l-1.67 1.3 1.9 3.28 2.04-.82a8.1 8.1 0 0 0 2.53 1.46l.3 2.28h3.8l.3-2.28a8.1 8.1 0 0 0 2.53-1.46l2.04.82 1.9-3.28-1.67-1.3Z"/></svg>
-            </button>
+            </button></div>
           </div>
           <div class="preview-list"></div>
+          <div class="td-outline-coverage" hidden><span role="status"></span><button type="button" class="dialog-button" data-action="load-outline-history">补齐更早消息</button></div>
         </div>
         <div class="compact-rail" role="navigation" aria-label="会话事件导航条"></div>
         <div class="toast" role="status" aria-live="polite"></div>
       </div>
 
-      <button class="selection-action" type="button" data-action="add-selection-comment" hidden>添加批注</button>
+      <section class="semantic-zoom" id="td-conversation-zoom" aria-label="对话主题" hidden>
+        <div class="zoom-top">
+        <div class="zoom-toolbar">
+          <div class="zoom-context"><strong>对话概览</strong><span class="zoom-coverage"></span></div>
+          <div class="zoom-controls">
+            <span class="zoom-ai-status" role="status" hidden></span>
+            <button class="zoom-ai" data-action="generate-topics" type="button" hidden>重试</button>
+            <button class="zoom-return" data-action="close-topics" type="button" aria-label="返回对话" title="返回对话（Esc）"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+          </div>
+        </div>
+          <p class="zoom-conversation-summary" aria-label="会话摘要" hidden></p>
+          <nav class="zoom-topic-index" aria-label="跳转到主题" hidden></nav>
+        </div>
+        <div class="zoom-list" tabindex="0" aria-label="缩略对话"><div class="zoom-stream"></div></div>
+      </section>
+      <button class="selection-action" type="button" data-action="add-selection-comment" aria-label="添加批注" hidden>${threadDeckIcon('annotation')}<span>批注</span></button>
 
       <section class="queue-dock" hidden aria-label="排队提问">
         <div class="queue-dock-list" role="list" aria-label="可拖拽排序的排队问题"></div>
@@ -11473,12 +13430,9 @@ function tdNavScrollRoot(target) {
 
       <div class="settings-layer" hidden>
         <div class="settings-backdrop" data-action="close-settings"></div>
-        <form class="settings-dialog" aria-label="对话设置">
+        <form class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="td-settings-title">
           <div class="settings-header">
-            <div>
-              <h2 class="settings-title">对话设置</h2>
-              <div class="settings-intro">控制此页的大纲、批注和排队提问。</div>
-            </div>
+            <h2 class="settings-title" id="td-settings-title">对话设置</h2>
             <button class="icon-button" type="button" data-action="close-settings" aria-label="关闭设置">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
             </button>
@@ -11487,18 +13441,18 @@ function tdNavScrollRoot(target) {
             <section class="settings-section">
               <h3 class="section-title">右侧对话大纲</h3>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">启用对话工具</span><span class="setting-description">按时间排列你的提问和每次定时任务运行。关闭后导航、批注与自动发送全部停止；数据保留。</span></span>
+                <span class="setting-copy"><span class="setting-name">启用对话工具</span><span class="setting-description">管理导航、批注和自动发送。关闭后保留数据。</span></span>
                 <span class="switch"><input type="checkbox" name="enabled"><span class="switch-track"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">回答提纲</span><span class="setting-description">按整篇最终回答提取章节标题，保留标题层级和编号章节；没有章节标题时再使用一级列表。过滤思考、代码和引用；展开后显示完整目录，不截掉后续章节。点击章节可定位正文，跳转开关位于下方“跳转与本地数据”。</span></span>
+                <span class="setting-copy"><span class="setting-name">回答提纲</span><span class="setting-description">保留回答的标题层级与编号。没有标题时，使用一级列表。</span></span>
                 <select class="select-input" name="answerOutlineMode">
                   <option value="off">关闭，只显示会话事件</option>
                   <option value="stable">完整章节目录（推荐）</option>
                 </select>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">隐藏 ChatGPT 原生导航</span><span class="setting-description">Tab Cadence 大纲显示时隐藏 ChatGPT 自带的右侧问题刻度，避免两套导航重叠。定时任务运行会由 Tab Cadence 补充。</span></span>
+                <span class="setting-copy"><span class="setting-name">隐藏 ChatGPT 原生导航</span><span class="setting-description">显示 Tab Cadence 大纲时，收起 ChatGPT 自带的右侧导航。</span></span>
                 <span class="switch"><input type="checkbox" name="hideNativeChatGptRail"><span class="switch-track"></span></span>
               </label>
             </section>
@@ -11506,19 +13460,19 @@ function tdNavScrollRoot(target) {
             <section class="settings-section">
               <h3 class="section-title">批注与提问队列</h3>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">选中文字后添加批注</span><span class="setting-description">把“批注”按钮拼进 ChatGPT 自带的选区工具条。保存后的批注不会单独发送，而会自动拼接到下一轮问题前面。</span></span>
+                <span class="setting-copy"><span class="setting-name">选中文字后添加批注</span><span class="setting-description">在选区工具条添加批注，随下一轮问题一起发送。</span></span>
                 <span class="switch"><input type="checkbox" name="enableInlineComments"><span class="switch-track"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">启用安全提问队列</span><span class="setting-description">Enter：空闲时发送，有任务或队列时排队。Option/Alt+Enter、Shift+Enter：换行。Command/Ctrl+Enter：跳过本地队列，使用网页原生立即发送或调整方向；不会自动停止当前回答。</span></span>
+                <span class="setting-copy"><span class="setting-name">启用安全提问队列</span><span class="setting-description">Enter 空闲时发送，忙碌时排队。Option 或 Shift + Enter 换行，Command 或 Ctrl + Enter 立即发送或调整方向。</span></span>
                 <span class="switch"><input type="checkbox" name="enterQueuesWhileGenerating"><span class="switch-track"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">输入框上方显示排队条</span><span class="setting-description">有待发送问题时，只在输入框上方显示 Codex 风格队列；可直接编辑、删除和拖拽排序，不再弹出右下角面板。</span></span>
+                <span class="setting-copy"><span class="setting-name">输入框上方显示排队条</span><span class="setting-description">在输入框上方编辑、删除或拖动待发送的问题。</span></span>
                 <span class="switch"><input type="checkbox" name="showQueueDock"><span class="switch-track"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">空闲后自动发送下一条</span><span class="setting-description">按顺序逐条提交。关闭后只保留排队，由你手动发送队首；失败时会暂停，避免重复。</span></span>
+                <span class="setting-copy"><span class="setting-name">空闲后自动发送下一条</span><span class="setting-description">每轮结束后发送队首。关闭时改为手动发送。</span></span>
                 <span class="switch"><input type="checkbox" name="autoRunQueue"><span class="switch-track"></span></span>
               </label>
             </section>
@@ -11526,15 +13480,23 @@ function tdNavScrollRoot(target) {
             <section class="settings-section">
               <h3 class="section-title">跳转与本地数据</h3>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">点击回答段落跳转</span><span class="setting-description">默认开启。点击大纲章节定位到对应正文；关闭后保留目录，问题与任务运行仍可跳转。无法唯一确认的位置不会猜测。</span></span>
+                <span class="setting-copy"><span class="setting-name">对话区双指缩放</span><span class="setting-description">捏合看概览，张开返回。也可以从大纲打开「概览」。</span></span>
+                <span class="switch"><input type="checkbox" name="pinchTopics"><span class="switch-track"></span></span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-name">概览自动摘要</span><span class="setting-description">打开概览时，用已配置的 OpenAI 连接总结已载入的问答与章节。相同内容直接读缓存。关闭后可浏览原文索引。</span></span>
+                <span class="switch"><input type="checkbox" name="autoTopicSummary"><span class="switch-track"></span></span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-name">点击回答段落跳转</span><span class="setting-description">点击章节定位原文。关闭后仍可跳转到提问和任务。</span></span>
                 <span class="switch"><input type="checkbox" name="enableAnswerJump"><span class="switch-track"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">附近内容使用平滑滚动</span><span class="setting-description">相邻内容使用短动画；跨越很长会话时直接定位，以减少卡顿和虚拟列表拉回。</span></span>
+                <span class="setting-copy"><span class="setting-name">附近内容使用平滑滚动</span><span class="setting-description">附近章节平滑滚动，远距离直接定位。</span></span>
                 <span class="switch"><input type="checkbox" name="smoothScroll"><span class="switch-track"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">记住已经读取的大纲</span><span class="setting-description">在浏览器本地保存已经读取的提问、任务运行和回答结构，长会话重新打开时更完整。批注和队列只保留在当前标签页。</span></span>
+                <span class="setting-copy"><span class="setting-name">记住已经读取的大纲</span><span class="setting-description">在浏览器本地保留已读取的提问、任务和章节。</span></span>
                 <span class="switch"><input type="checkbox" name="rememberPrompts"><span class="switch-track"></span></span>
               </label>
             </section>
@@ -11542,22 +13504,22 @@ function tdNavScrollRoot(target) {
             <section class="settings-section">
               <h3 class="section-title">显示条件与位置</h3>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">会话事件达到多少条时显示导航</span><span class="setting-description">一个手动提问或一次定时任务运行都计为一个事件。设为 1 表示进入任意有效会话都显示导航。</span></span>
+                <span class="setting-copy"><span class="setting-name">会话事件达到多少条时显示导航</span><span class="setting-description">每次提问或任务运行计为一条。设为 1 时始终显示。</span></span>
                 <input class="number-input" type="number" name="minPrompts" min="1" max="50" step="1">
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">距窗口右侧的距离</span><span class="setting-description">单位为像素。数值越大，右侧会话导航越靠左。</span></span>
+                <span class="setting-copy"><span class="setting-name">距窗口右侧的距离</span><span class="setting-description">单位为像素。数值越大，导航越靠左。</span></span>
                 <input class="number-input" type="number" name="rightOffset" min="0" max="120" step="1">
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">窗口窄于多少像素时隐藏导航</span><span class="setting-description">只影响右侧会话导航；回答批注和输入框队列不受影响。设为 0 表示始终显示。</span></span>
+                <span class="setting-copy"><span class="setting-name">窗口窄于多少像素时隐藏导航</span><span class="setting-description">仅影响右侧导航。设为 0 时始终显示。</span></span>
                 <input class="number-input" type="number" name="hideBelowWidth" min="0" max="2000" step="10">
               </label>
             </section>
 
             <section class="settings-section">
               <h3 class="section-title">运行范围</h3>
-              <div class="setting-description">对话工具只在 ChatGPT 会话页运行，以优先保证长会话索引、批注和 Pro 模式队列的稳定性。</div>
+              <div class="setting-description">对话工具在 ChatGPT 会话页启用。</div>
               <div class="settings-status"></div>
             </section>
           </div>
@@ -11572,6 +13534,29 @@ function tdNavScrollRoot(target) {
       </div>
     `;
 
+    tdZoom.surface = shadowRoot.querySelector('.semantic-zoom');
+    tdZoom.button = shadowRoot.querySelector('.zoom-button');
+    tdZoom.surface.querySelector('.zoom-list').addEventListener('scroll', tdZoomExtend, {passive:true});
+    for (const query of ['(prefers-color-scheme: dark)', '(prefers-contrast: more)', '(forced-colors: active)']) {
+      matchMedia(query).addEventListener('change', () => {
+        if (tdZoom.scene) tdZoomReadTheme(tdZoom.scene);
+      });
+    }
+    window.addEventListener('keydown', event => {
+      if (event.key === 'Control') tdZoom.control = true;
+      if (event.key === 'Escape' && tdZoom.scene && (!tdZoom.scene.pending || event.composedPath().includes(tdZoom.surface))) {
+        event.preventDefault();
+        tdZoomClose();
+      }
+    }, true);
+    window.addEventListener('keyup', event => { if (event.key === 'Control') tdZoom.control = false; }, true);
+    window.addEventListener('blur', () => { tdZoom.control = false; tdZoom.tail = null; });
+    window.addEventListener('resize', () => {
+      const scene = tdZoom.scene;
+      if (!scene) return;
+      if (!tdZoomLayout(scene)) tdZoomFinish(scene);
+      else if (scene.progress < .999) tdZoomBuildEffects(scene);
+    }, {passive:true});
     navigatorEl = shadowRoot.querySelector('.navigator');
     railEl = shadowRoot.querySelector('.compact-rail');
     listEl = shadowRoot.querySelector('.preview-list');
@@ -11595,6 +13580,35 @@ function tdNavScrollRoot(target) {
       if (!target) return;
       const actionNode = target.closest('[data-action]');
       const action = actionNode instanceof HTMLElement ? actionNode.dataset.action || '' : '';
+      if (action === 'topic-connection') {
+        event.preventDefault();
+        event.stopPropagation();
+        void chrome.runtime.sendMessage({type:'threadWorkspace',action:'topicsConnection'}).catch(()=>{});
+        return;
+      }
+      if (action === 'load-outline-history') {
+        void tdOutlineLoadHistory(true);
+        return;
+      }
+      if (action === 'recover-topics-history') {
+        event.preventDefault(); event.stopPropagation();
+        if (tdZoom.scene) void tdZoomRecoverHistory(tdZoom.scene,true).catch(()=>{});
+        return;
+      }
+      if (action === 'generate-topics') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (tdZoom.scene) void tdZoomLoadTopics(tdZoom.scene, true);
+        return;
+      }
+      if (action === 'open-topics' || action === 'close-topics') {
+        event.preventDefault(); event.stopPropagation();
+        if (action === 'open-topics' && !tdZoomOpen()) {
+          const scene = tdZoomShow(innerHeight*.42, true);
+          if (scene) tdZoomAnimate(scene, 1);
+        } else tdZoomClose();
+        return;
+      }
       if (action === 'open-settings') {
         event.preventDefault();
         event.stopPropagation();
@@ -11913,8 +13927,17 @@ function tdNavScrollRoot(target) {
 
     shadowRoot.addEventListener('keydown', (event) => {
       if (!(event instanceof KeyboardEvent)) return;
+      if (event.key === 'Tab' && !settingsLayerEl.hidden) {
+        const controls = [...settingsFormEl.querySelectorAll('button, input, select, summary')]
+          .filter(control => !control.disabled && control.tabIndex >= 0 && control.getClientRects().length);
+        const edge = event.shiftKey ? controls[0] : controls.at(-1);
+        if (edge && shadowRoot.activeElement === edge) {
+          event.preventDefault();
+          (event.shiftKey ? controls.at(-1) : controls[0])?.focus();
+        }
+      }
       if (event.key === 'Escape') {
-        if (!settingsLayerEl.hidden) closeSettingsDialog();
+        if (!settingsLayerEl.hidden) { event.stopPropagation(); closeSettingsDialog(); }
         else if (activeCommentMode) closeInlineCommentPopover({ discardEmptyNew: true });
         return;
       }
@@ -11994,6 +14017,8 @@ function tdNavScrollRoot(target) {
     setChecked('allowBackgroundQueue', merged.allowBackgroundQueue);
     setChecked('smoothScroll', merged.smoothScroll);
     setChecked('enableAnswerJump', merged.enableAnswerJump);
+    setChecked('pinchTopics', merged.pinchTopics);
+    setChecked('autoTopicSummary', merged.autoTopicSummary);
     setChecked('prefetchHistoryOnOutline', merged.prefetchHistoryOnOutline);
     setChecked('rememberPrompts', merged.rememberPrompts);
     setValue('minPrompts', merged.minPrompts);
@@ -12013,16 +14038,22 @@ function tdNavScrollRoot(target) {
     }
   }
 
+  let settingsReturnFocus = null;
   function openSettingsDialog() {
     ensureUi();
+    if (!settingsLayerEl.hidden) return;
+    settingsReturnFocus = shadowRoot.activeElement || document.activeElement;
     renderSettingsForm(settings);
     settingsLayerEl.hidden = false;
-    const first = settingsFormEl.querySelector('input, select, button');
-    window.setTimeout(() => first?.focus(), 0);
+    const first = settingsFormEl.querySelector('[aria-label="关闭设置"]');
+    first?.focus({preventScroll:true});
   }
 
   function closeSettingsDialog() {
-    if (settingsLayerEl) settingsLayerEl.hidden = true;
+    if (!settingsLayerEl || settingsLayerEl.hidden) return;
+    settingsLayerEl.hidden = true;
+    if (settingsReturnFocus?.isConnected) settingsReturnFocus.focus({preventScroll:true});
+    settingsReturnFocus = null;
   }
 
   async function saveSettingsFromForm() {
@@ -12044,6 +14075,8 @@ function tdNavScrollRoot(target) {
       allowBackgroundQueue: checked('allowBackgroundQueue'),
       smoothScroll: checked('smoothScroll'),
       enableAnswerJump: checked('enableAnswerJump'),
+      pinchTopics: checked('pinchTopics'),
+      autoTopicSummary: checked('autoTopicSummary'),
       prefetchHistoryOnOutline: checked('prefetchHistoryOnOutline'),
       rememberPrompts: checked('rememberPrompts'),
       minPrompts: value('minPrompts'),
@@ -12109,25 +14142,32 @@ function tdNavScrollRoot(target) {
   function timelineCounts(items = entries) {
     return {
       manualCount: (items || []).filter(isUserAnchoredEntry).length,
-      automationCount: (items || []).filter(isAutomationTimelineEntry).length,
+      automationCount: (items || []).filter(entry=>entry.kind==='automation-run').length,
+      replyCount: (items || []).filter(entry=>entry.kind!=='automation-run' && entryAnchorRole(entry)==='assistant').length,
       blockCount: (items || []).reduce((sum, entry) => sum + (entry.answerBlocks || []).filter(isAnswerOutlineBlock).length, 0),
     };
   }
 
   function timelineSummaryText(items = entries, { separator = ' · ', includeAnswerOutline = true } = {}) {
-    const { manualCount, automationCount, blockCount } = timelineCounts(items);
-    if (automationCount) {
-      return [
-        manualCount ? `${manualCount} 个提问` : '',
-        `${automationCount} 次任务运行`,
-      ].filter(Boolean).join(separator);
-    }
+    const {manualCount,automationCount,replyCount,blockCount} = timelineCounts(items);
     return [
-      manualCount ? `${manualCount} 个问题` : '',
-      includeAnswerOutline && settings.answerOutlineMode !== 'off' && blockCount
-        ? `${blockCount} 个回答章节`
-        : '',
-    ].filter(Boolean).join(separator) || '0 个会话事件';
+      manualCount ? manualCount+' 个问题' : '',
+      replyCount ? replyCount+' 条独立回复' : '',
+      automationCount ? automationCount+' 次任务运行' : '',
+      includeAnswerOutline && settings.answerOutlineMode !== 'off' && blockCount ? blockCount+' 个章节' : '',
+    ].filter(Boolean).join(separator);
+  }
+
+  function tdRenderOutlineCoverage() {
+    const coverage = shadowRoot?.querySelector('.td-outline-coverage');
+    if (!coverage) return;
+    const capture = tdHistory.capture;
+    const history = capture && tdAlive(capture.scope) ? capture.history : null;
+    coverage.hidden = !entries.length || tdHealth.snapshot?.complete === true || history?.complete === true;
+    coverage.querySelector('span').textContent = history?.running ? '正在补齐更早消息…' : '已载入的消息';
+    const button = coverage.querySelector('button');
+    button.hidden = site.id !== 'chatgpt';
+    button.disabled = Boolean(history?.running);
   }
 
   function renderEntries(force = false) {
@@ -12139,11 +14179,11 @@ function tdNavScrollRoot(target) {
     const signature = entries.map((entry) => {
       const blocks = (entry.answerBlocks || []).filter(isAnswerOutlineBlock);
       const expanded = expandedPromptKeys.has(entry.key);
-      const answerSignature = expanded
+      const answerSignature = expanded || searchTerm
         ? hashString(blocks.map((block) => `${block.key}:${block.kind}:${block.label}:${block.marker}:${block.outlineDepth}`).join('|'))
         : blocks.length;
-      return `${entry.key}:${entry.kind}:${truncateText(entry.text, 100)}:${automationEventMetaText(entry)}:${entry.source}:${expanded}:${answerSignature}`;
-    }).join('|') + `::answers=${settings.answerOutlineMode}::jump=${settings.enableAnswerJump}::search=${searchTerm}`;
+      return `${entry.key}:${entry.kind}:${hashString(entry.text)}:${automationEventMetaText(entry)}:${entry.source}:${expanded}:${answerSignature}`;
+    }).join('|') + `::answers=${settings.answerOutlineMode}::jump=${settings.enableAnswerJump}::search=${searchTerm}::complete=${tdHealth.snapshot?.complete === true}`;
     if (!force && signature === renderSignature) {
       updateVisibility();
       return;
@@ -12154,8 +14194,9 @@ function tdNavScrollRoot(target) {
     const railFragment = document.createDocumentFragment();
     const listFragment = document.createDocumentFragment();
     entries.forEach((entry, index) => {
-      const automationRun = isAutomationTimelineEntry(entry);
-      const fallbackLabel = automationRun ? `任务运行 ${index + 1}` : `问题 ${index + 1}`;
+      const automationRun = entry.kind === 'automation-run';
+      const reply = !automationRun && entryAnchorRole(entry)==='assistant';
+      const fallbackLabel = reply ? '独立回复' : automationRun ? `任务运行 ${index + 1}` : `问题 ${index + 1}`;
       const label = truncateText(entry.text || fallbackLabel, 140);
       const eventMeta = automationRun ? automationEventMetaText(entry) : '';
       const blocks = settings.answerOutlineMode !== 'off' && Array.isArray(entry.answerBlocks) ? entry.answerBlocks.filter(isAnswerOutlineBlock) : [];
@@ -12170,10 +14211,13 @@ function tdNavScrollRoot(target) {
       railButton.dataset.active = String(index === activeIndex);
       railButton.setAttribute(
         'aria-label',
-        automationRun ? `第 ${index + 1} 个会话事件，定时任务运行：${label}` : `第 ${index + 1} 个会话事件，提问：${label}`,
+        (reply ? '回复 ' : automationRun ? '定时任务 ' : '提问 ')+label,
       );
       railFragment.appendChild(railButton);
-      if (searchTerm && ![entry.text, eventMeta, ...blocks.map(b => b.label)].join(' ').toLocaleLowerCase().includes(searchTerm)) return;
+      const matchesTurn = !searchTerm || [entry.text, eventMeta].join(' ').toLocaleLowerCase().includes(searchTerm);
+      const visibleBlocks = matchesTurn ? blocks : blocks.filter(block =>
+        [block.marker, block.label].join(' ').toLocaleLowerCase().includes(searchTerm));
+      if (!matchesTurn && !visibleBlocks.length) return;
 
       const group = document.createElement('div');
       group.className = 'outline-group';
@@ -12233,19 +14277,8 @@ function tdNavScrollRoot(target) {
         const count = document.createElement('span');
         count.className = 'answer-count';
         count.textContent = String(blocks.length);
-        const chevron = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        chevron.setAttribute('viewBox', '0 0 16 16');
-        chevron.setAttribute('aria-hidden', 'true');
-        chevron.classList.add('chevron');
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        path.setAttribute('d', 'm6 3.5 4.5 4.5L6 12.5');
-        path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', 'currentColor');
-        path.setAttribute('stroke-width', '1.5');
-        path.setAttribute('stroke-linecap', 'round');
-        path.setAttribute('stroke-linejoin', 'round');
-        chevron.appendChild(path);
-        toggle.append(count, chevron);
+        toggle.append(count);
+        toggle.insertAdjacentHTML('beforeend', threadDeckIcon('chevron', 'chevron'));
         row.appendChild(toggle);
       }
       group.appendChild(row);
@@ -12255,7 +14288,8 @@ function tdNavScrollRoot(target) {
         answerList.className = 'answer-list';
         answerList.setAttribute('role', settings.enableAnswerJump ? 'group' : 'list');
         answerList.setAttribute('aria-label', '回答章节');
-        blocks.forEach((block, blockIndex) => {
+        visibleBlocks.forEach(block => {
+          const blockIndex = blocks.indexOf(block);
           const navigable = isNavigableAnswerBlock(block);
           const answerItem = document.createElement(navigable ? 'button' : 'div');
           if (answerItem instanceof HTMLButtonElement) answerItem.type = 'button';
@@ -12308,12 +14342,14 @@ function tdNavScrollRoot(target) {
     navigator?.setAttribute('aria-label', `${navigationLabel}导航`);
     const subtitle = shadowRoot.querySelector('.panel-subtitle');
     if (subtitle) subtitle.textContent = timelineSummaryText(entries);
+    tdRenderOutlineCoverage();
     updateVisibility();
     if (!searchTerm && reasonForAutoScroll()) scrollActiveControlsIntoView(false);
   }
 
   function updateVisibility() {
     if(tdDeferInteraction('visibility'))return;
+    tdSyncSemanticZoom();
     if (navigatorEl) {
       tdSafeTask('navigation-style',tdUpdateMinimapVisibility);
       tdRecoveryStatus();
@@ -12543,6 +14579,7 @@ function tdNavScrollRoot(target) {
 
   async function refreshNow(reason = 'manual') {
     if(tdSelectionBusy()){tdSelection.deferred=true;return;}
+    if(tdZoomMoving()){tdZoom.scene.deferredRefresh=true;return;}
     tdInteraction.lastRefreshAt=performance.now();
     tdDomState.revision++;
     if (tdSendingCritical()) { scheduleRefresh('post-send-refresh', 180); return; }
@@ -12631,16 +14668,17 @@ function tdNavScrollRoot(target) {
       stats.source = settings.rememberPrompts ? 'dom+cache' : 'dom';
     }
 
+    const nextScrollRoot = findScrollRoot();
+    if (site.id === 'chatgpt') entries = tdOutlineMergeHistory(entries,nextScrollRoot);
     entries=tdStampIndex(entries);
     enforceAnswerOutlines(entries);
     tdLiveApplyAnswers(entries);
     if (settings.rememberPrompts) {
-      cacheRecords = entries.map(buildCacheRecord).slice(-MAX_CACHE_ITEMS);
+      cacheRecords = entries.filter(entry=>entry.source!=='native-history').map(buildCacheRecord).slice(-MAX_CACHE_ITEMS);
       scheduleCacheWrite();
     }
     stats.answerBlockCount = entries.reduce((sum, entry) => sum + normalizeAnswerOutlineBlocks(entry.answerBlocks).length, 0);
     stats.cachedCount = entries.filter((entry) => !entry.target?.isConnected).length;
-    const nextScrollRoot = findScrollRoot();
     attachScrollRoot(nextScrollRoot);
     stats.scrollRoot = describeElement(nextScrollRoot);
     stats.route = routeKey;
@@ -12663,7 +14701,13 @@ function tdNavScrollRoot(target) {
       tdHealthFault('refresh',error);
       if(tdAlive(scope))tdRestoreIndexAfterDomFailure(previousEntries);
     } finally {
-      tdSafeTask('index-status-render',()=>{tdRecoveryStatus();updateVisibility();});
+      tdSafeTask('index-status-render',()=>{
+      tdRecoveryStatus();updateVisibility();
+      if (navigatorEl?.dataset.pinned==='true' && settings.prefetchHistoryOnOutline)
+        void tdOutlineLoadHistory();
+      const scene=tdZoom.scene;
+      if (scene?.progress>=.999 && scene.topicState==='working') void tdZoomLoadTopics(scene);
+    });
       // Reaching the data request must not depend on any DOM adapter succeeding.
       if(settings.enabled&&isCurrentPageEligible()&&getRouteKey()===routeKey&&chatGptApiStatus==='idle'&&!chatGptApiFetchPromise)
         void ensureChatGptConversationData({reason:'independent-index'});
@@ -12736,12 +14780,16 @@ function tdNavScrollRoot(target) {
     if (navigatorEl) navigatorEl.hidden = true;
     listEl?.replaceChildren(); railEl?.replaceChildren(); tdHealth.lastGood=null;
     tdDomScopes.census=null;tdDomScopes.revision++;tdAdaptive.at=-Infinity;
-    tdReads.pending=null;clearTimeout(tdReads.timer);tdReads.timer=null;
+    tdReads.pending.length=0;tdReads.seen.clear();tdReads.graph=null;tdReads.snap=null;
+    clearTimeout(tdReads.timer);tdReads.timer=null;
+    tdReceiptBindings.clear();
     resetChatGptApiState(); resetWorkflowState();
     if (!isCurrentPageEligible()) { renderEntries(true); td.ready = true; return; }
     await loadCache();
     if (epoch !== td.epoch || nextKey !== getRouteKey()) return;
     loadWorkflowState(); td.ready = true;
+    // 站内切换时宿主可能先收到响应，此时按新会话身份重新接收已观察的快照。
+    tdRequestLoadedHistory();
     void ensureChatGptConversationData({ reason: 'route' });
     scheduleRefresh('route', 180);
     const scope = tdScope();
@@ -12783,7 +14831,7 @@ function tdNavScrollRoot(target) {
       return path.includes(navHost) || path.includes(navigatorEl) || path.includes(settingsLayerEl);
     };
     const cancel = (event) => {
-      if (insideThreadDeck(event)) return;
+      if (!event.isTrusted || insideThreadDeck(event)) return;
       tdHistoryReset();
       tdNavCancel('user-interrupted');
       navigationToken += 1;
@@ -12814,9 +14862,13 @@ function tdNavScrollRoot(target) {
     if (!EXTENSION_ENV) return;
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (_sender.id !== chrome.runtime.id || !message || typeof message.type !== 'string') return undefined;
+      if(message.type==='THREAD_PILOT_CHAT_BACKOFF'){
+        tdChatBackoff(message.until);
+        return undefined;
+      }
       if(message.type==='THREAD_PILOT_SWITCH'){
-        if(!message.enabled){tdInvalidate();pilotActive=false;settings.enabled=false;updateVisibility();updateWorkflowVisibility();}
-        else{pilotActive=true;void reloadSettings();}
+        if(!message.enabled){document.dispatchEvent(new Event('tab-cadence:history-stop'));tdInvalidate();pilotActive=false;settings.enabled=false;updateVisibility();updateWorkflowVisibility();}
+        else{pilotActive=true;void reloadSettings().then(tdRequestLoadedHistory);}
         sendResponse({active:pilotActive});return false;
       }
       if (message.type === 'PROMPT_RAIL_GET_STATUS') {
@@ -12897,7 +14949,7 @@ function tdNavScrollRoot(target) {
     if(!settingsFormEl||settingsFormEl.querySelector('.td-support'))return;
     const group=document.createElement('details');group.className='settings-section td-support';
     const summary=document.createElement('summary');summary.className='section-title';summary.textContent='诊断与恢复';group.append(summary);
-    const info=document.createElement('p');info.className='setting-description';info.textContent='默认仅使用页面与缓存。补读是限频的单次请求，429 后暂停；重新核对状态不联网。不会清除注释、队列或草稿。';group.append(info);
+    const info=document.createElement('p');info.className='setting-description';info.textContent='在本机重新核对发送状态、刷新大纲，或复制待恢复的草稿。';group.append(info);
     const grid=document.createElement('div');grid.className='td-support-actions';group.append(grid);
     const add=(label,fn)=>{const b=document.createElement('button');b.type='button';b.className='dialog-button';b.textContent=label;b.addEventListener('click',fn);grid.append(b);};
     add('重新核对状态',()=>{tdReconcileUncertain();td.activityDirty=true;getChatGptActivitySnapshot();tdScheduleTurnCheck(0,true);showToast('正在核对，不会重复发送',1600);});
@@ -12969,6 +15021,7 @@ function tdNavScrollRoot(target) {
     installPendingCommentSubmissionBridge();
     await tdBootStep('diagnostic-watch',tdInstallDiagnosticWatch);
     await tdBootStep('history-bridge',tdInstallHistoryBridge);
+    tdListenHistory();
     await tdBootStep('send-gateway',installPendingCommentSubmissionBridge);
     await tdBootStep('activity-observer',installChatGptActivityMonitor);
     pilotActive = (await pilotRpc('status')).enabled;
@@ -12981,6 +15034,8 @@ function tdNavScrollRoot(target) {
     await tdBootStep('menu',installUserscriptMenu);
     await tdBootStep('workflow-restore',loadWorkflowState);
     td.ready=true;
+    if(settings.enabled)tdRequestLoadedHistory();
+    else document.dispatchEvent(new Event('tab-cadence:history-stop'));
     // Adopt an existing host response. Initialization adds no request.
     if(settings.enabled&&isCurrentPageEligible())void ensureChatGptConversationData({reason:'initial'});
     await tdBootStep('interface',tdInstallInterface);
@@ -13005,6 +15060,9 @@ function tdNavScrollRoot(target) {
       scheduleInlineCommentPosition();
     }, { passive: true, capture: true });
     window.addEventListener('pagehide', () => { tdNavCancel('pagehide'); tdInvalidate(); }, { capture: true });
+    document.addEventListener('load', event => {
+      if (event.target instanceof HTMLImageElement && elementBelongsToConversationTurn(event.target)) td.activityDirty=true;
+    }, true);
     window.addEventListener('pageshow', (event) => { if (event.persisted) { loadWorkflowState(); td.ready = true; td.activityDirty = true; } });
     await refreshNow('initial');
     tdHealth.complete=true;tdHealth.stage='ready';tdLog('boot-ready');
