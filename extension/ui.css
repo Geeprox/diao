@@ -170,6 +170,10 @@ dialog::backdrop{background:#0005}dialog .section-heading{margin-block:0 12px}di
 .sync-recovery { margin-top: 8px; }
 .sync-recovery h2, .usage-prices h2 { font-size: .875rem; }
 .sync-recovery .key-entry { margin-top: 8px; }
+#sync-pairing h2 { margin: 0 0 8px; }
+#sync-pairing-code { grid-template-columns: minmax(0,1fr); margin-top: 12px; }
+#sync-pairing-copy { justify-self: start; }
+#sync-pairing-value { font: .75rem ui-monospace, monospace; }
 .settings-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
 .usage-prices { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--color-divider); }
 #settings [data-settings-section=native] fieldset button { margin-top: 12px; }

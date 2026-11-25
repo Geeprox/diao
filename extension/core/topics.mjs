@@ -57,6 +57,10 @@ function topicAnchor(value) {
   return typeof value === 'string' && value.length <= 240 && !/[\u0000-\u001f\u007f]/u.test(value) ? value : '';
 }
 
+function topicRevision(value) {
+  return typeof value === 'string' && /^[0-9]{1,6}:[a-z0-9]{1,7}$/.test(value) ? value : '';
+}
+
 function topicNavigation(turn) {
   const source = turn.navigation;
   if (!source || !['user','assistant'].includes(source.role) || !Array.isArray(source.answers)) return null;
@@ -76,10 +80,12 @@ function topicNavigation(turn) {
         depth: Number.isInteger(section.depth) ? Math.min(6, Math.max(0, section.depth)) : 0,
       }];
     });
-    return [{id, nodeId, sections}];
+    const revision = topicRevision(answer.revision);
+    return [{id, nodeId, sections, ...(revision && {revision})}];
   });
   // 身份和章节定位信息仅供本机回到原文，和发给模型的证据分开。
-  return {id: turn.id, nodeId: topicAnchor(source.nodeId), role: source.role, answers};
+  const revision = topicRevision(source.revision);
+  return {id: turn.id, nodeId: topicAnchor(source.nodeId), role: source.role, answers, ...(revision && {revision})};
 }
 
 export async function topicSnapshot(value, conversation, batchLimit = BATCH_TURNS) {
@@ -288,40 +294,88 @@ async function overviewPlan(snapshot, parts) {
   };
 }
 
-export async function readLatestTopicOverview(storage, conversation, evidence) {
-  if (!conversation || evidence?.conversation !== conversation || !Array.isArray(evidence.observed) ||
-      !evidence.observed.length || evidence.observed.length > TOPIC_LIMIT) return {state:'empty'};
-  const saved = (await storage.get(cacheName))[cacheName]?.['c:' + conversation];
-  const plan = saved?.overview;
-  if (plan?.version !== overviewSchema || !Array.isArray(plan.entries) ||
-      !Array.isArray(plan.batches) || !saved.parts) return {state:'empty'};
-  if (evidence.complete === true && evidence.observed.length !== plan.entries.length) return {state:'stale'};
+function matchesAnchor(message, id, alias) {
+  return [message.id,message.nodeId].some(candidate => candidate && (candidate === id || candidate === alias));
+}
+
+function checkMountedTopics(entries, messages) {
+  const timeline = entries.flatMap(entry => [
+    ...(entry.role === 'user' ? [entry] : []),
+    ...entry.answers.map(answer => ({...answer, role:'assistant'})),
+  ]);
+  const changed = [];
+  let index = -1;
+  for (const message of messages) {
+    const id = topicAnchor(message?.id), alias = topicAnchor(message?.nodeId);
+    if (!id || !['user','assistant'].includes(message.role)) return {state:'stale'};
+    let match;
+    while (++index < timeline.length) {
+      const item = timeline[index];
+      if (item.role !== message.role) continue;
+      if (matchesAnchor(item,id,alias)) {
+        match = item;
+        break;
+      }
+    }
+    if (!match) return {state:'stale'};
+    const revision = topicRevision(message.revision);
+    if (match.revision && revision && revision !== match.revision) changed.push(...new Set([id,match.id]));
+  }
+  return changed.length ? {state:'stale',changed} : null;
+}
+
+function checkTopicTurns(entries, observations, evidence) {
+  if (evidence.complete === true && observations.length !== entries.length) return {state:'stale'};
 
   let after = -1;
-  for (const observed of evidence.observed) {
-    const id = topicAnchor(observed?.id);
+  const changed = [];
+  for (const observed of observations) {
+    const id = topicAnchor(observed?.id), alias = topicAnchor(observed?.nodeId);
     if (!id || !Array.isArray(observed.answerIds)) return {state:'stale'};
     let entry;
-    while (++after < plan.entries.length) {
-      const candidate = plan.entries[after];
-      if (candidate.role === observed.role && (candidate.id === id || candidate.nodeId === id)) {
+    while (++after < entries.length) {
+      const candidate = entries[after];
+      if (candidate.role === observed.role && matchesAnchor(candidate,id,alias)) {
         entry = candidate;
         break;
       }
     }
     if (!entry) return {state:'stale'};
+    const revision = topicRevision(observed.revision);
+    if (entry.revision && revision && revision !== entry.revision) changed.push(id);
     const answers = entry.answers;
     let previousAnswer = -1;
-    for (const answerId of observed.answerIds) {
+    for (const [index, answerId] of observed.answerIds.entries()) {
       previousAnswer = answers.findIndex((answer, i) => i > previousAnswer &&
-        (answer.id === answerId || answer.nodeId === answerId));
+        matchesAnchor(answer,topicAnchor(answerId),topicAnchor(observed.answerAliases?.[index])));
       if (previousAnswer < 0) return {state:'stale'};
+      const answerRevision = topicRevision(observed.answerRevisions?.[index]);
+      if (answers[previousAnswer].revision && answerRevision && answerRevision !== answers[previousAnswer].revision) {
+        changed.push(answerId);
+      }
     }
     if (evidence.complete === true && observed.answerIds.length !== answers.length) return {state:'stale'};
   }
-  if (evidence.atTail === true && after !== plan.entries.length - 1) return {state:'stale'};
+  if (changed.length) return {state:'stale', changed};
+  if (evidence.atTail === true && after !== entries.length - 1) return {state:'stale'};
+  return null;
+}
+
+export async function readLatestTopicOverview(storage, conversation, evidence) {
+  const mounted = !evidence?.complete && Array.isArray(evidence?.messages);
+  const observations = mounted ? evidence.messages : evidence?.observed;
+  if (!conversation || evidence?.conversation !== conversation || !Array.isArray(observations) ||
+      !observations.length || observations.length > TOPIC_LIMIT) return {state:'empty'};
+  const saved = (await storage.get(cacheName))[cacheName]?.['c:' + conversation];
+  const plan = saved?.overview;
+  if (plan?.version !== overviewSchema || !Array.isArray(plan.entries) ||
+      !Array.isArray(plan.batches) || !saved.parts) return {state:'empty'};
+  const invalid = mounted ? checkMountedTopics(plan.entries, observations) :
+    checkTopicTurns(plan.entries, observations, evidence);
+  if (invalid) return invalid;
   if (!plan.batches.length || plan.batches.some(({digest}) => !saved.parts[digest]) ||
       (plan.synthesis && !saved.parts[plan.synthesis])) return {state:'empty'};
+  if (evidence.navigationOnly === true) return {state:'ready',entries:plan.entries};
   const view = combine(plan.batches, saved.parts, true, plan.synthesis ? {digest:plan.synthesis} : null);
   return {...view, entries:plan.entries};
 }

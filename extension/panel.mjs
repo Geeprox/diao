@@ -2,6 +2,7 @@ import {backlogPlan,backlogWaiting,trackableTab} from './core/backlog.mjs';
 import {DEFAULTS,dayKey,safeURL,privateURL,fingerprint} from './core/policy.mjs';
 import {credentialOrigin,credentialStorage} from './core/credentials.mjs';
 import {createSyncPasskey,recoverSyncPasskey} from './core/passkey.mjs';
+import {generatePairingCode} from './core/connection-sync.mjs';
 import {duplicates,attentionOrder,organizationPlan} from './core/workspace.mjs';
 
 const $=s=>document.querySelector(s),preview=!globalThis.chrome?.runtime?.id;
@@ -472,7 +473,7 @@ function fillSettings(){
 function updateSaveLabel(){
  const mode=selectedStorage(),hints={
   profile:'重启 Chrome 后自动恢复。',
-  sync:'由 Chrome 同步。新设备首次使用时验证通行密钥。',
+  sync:'新设备登录同一 Chrome 账号后，验证一次即可恢复。',
   keychain:'保存在 macOS 钥匙串。',
   session:'仅在当前 Chrome 会话可用。',
  };
@@ -486,14 +487,21 @@ function updateCredentialUI(){
  const showingSaved=savedForDraft();
  const remoteMatches=remote&&originOf(remote.settings.endpoint)===originOf(currentEndpoint());
  const showRecovery=remote&&(remoteMatches||!data.settings.credentialRevision)&&
-  (!showingSaved||mode==='sync'&&remote.id!==data.settings.credentialRevision);
+  (!showingSaved||remote.id!==data.settings.credentialRevision);
  $('#sync-recovery').hidden=!showRecovery;
  $('#sync-unlock').hidden=Boolean(remote?.passkey);
  $('#unlock-sync').disabled=unlockingSync;
  if(!unlockingSync)$('#unlock-sync').textContent=remote?.passkey?'验证并恢复':'解锁此设备';
  say($('#sync-origin'),showRecovery?
-  new URL(remote.settings.endpoint).host+' · '+(remote.passkey?'验证这台设备即可恢复。':'请输入原来的同步口令。'):'');
- $('#sync-setup').hidden=selectedStorage()!=='sync'||!showingSaved||mode!=='sync'||!remoteMatches||Boolean(remote?.passkey);
+  new URL(remote.settings.endpoint).host+' · '+(remote.passkey
+   ? (showingSaved?'验证后切换到同步连接。':'验证这台设备即可恢复。')
+   :'在此设备输入配对码或原同步口令。'):'');
+ const activeSync=remoteMatches&&showingSaved&&mode==='sync'&&remote.id===data.settings.credentialRevision;
+ $('#sync-setup').hidden=selectedStorage()!=='sync'||Boolean(remote&&!activeSync);
+ const pair=$('#sync-pair');
+ pair.disabled=savingConnection;
+ pair.textContent=activeSync?'生成新配对码':'用配对码保存';
+ $('#sync-upgrade').hidden=!activeSync||Boolean(remote?.passkey);
  $('#sync-upgrade').disabled=savingConnection;
  const restore=$('#restore-key');
  restore.hidden=mode!=='keychain'||showingSaved||phase==='missing'||originOf(currentEndpoint())!==originOf(data.settings.endpoint);
@@ -561,7 +569,35 @@ document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click'
 $('#tab-search').addEventListener('input',render);
 $('#settings-form').addEventListener('submit',event=>{event.preventDefault();void saveConnection();});
 $('#sync-upgrade').addEventListener('click',()=>void saveConnection({upgrade:true}));
-async function saveConnection({upgrade=false}={}){
+const pairingDialog=$('#sync-pairing');
+const pairingValue=$('#sync-pairing-value');
+const pairingClose=$('#sync-pairing-close');
+const pairingConfirm=$('#sync-pairing-confirm');
+const pairingCopy=$('#sync-pairing-copy');
+function showPairingCode(code=''){
+ const ready=Boolean(code);
+ pairingValue.value=code;
+ pairingCopy.textContent='复制';
+ $('#sync-pairing-code').hidden=!ready;
+ $('#sync-pairing-help').textContent=ready?'保存配对码。每台新设备首次恢复连接时输入一次。':'更换验证方式后，其他设备需用新码恢复连接。';
+ $('#sync-pairing-error').textContent='';
+ pairingConfirm.hidden=ready;
+ pairingClose.textContent=ready?'完成':'取消';
+ if(!pairingDialog.open)pairingDialog.showModal();
+ (ready?pairingCopy:pairingClose).focus();
+}
+$('#sync-pair').addEventListener('click',()=>{
+ if(data.syncConnection)showPairingCode();
+ else void saveConnection({pair:true});
+});
+pairingConfirm.addEventListener('click',()=>void saveConnection({pair:true}));
+pairingCopy.addEventListener('click',async()=>{
+ try{await navigator.clipboard.writeText(pairingValue.value);pairingCopy.textContent='已复制';}
+ catch{pairingValue.focus();pairingValue.select();}
+});
+pairingDialog.addEventListener('cancel',event=>{if(savingConnection)event.preventDefault();});
+pairingDialog.addEventListener('close',()=>{pairingValue.value='';});
+async function saveConnection({upgrade=false,pair=false}={}){
  if(savingConnection)return;
  const scope=preferences==='usage'?'usage':'connection',settings={...data.settings},remote=data.syncConnection;
  if(scope==='connection'){
@@ -574,11 +610,12 @@ async function saveConnection({upgrade=false}={}){
   for(const [key,id] of Object.entries(usageFields))settings[key]=Number($('#'+id).value);
   settings.autoAnalyze=$('#auto-analyze').checked;
  }
- const error=$('#settings-error'),save=$('#save-settings');
+ const error=$(pairingDialog.open?'#sync-pairing-error':'#settings-error'),save=$('#save-settings');
  error.textContent='';
  save.disabled=true;savingConnection=true;save.textContent='正在保存…';
+ pairingConfirm.disabled=pairingClose.disabled=true;
  try{
-  let passkeyOptions;
+  let passkeyOptions,pairingCode;
   const apiKey=scope==='connection'?(importedKey||$('#api-key').value):'';
   if(scope==='connection'){
    if(!settings.model||!originOf(settings.endpoint))throw Error('填写有效的 HTTPS API 地址和模型。');
@@ -591,20 +628,29 @@ async function saveConnection({upgrade=false}={}){
    }
    if(sync&&!remote&&!apiKey&&!savedForDraft())throw Error('先填写或导入 API Key。');
    await authorizeEndpoint(settings.endpoint);
-   if(sync&&(!remote||upgrade)){
+   if(sync&&pair)pairingCode=generatePairingCode();
+   else if(sync&&(!remote||upgrade)){
     if(preview)throw Error('请在 Chrome 中验证通行密钥。');
     passkeyOptions=await createSyncPasskey();
    }
   }
   await rpc('saveSettings',{scope,settings,rememberConsent:scope==='connection'&&settings.rememberKey,
-   verify:true,apiKey,syncId:remote?.id,...passkeyOptions});
+   verify:true,apiKey,syncId:remote?.id,...passkeyOptions,...(pairingCode&&{pairingCode})});
+  if(pairingCode)showPairingCode(pairingCode);
   if(scope==='connection'){clearKeyDraft();connectionDirty=false;}
   await refresh();
   if(scope==='connection')fillSettings();
   else status('调用设置已保存。');
  }catch(cause){error.textContent=cause.message;}
- finally{savingConnection=false;save.disabled=false;updateSaveLabel();updateCredentialUI();}
+ finally{
+  savingConnection=false;save.disabled=false;
+  pairingConfirm.disabled=pairingClose.disabled=false;
+  updateSaveLabel();updateCredentialUI();
+ }
 }
+$('#sync-unlock').addEventListener('keydown',event=>{
+ if(event.key==='Enter'){event.preventDefault();$('#unlock-sync').click();}
+});
 $('#unlock-sync').addEventListener('click',async()=>{
  const remote=data.syncConnection,input=$('#sync-unlock'),control=$('#unlock-sync');
  if(!remote||unlockingSync)return;

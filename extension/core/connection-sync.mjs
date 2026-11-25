@@ -7,6 +7,12 @@ const encode = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 const decode = value => Uint8Array.from(atob(value), character => character.charCodeAt(0));
 const random = count => encode(crypto.getRandomValues(new Uint8Array(count)));
 const fields = ({provider, endpoint, model}) => [provider, endpoint, model];
+export const pairingCodePattern = /^TC-(?:[0-9A-F]{8}-){3}[0-9A-F]{8}$/i;
+export function generatePairingCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return 'TC-' + hex.toUpperCase().match(/.{8}/g).join('-');
+}
 const validKey = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\r\n\0]/.test(value);
 
 function connectionSettings(value) {
@@ -59,7 +65,7 @@ async function decrypt(record, key) {
       {name: 'AES-GCM', iv: decode(record.iv), additionalData: additionalData(record)}, key, decode(record.ciphertext),
     ));
   } catch {
-    throw Error(record.version === 1 ? '同步口令不正确，或同步记录已损坏。' : '此通行密钥无法解锁已保存的连接。');
+    throw Error(record.version === 1 ? '配对码或原同步口令不正确。' : '此通行密钥无法解锁已保存的连接。');
   }
   if (!validKey(apiKey)) throw Error('同步记录中的 API Key 格式有误。');
   return apiKey;
@@ -80,7 +86,7 @@ function decodeRecord(record) {
 }
 
 function unlockRequired(record) {
-  const message = record.version === 2 ? '使用通行密钥解锁这台设备。' : '输入同步口令以解锁这台设备。';
+  const message = record.version === 2 ? '使用通行密钥解锁这台设备。' : '输入配对码或原同步口令以解锁。';
   return Object.assign(Error(message), {code: 'sync_unlock_required'});
 }
 
@@ -109,6 +115,11 @@ export function createConnectionSync({storage, vault}) {
     let key;
     if (unlock) {
       key = record.version === 2 ? await fromPasskey(unlock, record.passkey) : await fromPassphrase(unlock, record.salt);
+      // 旧版仍按原字符解锁。新码允许以小写粘贴。
+      if (record.version === 1 && pairingCodePattern.test(unlock.trim()) && unlock !== unlock.trim().toUpperCase()) {
+        try { await decrypt(record, key); }
+        catch { key = await fromPassphrase(unlock.trim().toUpperCase(), record.salt); }
+      }
     } else {
       key = await vault.loadSyncKey(scope);
     }
@@ -121,7 +132,7 @@ export function createConnectionSync({storage, vault}) {
     return {id: record.id, settings: record.settings, apiKey};
   }
 
-  async function save(settings, apiKey, passphrase, expectedId, {passkey, passkeyKey} = {}) {
+  async function save(settings, apiKey, passphrase, expectedId, {passkey, passkeyKey, pairingCode} = {}) {
     if (!storage) throw Error('当前 Chrome 不支持扩展同步。');
     if (!validKey(apiKey) || encoder.encode(apiKey).length > 512) throw Error('同步密钥格式有误。');
     settings = connectionSettings(settings);
@@ -129,13 +140,15 @@ export function createConnectionSync({storage, vault}) {
     if ((previous?.id || '') !== (expectedId || '')) throw Error('同步连接已变更。请确认当前连接后重试。');
 
     const newPasskey = passkey != null || passkeyKey != null;
+    const newPairing = pairingCode != null;
+    if (newPairing && (newPasskey || !pairingCodePattern.test(pairingCode))) throw Error('无法生成设备配对码。');
     const record = {id: crypto.randomUUID(), iv: random(12), settings};
-    if (newPasskey || previous?.version === 2) {
+    if (!newPairing && (newPasskey || previous?.version === 2)) {
       record.version = 2;
       record.passkey = newPasskey ? normalizeSyncPasskey(passkey) : previous.passkey;
     } else {
       record.version = 1;
-      record.salt = previous?.salt ?? random(16);
+      record.salt = !newPairing && previous?.salt || random(16);
     }
 
     const scope = keyScope(record);
@@ -143,6 +156,8 @@ export function createConnectionSync({storage, vault}) {
     let key = await vault.loadSyncKey(scope);
     if (newPasskey) {
       key = await fromPasskey(passkeyKey, record.passkey);
+    } else if (newPairing) {
+      key = await fromPassphrase(pairingCode.toUpperCase(), record.salt);
     } else if (!key && record.version === 1) {
       if (typeof passphrase !== 'string' || passphrase.length < 16 || passphrase.length > 256) {
         throw Error('同步口令需为 16–256 个字符。');

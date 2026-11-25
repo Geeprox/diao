@@ -576,6 +576,34 @@ test('新会话的 20 轮适配一次调用，升级前的 16 轮分段仍可命
 });
 
 
+test('局部回复可复用完整缓存，忽略虚拟列表末尾位置，仍识别稳定的新消息和正文修订', async () => {
+  await reset();
+  const {topicSnapshot,readLatestTopicOverview,saveTopicBatch} = await import('../extension/core/topics.mjs');
+  const conversation='partial-cache-fixture',connection={model:'gpt-6-luna'};
+  const turns=[1,2].map(n=>({
+    id:'question-'+n,question:'原问题 '+n,answer:'原回复 '+n,sections:[],
+    navigation:{role:'user',nodeId:'node-q-'+n,answers:[
+      {id:'answer-'+n,nodeId:'node-a-'+n,revision:'7:abcd',sections:[]},
+    ]},
+  }));
+  const snapshot=await topicSnapshot({conversation,format:'summary-v3',turns},conversation);
+  await saveTopicBatch(local,snapshot,connection,snapshot.batches[0],{
+    summary:'会话概要', topics:[{start:1,end:2,title:'概要',summary:'核对两个问题。'}],
+    turns:[{turn:1,question:'第一问',answer:'第一答'},{turn:2,question:'第二问',answer:'第二答'}],
+  });
+  const answer={role:'assistant',id:'current-dom-id',nodeId:'node-a-1',revision:'7:abcd'};
+  const read=messages=>readLatestTopicOverview(local,conversation,{conversation,messages,atTail:true});
+  const cached=await read([answer]);
+  assert.equal(cached.state,'ready');
+  assert.deepEqual(cached.entries.map(entry=>entry.id),['question-1','question-2']);
+  assert.equal((await read([answer,{role:'user',id:'question-3'}])).state,'stale');
+  assert.deepEqual((await read([{...answer,revision:'7:efgh'}])).changed,[answer.id,'answer-1']);
+  const strict=await readLatestTopicOverview(local,conversation,{conversation,complete:true,observed:[
+    {id:'question-1',role:'user',answerIds:['answer-1']},
+  ]});
+  assert.equal(strict.state,'stale');
+});
+
 test('保存自动验证一次，重复保存和读取状态复用成功结果',async()=>{
  await reset();
  const message={type:'saveSettings',scope:'connection',settings:DEFAULTS,apiKey:'synthetic-auto-test',verify:true};

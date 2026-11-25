@@ -108,8 +108,8 @@ export class CredentialManager {
   if (mode === 'sync') {
    if (!key) throw Error('先填写或导入 API Key，再启用同步。');
    const {provider,endpoint,model} = next;
-   const {passphrase,expectedId,passkey,passkeyKey} = syncOptions;
-   next.credentialRevision = await this.sync.save({provider,endpoint,model},key,passphrase,expectedId,{passkey,passkeyKey});
+   const {passphrase,expectedId,passkey,passkeyKey,pairingCode} = syncOptions;
+   next.credentialRevision = await this.sync.save({provider,endpoint,model},key,passphrase,expectedId,{passkey,passkeyKey,pairingCode});
   } else if (mode !== 'session' && !storedInTarget) {
    if (!key) throw Error('尚无此 API 地址的密钥，请填写或导入一次。');
    const result = await this.stored(mode,'save',origin,true,key);

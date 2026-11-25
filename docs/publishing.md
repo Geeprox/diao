@@ -8,7 +8,7 @@
 
 在[现有商店条目](https://chrome.google.com/webstore/devconsole/680d8fb6-e1f9-42bb-91c8-109b4e120390/jbamhjcmjhmmhehjnnblflckmikhjojm/edit/package)的 **Package → View public key** 可取得公钥，用来核对商店身份的隔离安装。验收安装、原生连接、钥匙串隔离与旧用户迁移。商店安装可能使用不同的身份，其 API 配置继承需单独验证。 [Chrome 扩展身份](https://developer.chrome.com/docs/extensions/reference/manifest/key)
 
-独立安装扩展可使用网页监听、事项管理、ChatGPT 页内工具和可选模型分析。安装并授权 Mac 助手后，另有原生浮标、可见性倒计时和最近访问切换。Chrome 本机保存和通行密钥恢复不依赖助手。钥匙串模式由稳定签名版支持。
+独立安装扩展可使用网页监听、事项管理、ChatGPT 页内工具和可选模型分析。安装并授权 Mac 助手后，另有原生浮标、可见性倒计时和最近访问切换。Chrome 本机保存、通行密钥恢复和配对码恢复均可独立使用。钥匙串模式由稳定签名版支持。
 
 ## macOS 助手
 

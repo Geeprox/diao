@@ -699,6 +699,10 @@ viewport.addEventListener('scroll',()=>{
       const request=JSON.parse(options.body);
       const evidence=JSON.parse(request.input);
       globalThis.fixtureTopicEvidence.push(evidence);
+      if (globalThis.fixtureHoldNextDigest) {
+        globalThis.fixtureHoldNextDigest=false;
+        await new Promise(resolve=>{globalThis.fixtureReleaseDigest=resolve;});
+      }
       const questions=[
         '哪些条件需要先确认？','长答复里提到哪三条限制？','哪些步骤能在本地完成？','取消后要保留什么？',
         '如何检查历史加载？','页面晚到该怎么处理？','如何定位重复标题？','需要验证哪种边界？',
@@ -841,6 +845,10 @@ viewport.addEventListener('scroll',()=>{
   note('先打开大纲即见独立回复，自动补齐早期问答，再用搜索跳到同名章节原文，无模型请求。');
   await nativeOutline.locator('[data-action="open-topics"]').click();
   await overview.waitFor({state:'visible',timeout:5000});
+  await chat.waitForFunction(()=>{
+    const body=document.querySelector('#fixture-native-turns');
+    return getComputedStyle(body).filter==='opacity(0)' && body.getBoundingClientRect().height>0;
+  });
   await overview.locator('.zoom-coverage',{hasText:'网页历史 · 4 轮'}).waitFor({timeout:16000}).catch(async error=>{
     console.log(JSON.stringify({coverage:await overview.locator('.zoom-coverage').textContent(),status:await overview.locator('.zoom-ai-status').textContent(),loads:await chat.evaluate(()=>window.fixtureNativeLoads)}));
     throw error;
@@ -878,6 +886,19 @@ viewport.addEventListener('scroll',()=>{
   assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative);
   await chat.reload();
   await host.locator('.compact-rail .rail-item').last().hover();
+  const overviewProfiler=await ctx.newCDPSession(chat);
+  await overviewProfiler.send('Performance.enable');
+  const idleFrameP95=await chat.evaluate(()=>new Promise(resolve=>{
+    const times=[];
+    let previous;
+    const sample=now=>{
+      if(previous!==undefined)times.push(now-previous);
+      previous=now;
+      if(times.length<24)requestAnimationFrame(sample);
+      else resolve(Math.round(times.sort((a,b)=>a-b)[Math.floor((times.length-1)*.95)]));
+    };
+    requestAnimationFrame(sample);
+  }));
   await chat.locator('#fixture-history-viewport').evaluate(node=>{
     window.fixtureWarmScrollWrites=0;
     const scrollTo=node.scrollTo.bind(node);
@@ -902,6 +923,7 @@ viewport.addEventListener('scroll',()=>{
       requestAnimationFrame(sample);
     },{once:true});
   });
+  const beforeOverview=new Map((await overviewProfiler.send('Performance.getMetrics')).metrics.map(({name,value})=>[name,value]));
   await host.locator('[data-action="open-topics"]').click();
   await overview.locator('.zoom-conversation-summary',{hasText:'处置顺序'}).waitFor({timeout:4000});
   assert.equal(await overview.locator('.zoom-line[data-role="user"][data-digest="true"]').count(),2);
@@ -912,14 +934,18 @@ viewport.addEventListener('scroll',()=>{
   const cover=await overview.evaluate(layer=>{
     const overlay=layer.getBoundingClientRect();
     const viewport=document.querySelector('#fixture-history-viewport').getBoundingClientRect();
-    return {opaque:getComputedStyle(layer,'::before').opacity,
+    return {opaque:getComputedStyle(layer.querySelector('.zoom-backdrop')).opacity,
       head:overlay.top<=viewport.top+1,bottom:overlay.bottom>=viewport.bottom-1};
   });
   assert.deepEqual(cover,{opaque:'1',head:true,bottom:true});
   await chat.waitForFunction(()=>Boolean(window.fixtureOverviewTiming));
   const overviewTiming=await chat.evaluate(()=>window.fixtureOverviewTiming);
+  const afterOverview=new Map((await overviewProfiler.send('Performance.getMetrics')).metrics.map(({name,value})=>[name,value]));
+  await overviewProfiler.detach();
+  const cost=name=>Math.round((afterOverview.get(name)-beforeOverview.get(name))*1000);
   note('原文覆盖、零宿主滚动和零额外模型请求通过。暖启动概览摘要 '+overviewTiming.readyMs+
-    ' ms，采样 '+overviewTiming.frames+' 帧，帧间隔 p95 '+overviewTiming.p95Ms+' ms。');
+    ' ms，采样 '+overviewTiming.frames+' 帧，帧间隔 p95 '+overviewTiming.p95Ms+' ms，空闲 '+idleFrameP95+
+    ' ms，布局 '+cost('LayoutDuration')+' ms，脚本 '+cost('ScriptDuration')+' ms。');
   await overview.locator('.zoom-chapters summary').first().click();
   await overview.locator('.zoom-chapter',{hasText:'重复章节标题'}).first().click();
   await overview.waitFor({state:'hidden',timeout:7000}).catch(async error=>{
@@ -936,8 +962,47 @@ viewport.addEventListener('scroll',()=>{
       scroll:viewport.scrollTop,loading:Boolean(document.querySelector('#fixture-native-loader'))};
   });
   assert(coldJump.inside&&!coldJump.loading,'冷启动查询缓存后，仍可跳到唯一的早期章节 '+JSON.stringify(coldJump));
+  assert.equal(await chat.locator('#fixture-native-turns').evaluate(node=>getComputedStyle(node).filter),'none');
   assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative);
   note('脱离旧页面内存后，从缓存恢复议题和早期章节导航。点击才加载目标原文。');
+  await chat.locator('#fixture-native-heading-1').evaluate(heading=>{
+    heading.textContent='改写后的授权范围';
+    heading.nextElementSibling.textContent='现在只接受第二位审核者的确认。';
+  });
+  await host.locator('.compact-rail .rail-item').first().hover();
+  await host.locator('[data-action="open-topics"]').click();
+  await wait(()=>sw.evaluate(count=>globalThis.fixtureTopicEvidence.length===count+1,requestsAfterNative),'同一消息已改写，应重新分析一次',17000);
+  await overview.locator('.zoom-conversation-summary',{hasText:'处置顺序'}).waitFor({timeout:10000});
+  const updatedEvidence=await sw.evaluate(()=>globalThis.fixtureTopicEvidence.at(-1)[0]);
+  assert.match(updatedEvidence.answer,/现在只接受第二位审核者的确认/);
+  assert(!updatedEvidence.answer.includes('只在打开概览后加载可见历史'));
+  assert(updatedEvidence.sections.includes('改写后的授权范围'));
+  assert(!updatedEvidence.sections.includes('重复章节标题'));
+  await overview.getByRole('button',{name:'返回对话'}).click();
+  await overview.waitFor({state:'hidden'});
+  await host.locator('.compact-rail .rail-item').first().hover();
+  await host.locator('[data-action="open-topics"]').click();
+  await overview.locator('.zoom-conversation-summary',{hasText:'处置顺序'}).waitFor();
+  assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative+1);
+  note('相同消息 ID 的终态正文改写后重新分析一次，证据不再包含旧正文、旧章节，再打开沿用新缓存。');
+  await sw.evaluate(()=>{globalThis.fixtureHoldNextDigest=true;});
+  await chat.locator('#fixture-native-heading-1').evaluate(heading=>{
+    heading.nextElementSibling.textContent='第三位审核者确认范围后生效。';
+  });
+  await wait(()=>sw.evaluate(count=>globalThis.fixtureTopicEvidence.length===count+2,requestsAfterNative),
+    '打开概览期间，修订正文应进入摘要更新',14000);
+  assert.equal(await overview.locator('.zoom-conversation-summary').isVisible(),true);
+  await overview.locator('.zoom-ai-status',{hasText:'正在更新摘要'}).waitFor();
+  await chat.locator('#fixture-native-heading-1').evaluate(heading=>{
+    heading.nextElementSibling.textContent='最终以第四位审核者记录的范围为准。';
+  });
+  await sw.evaluate(()=>globalThis.fixtureReleaseDigest());
+  await wait(()=>sw.evaluate(count=>globalThis.fixtureTopicEvidence.length===count+3,requestsAfterNative),
+    '前一次请求结束后，应接上最新已确认修订',14000);
+  const finalRevision=await sw.evaluate(()=>globalThis.fixtureTopicEvidence.at(-1)[0]);
+  assert.match(finalRevision.answer,/最终以第四位审核者/);
+  await overview.locator('.zoom-ai-status').waitFor({state:'hidden',timeout:10000});
+  note('保持可读摘要直至更新完成，慢响应返回后仍处理最后一次确认的正文修订。');
   await chat.close();
   await watch.close();
   await ctx.close();
@@ -1009,8 +1074,6 @@ viewport.addEventListener('scroll',()=>{
     await other.route('https://**/*',route=>route.abort());
     const worker=other.serviceWorkers()[0]||await other.waitForEvent('serviceworker');
     await modelFixture(worker);
-    // 模拟 Chrome 将同一个加密记录传给第二个独立配置。
-    await worker.evaluate(({slot,record})=>chrome.storage.sync.set({[slot]:record}),{slot:syncSlot,record:envelope});
     const second=await other.newPage();
     await second.addInitScript(({credentialId,prf})=>{
       const decode=base64=>Uint8Array.from(atob(base64.replaceAll('-','+').replaceAll('_','/')),c=>c.charCodeAt(0));
@@ -1022,10 +1085,21 @@ viewport.addEventListener('scroll',()=>{
       }});
     },{credentialId:envelope.passkey.credentialId,prf:syntheticMaterial});
     await second.goto(ext+'/sidepanel.html?view=connection');
+    await second.locator('#api-key').fill('synthetic-existing-local-key');
+    await second.getByRole('button',{name:'保存连接',exact:true}).click();
+    await second.locator('#key-state',{hasText:'已保存在当前 Chrome 配置'}).waitFor();
+    assert.equal(await second.locator('#sync-recovery').isVisible(),false);
+    const checksBeforeRecovery=await worker.evaluate(()=>globalThis.fixtureSyncChecks);
+    // 模拟加密记录晚于本地保存到达，且设置一直开着。
+    await worker.evaluate(({slot,record})=>chrome.storage.sync.set({[slot]:record}),{slot:syncSlot,record:envelope});
     await second.locator('#sync-recovery').waitFor({state:'visible'});
+    assert.equal(await worker.evaluate(async()=>(await chrome.storage.session.get('apiKey')).apiKey),'synthetic-existing-local-key');
     assert.equal(await second.locator('#sync-unlock').isVisible(),false);
     await second.getByRole('button',{name:'验证并恢复',exact:true}).click();
-    await second.locator('#api-receipt',{hasText:'连接验证通过'}).waitFor({timeout:6000}).catch(async error=>{
+    await wait(()=>worker.evaluate(async id=>{
+      const {connectionCheck}=await chrome.storage.local.get('connectionCheck');
+      return connectionCheck?.revision===id&&connectionCheck?.ok===true;
+    },envelope.id),'同步连接的这次验证未完成',6500).catch(async error=>{
       console.log('sync recovery',JSON.stringify({
         error:await second.locator('#settings-error').textContent(),
         receipt:await second.locator('#api-receipt').textContent(),
@@ -1037,7 +1111,32 @@ viewport.addEventListener('scroll',()=>{
     });
     assert.equal(await second.locator('#api-key').inputValue(),'');
     assert.equal(await worker.evaluate(async()=>(await chrome.storage.session.get('apiKey')).apiKey),'synthetic-synced-key');
-    assert.equal(await worker.evaluate(()=>globalThis.fixtureSyncChecks),1);
+    assert.equal(await worker.evaluate(()=>globalThis.fixtureSyncChecks),checksBeforeRecovery+1);
+    await restored.getByRole('button',{name:'生成新配对码',exact:true}).click();
+    const pairing=restored.getByRole('dialog',{name:'设备配对码'});
+    await pairing.getByRole('button',{name:'生成新码',exact:true}).click();
+    const value=restored.locator('#sync-pairing-value');
+    await value.waitFor({state:'visible'});
+    const code=await value.inputValue();
+    assert.match(code,/^TC-(?:[0-9A-F]{8}-){3}[0-9A-F]{8}$/);
+    await pairing.getByRole('button',{name:'完成',exact:true}).click();
+    await wait(async()=>await value.inputValue()==='','关闭配对对话框后应清除显示值');
+    const paired=await restarted.evaluate(async key=>(await chrome.storage.sync.get(key))[key],syncSlot);
+    assert.equal(paired.version,1);
+    assert(!JSON.stringify(paired).includes(code));
+    assert(!JSON.stringify(paired).includes('synthetic-synced-key'));
+    await worker.evaluate(({slot,record})=>chrome.storage.sync.set({[slot]:record}),{slot:syncSlot,record:paired});
+    await second.locator('#sync-unlock').waitFor({state:'visible'});
+    await second.locator('#sync-unlock').fill('wrong-fixture-pairing-code');
+    await second.locator('#sync-unlock').press('Enter');
+    await second.locator('#sync-error',{hasText:'配对码或原同步口令不正确'}).waitFor();
+    await second.locator('#sync-unlock').fill(code.toLowerCase());
+    await second.locator('#sync-unlock').press('Enter');
+    await second.locator('#key-state',{hasText:'Chrome 同步'}).waitFor();
+    await wait(()=>worker.evaluate(async id=>{
+      const {connectionCheck}=await chrome.storage.local.get('connectionCheck');
+      return connectionCheck?.revision===id&&connectionCheck?.ok===true;
+    },paired.id),'配对后应自动验证连接',6500);
     await other.close();
     other=await launch(otherProfile);
     await other.route('https://**/*',route=>route.abort());
@@ -1049,7 +1148,7 @@ viewport.addEventListener('scroll',()=>{
     await newWorker.evaluate(key=>chrome.storage.sync.remove(key),syncSlot);
     await reopened.locator('#forget-key').waitFor({state:'hidden'});
     assert.equal(await newWorker.evaluate(async()=>(await chrome.storage.session.get('apiKey')).apiKey),undefined);
-    note('第二个隔离 Chrome 配置收到加密记录，模拟平台通行密钥验证后恢复，完整重启直接恢复，撤回同步后断开。');
+    note('第二个隔离 Chrome 配置的本地连接在同步记录抵达时保持可用，模拟平台通行密钥验证后迁移；更换配对码、错码重试、完整重启和撤回同步均通过。');
   }finally{await other.close();}
   assert.equal(errors.length,0,errors.join('\n'));
   fs.writeFileSync(path.join(base,'result.json'),JSON.stringify({checks,errors,requests,syntheticHost:true},null,2));

@@ -732,7 +732,7 @@ async function onMessage(message,sender) {
       credentialStorage(previous) !== s.credentialStorage || credentialOrigin(previous.endpoint) !== credentialOrigin(s.endpoint));
     if (persistsNewKey && m.rememberConsent !== true) throw Error('请选择密钥保存位置后再保存连接。');
     const oldSession = await session();
-    const prepared = await keychain.prepareSave(s,m.apiKey,previous,{passphrase:m.syncPassphrase,expectedId:m.syncId,passkey:m.passkey,passkeyKey:m.passkeyKey});
+    const prepared = await keychain.prepareSave(s,m.apiKey,previous,{passphrase:m.syncPassphrase,expectedId:m.syncId,passkey:m.passkey,passkeyKey:m.passkeyKey,pairingCode:m.pairingCode});
     const sameCredential = connectionKey(s)===connectionKey(previous) && prepared.apiKey===oldSession.apiKey;
     if (s.credentialStorage!=='sync') s.credentialRevision = sameCredential && previous.credentialRevision || crypto.randomUUID();
     await run(async () => {
@@ -757,7 +757,11 @@ async function onMessage(message,sender) {
     });
     if(!s.nativeEnabled&&!s.switcherEnabled&&s.credentialStorage!=='keychain'){native?.postMessage({type:'hide'});native?.disconnect();native=null;}
     emit();void resumeQueueAfterConnection().catch(()=>{});
-    if (m.scope==='connection' && m.verify===true && prepared.apiKey) await verifySavedConnection(s.credentialRevision);
+    if (m.scope==='connection' && m.verify===true && prepared.apiKey) {
+      const verification=verifySavedConnection(s.credentialRevision);
+      if (m.pairingCode) void verification.catch(()=>{});
+      else await verification;
+    }
     return {ok:true};
   }
   if (m.type==='unlockSync') {
@@ -765,7 +769,7 @@ async function onMessage(message,sender) {
     const passkeyKey=typeof m.passkeyKey==='string'&&m.passkeyKey.length===43?m.passkeyKey:'';
     if (!passphrase&&!passkeyKey) throw Error('请验证此设备后恢复连接。');
     const {revision} = await adoptSyncedConnection(m.syncId,{passphrase,passkeyKey});
-    await verifySavedConnection(revision);
+    void verifySavedConnection(revision).catch(()=>{});
     return {ok:true};
   }
   if(m.type==='restoreKey'){const {settings}=await load();if(!await keychain.restore(settings,{interactive:true,force:true})){const {credentialStatus}=await chrome.storage.session.get('credentialStatus');throw Error(credentialStatus?.reason||'尚未保存连接。');}return {ok:true};}

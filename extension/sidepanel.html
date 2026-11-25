@@ -40,7 +40,7 @@
         <h2 id="sync-recovery-title">发现已保存的连接</h2>
         <p id="sync-origin" class="hint"></p>
         <div class="key-entry">
-          <input id="sync-unlock" type="password" aria-label="同步口令" autocomplete="off" maxlength="256" placeholder="原来的同步口令">
+          <input id="sync-unlock" type="password" aria-label="配对码或原同步口令" autocomplete="off" maxlength="256" placeholder="配对码或原同步口令">
           <button id="unlock-sync" class="primary" type="button">解锁此设备</button>
         </div>
         <p id="sync-error" class="error" role="alert"></p>
@@ -91,7 +91,10 @@
           <label><input name="credentialStorage" type="radio" value="session"><span>仅此会话</span></label>
         </div>
         <p class="hint" id="credential-storage-hint"></p>
-        <div id="sync-setup" class="row-actions" hidden><button id="sync-upgrade" class="secondary" type="button">改用 Chrome 通行密钥</button></div>
+        <div id="sync-setup" class="row-actions" hidden>
+          <button id="sync-pair" class="text-button" type="button">用配对码保存</button>
+          <button id="sync-upgrade" class="text-button" type="button" hidden>改用通行密钥</button>
+        </div>
         <button id="keychain-helper" class="text-button" type="button" hidden>连接 Mac 助手</button>
       </fieldset>
     </fieldset>
@@ -184,4 +187,15 @@
   <div class="actions"><button class="primary" value="send">发送并分析</button><button class="secondary" value="cancel">取消</button></div>
 </form></dialog>
 <dialog id="organize-dialog" aria-labelledby="organize-title"><form method="dialog"><div class="section-heading"><h2 id="organize-title">整理当前窗口</h2><button class="icon-button close-button" value="cancel" aria-label="关闭整理预览"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><p class="muted">将同一网站的标签归为一组，新增分组排在末尾并按网站名称排序。已固定和已有分组的标签保留原样。</p><div id="organization-plan"></div><p class="hint">只在本机处理，不调用 API。应用后可撤销；再次手动调整标签结构后，撤销会停止以保留你的操作。</p><div class="actions"><button id="apply-organization" class="primary" value="apply">应用分组</button><button class="secondary" value="cancel">取消</button></div></form></dialog>
+<dialog id="sync-pairing" aria-labelledby="sync-pairing-title"><form method="dialog">
+  <h2 id="sync-pairing-title">设备配对码</h2>
+  <p id="sync-pairing-help" class="muted"></p>
+  <div id="sync-pairing-code" class="key-entry" hidden>
+    <input id="sync-pairing-value" type="text" aria-label="设备配对码" readonly autocomplete="off" spellcheck="false">
+    <button id="sync-pairing-copy" class="secondary" type="button">复制</button>
+  </div>
+  <p id="sync-pairing-error" class="error" role="alert"></p>
+  <div class="actions"><button id="sync-pairing-confirm" type="button" class="primary" hidden>生成新码</button>
+    <button id="sync-pairing-close" class="secondary" value="cancel">取消</button></div>
+</form></dialog>
 </body></html>
