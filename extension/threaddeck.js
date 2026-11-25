@@ -6907,6 +6907,7 @@ function tdNavScrollRoot(target) {
     const boundary = estimate <= initial.top ? initial.min : initial.max;
     tdNavLockRoot(req,root);
     req.method = 'recorded-native-position';
+    req.paging = boundary === initial.min ? 'up' : 'down';
     for (const top of new Set([estimate,boundary])) {
       if (!tdNavAlive(req) || !root.isConnected) return null;
       tdSignalHostReadingScroll(root,top-tdNavScrollInfo(root).top);
@@ -6981,11 +6982,11 @@ function tdNavScrollRoot(target) {
   }
   async function tdNavAfterHostLayout(req) {
     const thread = tdZoom.scene?.root || tdZoomRoot();
-    if (thread && tdZoomEarlierMessagesPending(thread)) {
+    if (thread && req.paging && tdZoomEarlierMessagesPending(thread)) {
       // 某些虚拟列表会先挂载章节，分页转场完毕后才应用最后一次宿主滚动校正。
       const target = await tdNavWait(req,()=>tdZoomEarlierMessagesPending(thread) ? null : tdNavResolve(req),1800);
-      if (!target) return null;
-      if (req.paging && req.root?.isConnected && !tdNavVerification(target).ok) {
+      if (!tdNavAlive(req)) return null;
+      if (target && req.root?.isConnected && !tdNavVerification(target).ok) {
         // 加载器退场时宿主有时重新锚定末尾。先恢复刚刚读过的同一端，再精确定位。
         const info = tdNavScrollInfo(req.root);
         const boundary = req.paging === 'up' ? info.min : info.max;
@@ -11258,6 +11259,12 @@ function tdNavScrollRoot(target) {
     return Boolean(indicator && tdDomTreeShown(indicator));
   }
 
+  function tdZoomReplyRunning() {
+    const activity = getChatGptActivitySnapshot();
+    return Boolean(activity.strongEvidenceSeen || activity.stopControl || activity.steerControl ||
+      activity.networkPending || activity.generationLease || td.tx);
+  }
+
   async function tdZoomRecoverHistory(scene, manual = false) {
     const capture = scene.history;
     if (scene.complete || capture.running || (!manual && capture.attempted)) return;
@@ -11271,19 +11278,19 @@ function tdNavScrollRoot(target) {
         scheduleRefresh('outline-history',0);
       } else tdZoomTopicControls(scene,state,text);
     };
-    const parked = () => {
-      const now = Date.now();
-      if (tdZoomMoving(scene) || tdReadBusy() || Math.max(tdReadState().until,tdChatBackoffUntil) > now) return true;
-      const activity = !td.activityDirty && td.activityCache && now - td.activityAt < 1000
-        ? td.activityCache : getChatGptActivitySnapshot();
-      // 发送队列要求整轮终态。只读补载只在有确切的生成或发送迹象时让开。
-      return Boolean(activity.stopControl || activity.steerControl || activity.networkPending || activity.generationLease);
-    };
+    // 宿主正在生成时等待终态。历史分页退避不影响已读取的回答。
+    const parked = () => tdZoomMoving(scene) || tdReadBusy() || tdZoomReplyRunning();
+    const historyBackoff = () => Math.max(tdReadState().until,tdChatBackoffUntil) > Date.now();
     if (!alive() || parked()) {
       update('history-retry',document.hidden?'回到此标签页后可继续补齐':'对话空闲后可继续补齐历史');
       return;
     }
+    if (historyBackoff()) {
+      if (!outline) queueMicrotask(()=>tdZoomHistoryStalled(scene));
+      return;
+    }
     capture.attempted = true;
+    capture.exhausted = false;
     const resume = capture.resume;
     const root = findScrollRoot();
     capture.root = root;
@@ -11326,7 +11333,7 @@ function tdNavScrollRoot(target) {
         limits[edge] = false;
         let idleAt = 0, previousMark = '';
         let closest = Infinity, rebounds = 0, reachedEdge = false;
-        while (alive() && !parked() && !scene.complete && performance.now() < until && steps < (outline ? 72 : tdZoomHistoryBudget)) {
+        while (alive() && !parked() && !historyBackoff() && !scene.complete && performance.now() < until && steps < (outline ? 72 : tdZoomHistoryBudget)) {
           const info = tdNavScrollInfo(root);
           const boundary = edge === 'head' ? info.min : info.max;
           const remain = boundary - info.top;
@@ -11388,16 +11395,25 @@ function tdNavScrollRoot(target) {
     if (finish) {
       capture.complete = true;
       if (outline) tdRenderOutlineCoverage();
-      else tdZoomRefreshHistory(scene);
-    } else if (refine || parked() || capture.order.length > initialCount && steps>0) {
+      else tdZoomRefreshHistory(scene,true);
+    } else if (parked() || !historyBackoff() && (refine || capture.order.length > initialCount && steps>0)) {
       // 有新内容才进入下一段；发送打断时等宿主的下一次状态变更。
       capture.attempted = false;
       if (!parked()) setTimeout(()=>{
-        if (alive()) void tdZoomRecoverHistory(scene).catch(()=>update('history-retry','可继续补齐早期问答'));
+        if (alive()) void tdZoomRecoverHistory(scene).catch(()=>{
+          if (!outline) tdZoomHistoryStalled(scene);
+        });
       },350);
-    } else if (!outline) {
-      update('history-retry',capture.order.length ? '可继续补齐早期问答' : 'ChatGPT 暂未提供可读取的消息');
-    }
+    } else if (!outline) tdZoomHistoryStalled(scene);
+  }
+
+  function tdZoomHistoryStalled(scene) {
+    if (tdZoom.scene !== scene || !tdAlive(scene.scope)) return;
+    // 网页不再补载时，允许使用已有正文生成部分摘要。
+    scene.history.attempted = true;
+    scene.history.exhausted = true;
+    tdZoomTopicControls(scene,scene.summaries?.size ? 'ready' : 'history-retry');
+    tdZoomRefreshHistory(scene,true);
   }
 
   function tdZoomOpen() { return Boolean(tdZoom.scene); }
@@ -11718,7 +11734,7 @@ function tdNavScrollRoot(target) {
     label.className = 'zoom-line-label';
     label.textContent = text;
     row.append(label);
-    row.title = text;
+    row.title = digest ? (role === 'assistant' ? '定位原回复' : '定位原问题') : text;
     const destination = {key:record.key, answerId};
     scene.destinations.set(row, destination);
     const id = answerId || record.messageId || record.nodeId;
@@ -11795,6 +11811,7 @@ function tdNavScrollRoot(target) {
     return {
       conversation: locator.id,
       format: 'summary-v3',
+      partial: !scene.complete,
       turns: (scene.digestDraft || scene.records).map(entry => {
         const role = entryAnchorRole(entry), id = tdZoomEntryId(entry);
         const freshQuestion = changed?.has(id) && tdZoomReadableMessage(entry,'user');
@@ -11820,7 +11837,7 @@ function tdNavScrollRoot(target) {
   function tdZoomCachedOverview(scene, navigationOnly = false) {
     const locator = getChatGptConversationLocator();
     if (locator.kind !== 'conversation') return Promise.resolve(null);
-    const evidence = {conversation:locator.id,complete:scene.complete,navigationOnly};
+    const evidence = {conversation:locator.id,complete:scene.complete,navigationOnly,allowPartial:!navigationOnly};
     if (scene.complete) {
       evidence.observed = scene.records.map(entry=>{
         const role = entryAnchorRole(entry);
@@ -11881,11 +11898,16 @@ function tdNavScrollRoot(target) {
     });
   }
 
+  function tdZoomChunkEdge(scene, index, direction) {
+    const group = scene.topics?.find(topic=>topic.merge && topic.start - 1 < index && index < topic.end);
+    return group ? (direction < 0 ? group.start - 1 : group.end) : index;
+  }
+
   function tdZoomDisplayGroups(scene, start, end) {
     if (!scene.topics) return [{start,end:end-1}];
     return scene.topics.flatMap(group => {
       const from = Math.max(start,group.start - 1), to = Math.min(end - 1,group.end - 1);
-      return from <= to ? [{...group,start:from,end:to}] : [];
+      return from <= to ? [{...group,start:from,end:to,merge:group.merge && from === group.start-1 && to === group.end-1}] : [];
     });
   }
 
@@ -11907,24 +11929,33 @@ function tdNavScrollRoot(target) {
       const records = tdZoomRecordsFromCache(scene.nextTopics.entries,scene.digestDraft || scene.records);
       scene.digestDraft = null;
       const shift = records.findIndex(entry=>tdZoomEntryId(entry)===first);
-      scene.first = Math.max(0,shift);
-      scene.last = Math.min(records.length,scene.first+tdZoomChunk);
+      const start = Math.max(0,shift);
+      scene.first = tdZoomChunkEdge(scene,start,-1);
+      scene.last = tdZoomChunkEdge(scene,Math.min(records.length,start+tdZoomChunk),1);
       scene.records = records;
     }
     const summary = tdZoom.surface.querySelector('.zoom-conversation-summary');
     summary.textContent = scene.nextTopics.summary || '';
     summary.hidden = !summary.textContent;
+    scene.digestPartial = scene.nextTopics.partial === true;
     tdZoomRenderTopicIndex(scene);
     scene.summaries = new Map((scene.nextTopics.summaries || []).map(turn => [turn.turn - 1, turn]));
     scene.nextTopics = null;
     scene.rows.clear();
     tdZoom.stream.replaceChildren();
     tdZoomRender(scene, scene.first, scene.last);
-    const row = scene.rows.get(anchor?.id);
-    if (row) {
-      list.scrollTop += row.getBoundingClientRect().top - anchor.y;
-      if (anchor.focused) row.focus({preventScroll: true});
+    if (anchor) {
+      const row = scene.rows.get(anchor.id);
+      const entryIndex = row?.getClientRects().length ? -1 : scene.records.findIndex(entry=>
+        tdZoomEntryId(entry) === anchor.id || entry.answerRecords?.some(answer=>(answer.messageId || answer.nodeId) === anchor.id));
+      const group = scene.topics?.find(topic=>topic.merge && entryIndex >= topic.start - 1 && entryIndex < topic.end);
+      const visible = group ? tdZoom.stream.querySelector('.zoom-topic[data-topic-start="' + (group.start - 1) + '"] > .zoom-sources > summary') : row;
+      if (visible?.getClientRects().length) {
+        list.scrollTop += visible.getBoundingClientRect().top - anchor.y;
+        if (anchor.focused) visible.focus({preventScroll:true});
+      }
     }
+    tdZoomTopicControls(scene,'ready');
     // 更新分组标题时保持原来的阅读位置，也保留用户已滚动过的状态。
     scene.initialScroll += list.scrollTop - oldScroll;
   }
@@ -11942,7 +11973,7 @@ function tdNavScrollRoot(target) {
         const list = tdZoom.list;
         if (start < scene.first || start >= scene.last) {
           scene.first = start;
-          scene.last = Math.min(scene.records.length, start + tdZoomChunk);
+          scene.last = tdZoomChunkEdge(scene,Math.min(scene.records.length,start+tdZoomChunk),1);
           scene.rows.clear();
           tdZoom.stream.replaceChildren();
           tdZoomRender(scene, scene.first, scene.last);
@@ -11958,19 +11989,22 @@ function tdNavScrollRoot(target) {
   function tdZoomTopicControls(scene, state, description = '') {
     const button = tdZoom.surface.querySelector('.zoom-ai');
     const status = tdZoom.surface.querySelector('.zoom-ai-status');
-    const labels = {connection:'模型连接', error:'重试', cooldown:'重试', 'history-retry':'继续补齐'};
-    const coverage = scene.complete ? (scene.history.complete ? '网页历史' : '完整会话') : '已载入部分';
+    const complete = scene.summaries?.size ? !scene.digestPartial : scene.complete;
+    const coverage = complete ? (scene.history.complete ? '网页历史' : '完整会话') : '部分会话';
+    const historyAction = state === 'history-retry' || state === 'ready' && !complete;
+    const labels = {connection:'模型连接',error:'重试',cooldown:'重试'};
+    const label = historyAction ? '继续补齐' : labels[state];
     tdZoom.surface.querySelector('.zoom-coverage').textContent = coverage + ' · ' + scene.records.length + ' 轮';
-    button.hidden = !labels[state];
-    if (labels[state]) button.textContent = labels[state];
-    button.dataset.action = state === 'connection' ? 'topic-connection' : state === 'history-retry' ? 'recover-topics-history' : 'generate-topics';
+    button.hidden = !label;
+    if (label) button.textContent = label;
+    button.dataset.action = state === 'connection' ? 'topic-connection' : historyAction ? 'recover-topics-history' : 'generate-topics';
     status.textContent = description;
     status.hidden = !description;
     scene.topicState = state;
   }
 
   async function tdZoomLoadTopics(scene, retry = false) {
-    if (tdZoomMoving(scene) || scene.topicRequestPending || (!retry && (scene.settledWork || scene.localCacheRead)) ||
+    if (document.hidden || tdZoomMoving(scene) || scene.topicRequestPending || (!retry && (scene.settledWork || scene.localCacheRead)) ||
         (retry && !['error','cooldown'].includes(scene.topicState))) return;
     scene.topicRequestPending = true;
     try {
@@ -11989,36 +12023,41 @@ function tdNavScrollRoot(target) {
           tdZoomCaptureHistory(scene,scene.viewportRoot);
           scene.complete = tdHealth.snapshot?.complete === true || scene.history.complete;
         }
-        if (cached?.state === 'ready') {
-          scene.complete = true;
+        if (cached?.state === 'ready' && (!cached.partial || !scene.complete)) {
+          scene.complete = !cached.partial;
+          if (cached.partial) {
+            scene.history.attempted = true;
+            scene.history.exhausted = true;
+          }
           scene.cachedOverview = true;
           scene.localCacheRead = true;
           scene.nextTopics = cached;
-          tdZoomRememberDigest(scene,cached.entries);
+          tdZoomRememberDigest(scene,cached.entries,cached.partial);
           tdZoomApplyTopics(scene);
-          tdZoomTopicControls(scene,'ready');
           return;
         }
       }
-      if (!scene.complete) {
+      if (!scene.complete && !scene.history.exhausted) {
         if (!scene.history.attempted && !scene.history.running) {
-          void tdZoomRecoverHistory(scene).catch(()=>{
-            if (tdZoom.scene === scene) tdZoomTopicControls(scene,'history-retry','可继续读取早期问答');
-          });
+          void tdZoomRecoverHistory(scene).catch(()=>tdZoomHistoryStalled(scene));
         }
         return;
       }
-      const activity = getChatGptActivitySnapshot();
-      if (activity.stopControl || activity.busyIndicator || td.tx || td.run?.accepted) {
+      if (tdZoomReplyRunning()) {
         tdZoomTopicControls(scene,'working','回复完成后更新摘要');
         return;
       }
       const request = scene.topicRequest ||= tdZoomTopicRequest(scene);
       if (!request) { tdZoomTopicControls(scene,'local','原文索引'); return; }
+      if (request.partial && !request.turns.some(turn=>turn.answer)) {
+        scene.topicRequest = null;
+        tdZoomTopicControls(scene,'history-retry','等待网页载入回答');
+        return;
+      }
       scene.localCacheRead = true;
       const useModel = settings.autoTopicSummary !== false;
       tdZoomTopicControls(scene,'working',useModel ?
-        (scene.digestDraft ? '正在更新摘要…' : '正在生成摘要…') : '正在读取摘要…');
+        (scene.digestDraft ? '正在更新摘要…' : request.partial ? '正在概括已读取的问答…' : '正在生成摘要…') : '正在读取摘要…');
       const action = retry ? 'topicsGenerate' : useModel ? 'topicsOpen' : 'topicsRead';
       const reply = await chrome.runtime.sendMessage({type:'threadWorkspace',action,value:request});
       if (tdZoom.scene !== scene || !tdAlive(scene.scope) || request !== scene.topicRequest) return;
@@ -12026,13 +12065,12 @@ function tdNavScrollRoot(target) {
       const result = reply.data;
       if (result.state === 'ready') {
         const entries = request.turns.map(turn=>({id:turn.id,...turn.navigation}));
-        tdZoomRememberDigest(scene,entries);
+        tdZoomRememberDigest(scene,entries,result.partial);
         scene.nextTopics = {...result,entries};
         scene.cachedOverview = true;
         tdZoomApplyTopics(scene);
-        tdZoomTopicControls(scene,'ready');
       } else if (['empty','stale'].includes(result.state)) {
-        tdZoomTopicControls(scene,'local','原文索引');
+        tdZoomTopicControls(scene,request.partial ? 'history-retry' : 'local');
       } else tdZoomTopicControls(scene,result.state,result.description);
     } catch (error) {
       if (tdZoom.scene === scene && tdAlive(scene.scope)) tdZoomTopicControls(scene,'error',error.message||'摘要暂未生成。');
@@ -12064,64 +12102,91 @@ function tdNavScrollRoot(target) {
         title.textContent = group.title;
         section.append(title);
       }
-      if (group.summary) {
+      if (group.summary && group.end > group.start) {
         const overview = document.createElement('p');
         overview.className = 'zoom-summary';
         overview.textContent = group.summary;
         section.append(overview);
       }
-      for (let index = group.start; index <= group.end; index++) {
-        const entry = scene.records[index];
-        const summary = scene.summaries?.get(index);
-        const question = summary?.question || tdZoomQuestionLabel(entry);
-        const exchange = document.createElement('div');
-        exchange.className = 'zoom-exchange';
-        if (entryAnchorRole(entry) === 'user') exchange.append(tdZoomLine(scene,entry,question,'user','',Boolean(summary?.question)));
-        const answers = entry.answerRecords || [];
-        if (answers.length > 1 && summary?.answer) {
-          const digest = document.createElement('p');
-          digest.className = 'zoom-turn-summary';
-          digest.textContent = summary.answer;
-          exchange.append(digest);
-        }
-        for (const [answerIndex, answer] of answers.entries()) {
-          const id = answer.messageId || answer.nodeId;
-          if (!id) continue;
-          const chapters = tdZoomChapters(entry, answer);
-          const digest = answers.length === 1 && summary?.answer;
-          const label = digest || (answers.length > 1 ? '回复 '+(answerIndex+1)+' · 查看原文' : '查看原回复');
-          exchange.append(tdZoomLine(scene,entry,label,'assistant',id,Boolean(digest)));
-          if (chapters.length) {
-            const chapterList = document.createElement('details');
-            chapterList.className = 'zoom-chapters';
-            const expandedChapters = scene.expandedChapters ||= new Set();
-            chapterList.open = expandedChapters.has(id);
-            chapterList.addEventListener('toggle',()=>{
-              if (!chapterList.isConnected) return;
-              if (chapterList.open) { expandedChapters.add(id); renderChapters(); }
-              else expandedChapters.delete(id);
-            });
-            const toggle = document.createElement('summary');
-            toggle.textContent = '查看 ' + chapters.length + ' 个章节';
-            chapterList.append(toggle);
-            toggle.addEventListener('click',renderChapters,{once:true});
-            function renderChapters() {
-              if (chapterList.childElementCount > 1) return;
-              for (const chapter of chapters) {
-                const navigation = document.createElement('button');
-                navigation.type = 'button';
-                navigation.className = 'zoom-chapter';
-                navigation.textContent = chapter.label;
-                navigation.style.setProperty('--chapter-level', Math.min(4, chapter.outlineDepth || 0));
-                navigation.addEventListener('click',()=>{ void tdZoomJump(scene,{key:entry.key,answerId:id},chapter); });
-                chapterList.append(navigation);
-              }
-            }
-            if (chapterList.open) renderChapters();
-            exchange.append(chapterList);
+      let exchanges = section;
+      if (group.merge) {
+        section.dataset.merged = 'true';
+        const sources = document.createElement('details');
+        sources.className = 'zoom-sources';
+        const toggle = document.createElement('summary');
+        toggle.innerHTML = threadDeckIcon('chevron');
+        toggle.append('原始问答');
+        const key = tdZoomEntryId(scene.records[group.start]);
+        const expanded = scene.expandedTopics ||= new Set();
+        sources.open = expanded.has(key);
+        exchanges = document.createElement('div');
+        exchanges.className = 'zoom-source-turns';
+        sources.addEventListener('toggle',()=>{
+          if (!sources.isConnected) return;
+          if (sources.open) {
+            expanded.add(key);
+            if (!exchanges.childElementCount) renderExchanges();
+          } else expanded.delete(key);
+        });
+        sources.append(toggle,exchanges);
+        section.append(sources);
+        if (sources.open) renderExchanges();
+      } else renderExchanges();
+      function renderExchanges() {
+        for (let index = group.start; index <= group.end; index++) {
+          const entry = scene.records[index];
+          const summary = scene.summaries?.get(index);
+          const question = summary?.question || tdZoomQuestionLabel(entry);
+          const exchange = document.createElement('div');
+          exchange.className = 'zoom-exchange';
+          if (entryAnchorRole(entry) === 'user') exchange.append(tdZoomLine(scene,entry,question,'user','',Boolean(summary?.question)));
+          const answers = entry.answerRecords || [];
+          if (answers.length > 1 && summary?.answer) {
+            const digest = document.createElement('p');
+            digest.className = 'zoom-turn-summary';
+            digest.textContent = summary.answer;
+            exchange.append(digest);
           }
+          for (const [answerIndex, answer] of answers.entries()) {
+            const id = answer.messageId || answer.nodeId;
+            if (!id) continue;
+            const chapters = tdZoomChapters(entry, answer);
+            const digest = answers.length === 1 && summary?.answer;
+            const label = digest || (answers.length > 1 ? '原回复 '+(answerIndex+1) : '原回复');
+            exchange.append(tdZoomLine(scene,entry,label,'assistant',id,Boolean(digest)));
+            if (chapters.length) {
+              const chapterList = document.createElement('details');
+              chapterList.className = 'zoom-chapters';
+              const expandedChapters = scene.expandedChapters ||= new Set();
+              chapterList.open = expandedChapters.has(id);
+              chapterList.addEventListener('toggle',()=>{
+                if (!chapterList.isConnected) return;
+                if (chapterList.open) { expandedChapters.add(id); renderChapters(); }
+                else expandedChapters.delete(id);
+              });
+              const toggle = document.createElement('summary');
+              toggle.innerHTML = threadDeckIcon('chevron');
+              toggle.append('章节');
+              chapterList.append(toggle);
+              toggle.addEventListener('click',renderChapters,{once:true});
+              function renderChapters() {
+                if (chapterList.childElementCount > 1) return;
+                for (const chapter of chapters) {
+                  const navigation = document.createElement('button');
+                  navigation.type = 'button';
+                  navigation.className = 'zoom-chapter';
+                  navigation.textContent = chapter.label;
+                  navigation.style.setProperty('--chapter-level', Math.min(4, chapter.outlineDepth || 0));
+                  navigation.addEventListener('click',()=>{ void tdZoomJump(scene,{key:entry.key,answerId:id},chapter); });
+                  chapterList.append(navigation);
+                }
+              }
+              if (chapterList.open) renderChapters();
+              exchange.append(chapterList);
+            }
+          }
+          exchanges.append(exchange);
         }
-        section.append(exchange);
       }
       fragment.append(section);
     }
@@ -12141,14 +12206,14 @@ function tdNavScrollRoot(target) {
     if (!scene || scene.progress < .999 || scene.pending || tdZoomMoving(scene)) return;
     const list = tdZoom.list;
     if (list.scrollTop < 180 && scene.first > 0) {
-      const start = Math.max(0, scene.first - tdZoomChunk);
+      const start = tdZoomChunkEdge(scene,Math.max(0,scene.first-tdZoomChunk),-1);
       const prior = scene.first;
       scene.first = start;
       tdZoomRender(scene, start, prior, true);
     }
     if (list.scrollHeight - list.clientHeight - list.scrollTop < 240 && scene.last < scene.records.length) {
       const prior = scene.last;
-      scene.last = Math.min(scene.records.length, prior + tdZoomChunk);
+      scene.last = tdZoomChunkEdge(scene,Math.min(scene.records.length,prior+tdZoomChunk),1);
       tdZoomRender(scene, prior, scene.last);
     }
   }
@@ -12470,7 +12535,7 @@ function tdNavScrollRoot(target) {
       (a.clientY+b.clientY)/2,hit.target,hit.transcript);
   }
 
-  function tdZoomRememberDigest(scene, entries) {
+  function tdZoomRememberDigest(scene, entries, partial) {
     const identities = new Map();
     const add = (message,role) => {
       for (const id of [message.id,message.nodeId].filter(Boolean)) identities.set(role+':'+id,message.revision);
@@ -12480,10 +12545,10 @@ function tdNavScrollRoot(target) {
       for (const answer of entry.answers) add(answer,'assistant');
     }
     scene.digestIdentities = identities;
-    tdHistory.verifiedOrder = {scope:scene.scope,entries};
+    if (!partial) tdHistory.verifiedOrder = {scope:scene.scope,entries};
   }
 
-  function tdZoomRefreshHistory(scene) {
+  function tdZoomRefreshHistory(scene, recovered = false) {
     if (!scene || scene.progress < .999 || scene.pending || tdZoomMoving(scene) || scene.history.running) return;
     const indexed = tdZoomRecords();
     const authoritative = tdHealth.snapshot?.complete === true && indexed.length > 0;
@@ -12502,30 +12567,31 @@ function tdNavScrollRoot(target) {
       if (changed.length) scene.revisedMessages = new Set(changed);
       if (changed.length || newMessage) tdZoomCaptureHistory(scene,scene.viewportRoot);
     }
-    // 完整概要保持可读，直到有新增消息、明确修订的正文或完整快照。
-    if (!changed.length && !newMessage && scene.cachedOverview && !authoritative) return;
+    // 保留已读摘要，除非有新增消息、正文修订或宿主确认了完整范围。
+    const previous = scene.digestDraft || scene.records;
+    const readMore = recovered && scene.history.order.length >
+      previous.reduce((count,entry)=>count+(entryAnchorRole(entry)==='user'?1:0)+(entry.answerRecords?.length||0),0);
+    if (!changed.length && !newMessage && scene.cachedOverview && !authoritative && !scene.history.complete && !readMore) return;
     const captured = tdZoomCapturedRecords(scene);
-    const records = authoritative || (!scene.history.complete && captured.length < indexed.length) ? indexed : captured;
+    const records = authoritative || (!scene.history.complete && (scene.history.gap || captured.length < indexed.length)) ? indexed : captured;
     const complete = authoritative || scene.history.complete;
     const identity = entry=>[tdZoomEntryId(entry),...(entry.answerRecords || []).map(answer=>answer.messageId || answer.nodeId)].join('/');
     const revision = entry=>hashString([entry.rawQuestion || entry.text,
       ...tdZoomChapters(entry).map(block=>block.label),
       ...(entry.answerRecords || []).map(answer=>answer.rawText || answer.visibleRawText || '')].join('\n'));
-    const previous = scene.digestDraft || scene.records;
     const sameOrder = records.length === previous.length && records.every((entry,index)=>
       identity(entry)===identity(previous[index]) &&
       (scene.cachedOverview && !scene.digestDraft || revision(entry)===revision(previous[index])));
     if (!records.length || (scene.digestDraft || !changed.length && !newMessage) && sameOrder && complete === scene.complete) {
-      if (scene.complete) void tdZoomLoadTopics(scene);
+      void tdZoomLoadTopics(scene);
       return;
     }
     if (scene.summaries?.size && settings.autoTopicSummary !== false) {
-      const activity = getChatGptActivitySnapshot();
-      if (activity.stopControl || activity.busyIndicator || td.tx || td.run?.accepted) {
+      if (tdZoomReplyRunning()) {
         tdZoomTopicControls(scene,'working','回复完成后更新摘要');
         return;
       }
-      if (!scene.digestDraft && !complete) scene.history.attempted = false;
+      if (!scene.digestDraft && !complete && !scene.history.exhausted) scene.history.attempted = false;
       // 保留当前完整摘要和阅读位置，新证据准备好后再整体替换。
       scene.digestDraft = records;
       scene.complete = complete;
@@ -12667,7 +12733,7 @@ function tdNavScrollRoot(target) {
           text-rendering: geometricPrecision;
         }
 
-        :host([data-overview="true"]) .navigator { visibility:hidden; pointer-events:none; }
+        :host([data-overview="true"]) .navigator { display:none; }
 
         .compact-rail {
           position: relative;
@@ -12817,12 +12883,16 @@ function tdNavScrollRoot(target) {
           max-width:100%; padding:.3em 0; color:var(--zoom-ink); background:transparent;
         }
         .zoom-line-label { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; white-space:pre-line; }
+        .zoom-line[data-role="assistant"]:not([data-digest]) { color:var(--zoom-muted); font-size:.76em; }
         .zoom-line[data-role="assistant"] .zoom-line-label { -webkit-line-clamp:4; }
         .zoom-line[data-digest="true"] .zoom-line-label { display:block; overflow:visible; }
         .zoom-turn-summary { margin:0; color:var(--zoom-ink); font-size:.87em; line-height:1.55; overflow-wrap:anywhere; }
         .zoom-line:focus-visible { outline:2px solid var(--zoom-muted); outline-offset:3px; }
         .zoom-line:hover { text-decoration:underline; text-underline-offset:.22em; }
-        .zoom-summary { margin:0 0 6px; color:var(--zoom-muted); font-size:.82em; line-height:1.55; }
+        .zoom-summary { margin:0 0 6px; color:var(--zoom-muted); font-size:.82em; line-height:1.55; overflow-wrap:anywhere; }
+        .zoom-topic[data-merged] .zoom-summary { color:var(--zoom-ink); font-size:.9em; margin:0; }
+        .zoom-sources { width:100%; min-width:0; color:var(--zoom-muted); font-size:.8em; }
+        .zoom-source-turns { font-size:1.25em; margin-top:8px; }
         .zoom-conversation-summary {
           box-sizing:border-box;width:var(--zoom-column-width);margin:0 0 0 var(--zoom-column-left);
           padding:11px clamp(12px,2.4vw,24px) 12px;font-size:.84em;line-height:1.55;
@@ -12868,13 +12938,21 @@ function tdNavScrollRoot(target) {
           overflow-wrap:anywhere;
         }
         .zoom-chapters { width:100%; padding-left:5px; margin-bottom:4px; color:var(--zoom-muted); font-size:.76em; }
-        .zoom-chapters summary { width:fit-content; cursor:pointer; padding:3px 0; }
+        .zoom-chapters summary, .zoom-sources summary {
+          display:flex; align-items:center; gap:3px; width:fit-content; min-height:26px;
+          padding:2px 6px 2px 2px; border-radius:6px; cursor:pointer; list-style:none;
+        }
+        .zoom-chapters summary::-webkit-details-marker, .zoom-sources summary::-webkit-details-marker { display:none; }
+        .zoom-chapters summary svg, .zoom-sources summary svg { width:13px; height:13px; flex:none; }
+        .zoom-chapters[open] > summary svg, .zoom-sources[open] > summary svg { transform:rotate(90deg); }
+        .zoom-chapters summary:hover, .zoom-sources summary:hover { background:color-mix(in srgb, var(--zoom-ink) 7%, transparent); }
         .zoom-chapter {
           display:block; max-width:100%; min-height:25px; text-align:start; padding:4px calc(13px + var(--chapter-level) * 9px);
           border:0; border-radius:6px; background:transparent; color:var(--zoom-ink); cursor:pointer;
         }
         .zoom-return:hover, .zoom-ai:hover, .zoom-chapter:hover { background:color-mix(in srgb, var(--zoom-ink) 13%, transparent); }
-        .zoom-line:focus-visible, .zoom-return:focus-visible, .zoom-ai:focus-visible, .zoom-chapter:focus-visible, .zoom-chapters summary:focus-visible {
+        .zoom-line:focus-visible, .zoom-return:focus-visible, .zoom-ai:focus-visible, .zoom-chapter:focus-visible,
+        .zoom-chapters summary:focus-visible, .zoom-sources summary:focus-visible {
           outline:2px solid currentColor; outline-offset:2px;
         }
         @media (max-width:620px) {
@@ -13783,7 +13861,8 @@ function tdNavScrollRoot(target) {
       }
       if (action === 'recover-topics-history') {
         event.preventDefault(); event.stopPropagation();
-        if (tdZoom.scene) void tdZoomRecoverHistory(tdZoom.scene,true).catch(()=>{});
+        const scene = tdZoom.scene;
+        if (scene) void tdZoomRecoverHistory(scene,true).catch(()=>tdZoomHistoryStalled(scene));
         return;
       }
       if (action === 'generate-topics') {

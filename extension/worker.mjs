@@ -1,5 +1,5 @@
 import {createThreadWorkspace} from './core/thread-workspace.mjs';
-import {conversationAt, topicConnection, topicBatchLimit, topicSnapshot, readTopics, readLatestTopicOverview, rememberTopicOverview, requestTopics, saveTopicBatch, topicSynthesis} from './core/topics.mjs';
+import {conversationAt, topicConnection, topicBatchLayout, topicSnapshot, readTopics, readLatestTopicOverview, rememberTopicOverview, requestTopics, saveTopicBatch, topicSynthesis} from './core/topics.mjs';
 import {BacklogQueue,backlogPlan,backlogExclusion,backlogWaiting,trackableTab,queueSummary} from './core/backlog.mjs';
 import {advanceCountdown,nativeVisibilityFresh} from './core/countdown.mjs';
 import {CredentialManager,credentialOrigin,credentialStorage} from './core/credentials.mjs';
@@ -560,7 +560,7 @@ async function conversationTopics(action, value, sender) {
     if (automatic || action === 'topicsRead') return {state:'connection',description:error.message};
     throw error;
   }
-  const snapshot = await topicSnapshot(value, conversation, await topicBatchLimit(storage, conversation, connection));
+  const snapshot = await topicSnapshot(value, conversation, await topicBatchLayout(storage, conversation, connection));
   if (action === 'topicsRead') return (await readTopics(storage,snapshot,connection)).view;
   if (automatic) {
     const {threadWorkspacePreferences} = await storage.get('threadWorkspacePreferences');
@@ -569,7 +569,7 @@ async function conversationTopics(action, value, sender) {
   const key = await fingerprint({conversation,model:connection.model,revision:settings.credentialRevision||'',batches:snapshot.batches.map(batch=>batch.digest)});
   return cloudRun(async () => {
     const {view, parts} = await readTopics(storage, snapshot, connection);
-    if (view.state === 'ready') { await rememberTopicOverview(storage, snapshot, connection); return view; }
+    if (view.state === 'ready') { await rememberTopicOverview(storage,snapshot,connection,parts); return view; }
     if (automatic) {
       const previous = (await storage.get(attemptKey))[attemptKey]?.[key];
       if (previous?.until > Date.now()) return {state:previous.state,description:previous.description};
@@ -610,7 +610,9 @@ async function conversationTopics(action, value, sender) {
       const synthesis = await topicSynthesis(snapshot, parts);
       if (synthesis) await generate(synthesis);
       if (attempted) await rememberTopicAttempt(storage,key,null);
-      return (await readTopics(storage, snapshot, connection)).view;
+      const ready = await readTopics(storage,snapshot,connection);
+      if (ready.view.state === 'ready') await rememberTopicOverview(storage,snapshot,connection,ready.parts);
+      return ready.view;
     } catch (error) {
       const quota = error.status === 429 || error.code === 'provider_backoff';
       const needsConnection = error.code === 'connection_required' || [401,403].includes(error.status);

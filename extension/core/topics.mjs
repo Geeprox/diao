@@ -21,8 +21,9 @@ const summarySchema = item({
   turns: {type: 'array', items: item({turn: {type: 'integer'}, question: textField, answer: textField})},
 });
 
-const fullSchema = item({...summarySchema.properties, summary: textField});
-const synthesisSchema = item({summary: textField, topics: summarySchema.properties.topics});
+const semanticTopics = {type:'array', items:item({...topicFields, summary:textField, merge:{type:'boolean'}})};
+const fullSchema = item({...summarySchema.properties, topics:semanticTopics, summary:textField});
+const synthesisSchema = item({summary:textField, topics:semanticTopics});
 
 export function conversationAt(url) {
   try {
@@ -46,11 +47,13 @@ export function topicConnection(settings) {
   return {endpoint: officialEndpoint, model};
 }
 
-export async function topicBatchLimit(storage, conversation, connection) {
-  const saved = (await storage.get(cacheName))[cacheName]?.['c:' + conversation];
-  if (saved?.version !== 2 || saved.model !== connection.model) return BATCH_TURNS;
-  // 沿用已有会话的分段方式，避免升级时整段缓存失效。
-  return saved.batchLimit === BATCH_TURNS ? BATCH_TURNS : LEGACY_BATCH_TURNS;
+export async function topicBatchLayout(storage, conversation, connection) {
+  const cache = (await storage.get(cacheName))[cacheName] || {};
+  const saved = [false,true].map(partial=>cache[topicCacheKey(conversation,partial)])
+    .filter(entry=>entry?.version === 2 && entry.model === connection.model);
+  // 沿用已有会话的分段上限，并保留还可复用的范围。
+  return {limit:saved.length && saved[0].batchLimit !== BATCH_TURNS ? LEGACY_BATCH_TURNS : BATCH_TURNS,
+    overviews:saved.map(entry=>entry.overview).filter(plan=>plan?.version === overviewSchema)};
 }
 
 function topicAnchor(value) {
@@ -88,7 +91,8 @@ function topicNavigation(turn) {
   return {id: turn.id, nodeId: topicAnchor(source.nodeId), role: source.role, answers, ...(revision && {revision})};
 }
 
-export async function topicSnapshot(value, conversation, batchLimit = BATCH_TURNS) {
+export async function topicSnapshot(value, conversation, layout = {}) {
+  const batchLimit = layout.limit || BATCH_TURNS;
   if (!conversation || value?.conversation !== conversation ||
       !Array.isArray(value.turns) || value.turns.length < 1 || value.turns.length > TOPIC_LIMIT) {
     throw new Error('当前会话或消息范围无法处理，请重新打开概览。');
@@ -120,6 +124,22 @@ export async function topicSnapshot(value, conversation, batchLimit = BATCH_TURN
     return {id: turn.id, question, answer: bounded(turn.answer, 2200),
       sections: turn.sections.map(section => bounded(section, 100)).filter(Boolean)};
   });
+  const partDigest = part=>fingerprint({format:whole ? 3 : detailed ? 2 : 1,turns:part});
+  const reusable = new Map();
+  if (whole && (turns.length > batchLimit || totalLength > SUMMARY_BATCH_CHARS) && layout.overviews?.length) {
+    const positions = new Map(turns.map((turn,index)=>[turn.id,index]));
+    for (const {entries,batches} of layout.overviews) {
+      for (const [index,{offset,digest}] of batches.entries()) {
+        const start = positions.get(entries[offset]?.id);
+        const size = (batches[index+1]?.offset ?? entries.length) - offset;
+        if (start === undefined || size <= 0 || size > batchLimit || start+size > turns.length ||
+            [...reusable].some(([from,to])=>start<to && from<start+size)) continue;
+        if (await partDigest(turns.slice(start,start+size)) === digest) reusable.set(start,start+size);
+      }
+    }
+  }
+  const starts = [...reusable.keys()].sort((a,b)=>a-b);
+  let next = 0;
   const batches = [];
   for (let offset = 0; offset < turns.length;) {
     let end = Math.min(turns.length, offset + batchLimit);
@@ -134,14 +154,17 @@ export async function topicSnapshot(value, conversation, batchLimit = BATCH_TURN
         end++;
       }
     }
+    // 开头补齐历史时，不移动正文和顺序都未改变的批次。
+    while (starts[next] <= offset) next++;
+    end = reusable.get(offset) || Math.min(end, starts[next] ?? end);
     const part = turns.slice(offset, end);
     // 只向模型发送批内顺序和文本。会话及消息身份只用于本机缓存。
     const evidence = part.map(({id, ...fields}, index) => ({turn: index + 1, ...fields}));
-    batches.push({offset, evidence, whole, digest: await fingerprint({format:whole ? 3 : detailed ? 2 : 1, turns:part})});
+    batches.push({offset, evidence, whole, digest: await partDigest(part)});
     offset = end;
   }
   const navigation = whole ? value.turns.map(topicNavigation) : [];
-  return {conversation, batches, batchLimit, detailed, whole, count: turns.length,
+  return {conversation, batches, batchLimit, detailed, whole, partial:whole && value.partial === true, count: turns.length,
     navigation: navigation.every(Boolean) ? navigation : []};
 }
 
@@ -172,8 +195,9 @@ function validateResult(result, batch, detailed) {
     }
     next = end + 1;
     const groupTitle = resultText(title, 72);
-    return detailed ? {start, end, title: groupTitle, summary: resultText(group.summary, 240)} :
-      {start, end, title: groupTitle};
+    if (!detailed) return {start, end, title:groupTitle};
+    return {start, end, title:groupTitle, summary:resultText(group.summary,240),
+      ...(batch.whole && group.merge === true && start < end && {merge:true})};
   });
   if (next !== count + 1) throw new Error('OpenAI 返回的主题没有覆盖所有消息。');
   if (!detailed) return {topics};
@@ -196,14 +220,15 @@ export async function requestTopics(connection, key, batch, detailed, fetcher) {
   const summarizing = ' Write a concise summary for each topic, then one short question paraphrase and one answer digest for every turn, in supplied order. Preserve decisions, conclusions, limitations and consequential details from across the answer and its headings. Use an empty answer when no answer is supplied. A standalone reply has an empty input question: keep its output question empty. Omit generic filler and facts not supported by the evidence. Aim for 40 characters for question, 130 for answer, and 110 for topic summary in Chinese, or 12, 34, and 26 words in English respectively. Keep each field on one line.';
   const guidance = ' Read every supplied question, full answer and section title. Trace the original goal, refinements and latest conclusions. Preserve key reasons, decisions, exact schedules, thresholds and open questions. Distinguish firm plans, conditional plans and superseded ideas. Use natural complete sentences and idiomatic Chinese for Chinese conversations. Do not stitch excerpts or claim to inspect attachments. An explicit marker 此轮已生成图片。 records that the assistant delivered an image. State that it was delivered without inferring its visual details. For an unanswered question emit an empty answer.';
   const overview = ' Give an overall summary in two to four complete sentences. Convey the objective, decisive outcomes, key conditions and unresolved work. Topic summaries say what was concluded. When supplied several batches, reconcile theme changes and continuations across their boundary, using the absolute numbered ranges. Cover every turn. Write each field on one line.';
-  const semanticBoundaries = ' Give each topic a distinct goal or workstream. Merge neighboring turns or ranges that advance the same goal. Keep refinements, dependencies, confirmations and follow-up conditions with their topic. Use a single-turn topic only for a genuinely new goal.';
-  const crossBatchGrouping = ' Rebuild topic boundaries using the whole conversation. Batch boundaries carry no meaning. Treat the supplied draft topic summaries as evidence for these decisions.';
+  const semanticBoundaries = ' Group neighboring turns about the same goal. Set merge to true only for adjacent turns that refine or resolve the same concrete question and can be understood from one combined answer. In a merged topic, make the title name that question and the topic summary directly answer it, preserving the final decision, numbers and exceptions. Set merge to false for independent questions, even when they share a broad topic. Keep the per-turn digests so each source can still be read.';
+  const crossBatchGrouping = ' Rebuild topic boundaries using all supplied evidence. Batch boundaries carry no meaning. Treat the supplied draft topic summaries as evidence for these decisions.';
+  const answerFirst = ' For each answer, lead with what the assistant actually found, recommended, decided or delivered. State the reasons, conditions or uncertainty that change how to use that conclusion. Read all supplied material, which may cover only part of a conversation. Do not fill any gaps from assumptions or use navigation labels in place of a digest.';
   const request = {
     url: endpoint + '/responses',
     body: {
       model,
       ...(model === 'gpt-6-luna' ? {reasoning: {effort: 'none'}} : {}),
-      instructions: grouping + (batch.synthesis ? overview + semanticBoundaries + crossBatchGrouping : detailed ? summarizing + (batch.whole ? guidance + overview + semanticBoundaries : '') : ''),
+      instructions: grouping + (batch.synthesis ? overview + semanticBoundaries + crossBatchGrouping : detailed ? summarizing + (batch.whole ? guidance + answerFirst + overview + semanticBoundaries : '') : ''),
       input: JSON.stringify(batch.evidence),
       store: false,
       max_output_tokens: detailed ? 5400 : 2000,
@@ -233,6 +258,7 @@ export async function topicSynthesis(snapshot, parts) {
     start:offset + 1, end:offset + evidence.length, summary:parts[digest].summary,
     topics:parts[digest].topics.map(group => ({
       start:offset + group.start, end:offset + group.end, title:group.title, summary:group.summary,
+      ...(group.merge && {merge:true}),
     })),
   }));
   const digest = await fingerprint({format:'conversation-synthesis-v4',batches:snapshot.batches.map(batch => batch.digest)});
@@ -262,23 +288,33 @@ function combine(batches, parts, detailed, synthesis) {
   return detailed ? {state:'ready', groups, summaries} : {state:'ready', groups};
 }
 
+function topicCacheKey(conversation, partial) {
+  return 'c:' + conversation + (partial ? ':partial' : '');
+}
+
 export async function readTopics(storage, snapshot, connection) {
-  const saved = (await storage.get(cacheName))[cacheName]?.['c:' + snapshot.conversation];
+  const cache = (await storage.get(cacheName))[cacheName] || {};
+  // 完整和部分历史各保留自己的可定位范围。正文与顺序完全相同的批次可共享结果。
+  const saved = [snapshot.partial, !snapshot.partial].map(partial=>cache[topicCacheKey(snapshot.conversation,partial)])
+    .filter(entry=>entry?.version === 2 && entry.model === connection.model);
   const parts = {};
-  if (saved?.version === 2 && saved.model === connection.model) {
-    for (const batch of snapshot.batches) {
-      const value = saved.parts?.[batch.digest];
+  function readBatch(batch) {
+    for (const entry of saved) {
+      const value = entry.parts?.[batch.digest];
       if (!value) continue;
-      try { parts[batch.digest] = validateResult(value, batch, snapshot.detailed); } catch {}
+      try {
+        parts[batch.digest] = validateResult(value,batch,snapshot.detailed);
+        return;
+      } catch {}
     }
   }
+  for (const batch of snapshot.batches) readBatch(batch);
   const synthesis = await topicSynthesis(snapshot, parts);
-  if (synthesis && saved?.parts?.[synthesis.digest]) {
-    try { parts[synthesis.digest] = validateResult(saved.parts[synthesis.digest], synthesis, true); } catch {}
-  }
-  const complete = snapshot.batches.every(batch => parts[batch.digest]) && (!synthesis || parts[synthesis.digest]);
-  const view = complete ? combine(snapshot.batches, parts, snapshot.detailed, synthesis) : {state: saved ? 'stale' : 'empty'};
-  return {view, parts};
+  if (synthesis) readBatch(synthesis);
+  const ready = snapshot.batches.every(batch=>parts[batch.digest]) && (!synthesis || parts[synthesis.digest]);
+  const view = ready ? {...combine(snapshot.batches,parts,snapshot.detailed,synthesis),
+    ...(snapshot.partial && {partial:true})} : {state:saved.length ? 'stale' : 'empty'};
+  return {view,parts};
 }
 
 async function overviewPlan(snapshot, parts) {
@@ -298,11 +334,15 @@ function matchesAnchor(message, id, alias) {
   return [message.id,message.nodeId].some(candidate => candidate && (candidate === id || candidate === alias));
 }
 
-function checkMountedTopics(entries, messages) {
-  const timeline = entries.flatMap(entry => [
+function topicTimeline(entries) {
+  return entries.flatMap(entry=>[
     ...(entry.role === 'user' ? [entry] : []),
-    ...entry.answers.map(answer => ({...answer, role:'assistant'})),
+    ...entry.answers.map(answer=>({...answer,role:'assistant'})),
   ]);
+}
+
+function checkMountedTopics(entries, messages) {
+  const timeline = topicTimeline(entries);
   const changed = [];
   let index = -1;
   for (const message of messages) {
@@ -366,32 +406,48 @@ export async function readLatestTopicOverview(storage, conversation, evidence) {
   const observations = mounted ? evidence.messages : evidence?.observed;
   if (!conversation || evidence?.conversation !== conversation || !Array.isArray(observations) ||
       !observations.length || observations.length > TOPIC_LIMIT) return {state:'empty'};
-  const saved = (await storage.get(cacheName))[cacheName]?.['c:' + conversation];
-  const plan = saved?.overview;
-  if (plan?.version !== overviewSchema || !Array.isArray(plan.entries) ||
-      !Array.isArray(plan.batches) || !saved.parts) return {state:'empty'};
-  const invalid = mounted ? checkMountedTopics(plan.entries, observations) :
-    checkTopicTurns(plan.entries, observations, evidence);
-  if (invalid) return invalid;
-  if (!plan.batches.length || plan.batches.some(({digest}) => !saved.parts[digest]) ||
-      (plan.synthesis && !saved.parts[plan.synthesis])) return {state:'empty'};
-  if (evidence.navigationOnly === true) return {state:'ready',entries:plan.entries};
-  const view = combine(plan.batches, saved.parts, true, plan.synthesis ? {digest:plan.synthesis} : null);
-  return {...view, entries:plan.entries};
+  const cache = (await storage.get(cacheName))[cacheName] || {};
+  const scopes = mounted && evidence.allowPartial === true && evidence.navigationOnly !== true ? [false,true] : [false];
+  let invalid;
+  for (const partial of scopes) {
+    const saved = cache[topicCacheKey(conversation,partial)];
+    const plan = saved?.overview;
+    if (plan?.version !== overviewSchema || !Array.isArray(plan.entries) || !Array.isArray(plan.batches) || !saved.parts) continue;
+    const mismatch = mounted ? checkMountedTopics(plan.entries,observations) : checkTopicTurns(plan.entries,observations,evidence);
+    if (mismatch) {
+      if (!invalid || mismatch.changed?.length) invalid = mismatch;
+      continue;
+    }
+    if (!plan.batches.length || plan.batches.some(({digest})=>!saved.parts[digest]) ||
+        (plan.synthesis && !saved.parts[plan.synthesis])) continue;
+    if (evidence.navigationOnly === true) return {state:'ready',entries:plan.entries};
+    const view = combine(plan.batches,saved.parts,true,plan.synthesis ? {digest:plan.synthesis} : null);
+    return {...view,entries:plan.entries,...(partial && {partial:true})};
+  }
+  return invalid || {state:'empty'};
 }
 
-export async function rememberTopicOverview(storage, snapshot, connection) {
+export async function rememberTopicOverview(storage, snapshot, connection, parts) {
   if (!snapshot.navigation?.length) return;
+  const plan = await overviewPlan(snapshot,parts);
+  if (!plan) return;
   const cache = (await storage.get(cacheName))[cacheName] || {};
-  const key = 'c:' + snapshot.conversation;
+  const key = topicCacheKey(snapshot.conversation,snapshot.partial);
   const entry = cache[key];
-  if (entry?.model !== connection.model) return;
-  const plan = await overviewPlan(snapshot, entry.parts);
-  if (!plan || JSON.stringify(entry.overview) === JSON.stringify(plan)) return;
-  await writeTopicCache(storage, cache, key, {...entry, overview:plan});
+  if (entry?.model === connection.model && JSON.stringify(entry.overview) === JSON.stringify(plan)) return;
+  await writeTopicCache(storage,cache,key,{version:2,model:connection.model,batchLimit:snapshot.batchLimit,parts,overview:plan});
 }
 
 async function writeTopicCache(storage, saved, key, entry) {
+  if (entry.overview && key.endsWith(':partial')) {
+    const wholeKey = key.slice(0,-':partial'.length);
+    const whole = saved[wholeKey];
+    // 如果后来读到的消息已推翻完整范围，只保留它的正文指纹缓存。
+    // 其他仍未挂载修订消息的标签页不能再把旧结论当作完整摘要。
+    if (whole?.overview?.entries && checkMountedTopics(whole.overview.entries,topicTimeline(entry.overview.entries))) {
+      saved[wholeKey] = {...whole,overview:undefined};
+    }
+  }
   const remaining = Object.entries(saved).filter(([id]) => id !== key).slice(-62);
   remaining.push([key, entry]);
   const size = (pair) => new TextEncoder().encode(JSON.stringify(pair)).length;
@@ -403,7 +459,7 @@ async function writeTopicCache(storage, saved, key, entry) {
 
 export async function saveTopicBatch(storage, snapshot, connection, batch, result) {
   const saved = (await storage.get(cacheName))[cacheName] || {};
-  const key = 'c:' + snapshot.conversation;
+  const key = topicCacheKey(snapshot.conversation,snapshot.partial);
   const previous = saved[key];
   const before = previous?.version === 2 && previous.model === connection.model ? previous.parts : {};
   const active = new Set(snapshot.batches.map(part => part.digest));

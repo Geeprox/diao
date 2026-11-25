@@ -178,6 +178,20 @@ viewport.addEventListener('scroll',()=>{
   },1580);
 });</script>`;
 
+// 网页始终等待早期历史，但三轮可读正文都已挂载。
+const stalledId='stalledsummaryfixture';
+const stalledPage=viewportPage.split('<script>')[0].replaceAll(viewportId,stalledId).replace(viewportTail,[
+  viewportTurn(5,'试运行什么时候开始？','周六 9 点试运行。遇雨延到周日，提前两小时通知。'),
+  viewportTurn(6,'试运行达标后就常态化吗？','20 人和 50 本书达标只说明本轮成功。复盘通过后再决定是否常态化。'),
+  viewportTurn(7,'交换区怎样登记书籍？','扫码登记书名和编号。每场限收 80 本，余量留待下次。'),
+].join(''))+`<script>
+const viewport=document.querySelector('#fixture-history-viewport');
+viewport.scrollTop=viewport.scrollHeight;
+window.fixtureStalledScrolls=0;
+const scroll=viewport.scrollTo.bind(viewport);
+viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...args);};
+</script>`;
+
 (async()=>{
  console.log('starting browser' ,modern?'modern':'legacy');
  const launch=(directory=profile)=>chromium.launchPersistentContext(directory,{channel:'chromium',headless:true,viewport:{width:1240,height:880},
@@ -193,6 +207,7 @@ viewport.addEventListener('scroll',()=>{
    if(url.origin==='https://chatgpt.com'&&url.pathname==='/c/fixture01')return route.fulfill({contentType:'text/html; charset=utf-8',body:chatPage});
    if(url.origin==='https://chatgpt.com'&&url.pathname==='/c/'+historyId)return route.fulfill({contentType:'text/html; charset=utf-8',body:historyPage});
    if(url.origin==='https://chatgpt.com'&&url.pathname==='/c/'+viewportId)return route.fulfill({contentType:'text/html; charset=utf-8',body:viewportPage});
+   if(url.origin==='https://chatgpt.com'&&url.pathname==='/c/'+stalledId)return route.fulfill({contentType:'text/html; charset=utf-8',body:stalledPage});
    if(url.origin==='https://chatgpt.com'&&url.pathname===historyEndpoint)return route.fulfill({json:historyPagePayload(url.searchParams.get('cursor')||'tail')});
    if(url.origin==='https://chatgpt.com'&&url.pathname==='/backend-api/conversation'&&route.request().method()==='POST')return route.fulfill({json:{ok:true}});
    return route.abort();
@@ -717,7 +732,19 @@ viewport.addEventListener('scroll',()=>{
         '从最近一次可用的缓存继续，原文仍可直接查看。','相同会话内容命中缓存后可以直接阅读。',
         '确认全部轮次有对应的问答、章节和原文跳转。','从授权、索引到核对逐步完成，最后检查安全边界。',
       ];
-      const result={
+      const partial = evidence[0]?.question === '试运行什么时候开始？';
+      const result=partial ? {
+        summary:'周六 9 点试运行，遇雨顺延至周日；20 人和 50 本书达标后仍需复盘。现场扫码登记，每场限收 80 本。',
+        topics:[
+          {start:1,end:2,title:'试运行何时转入常态化',summary:'周六 9 点启动，遇雨延至周日并提前通知。20 人、50 本书达标后先复盘，再决定是否常态化。',merge:true},
+          {start:3,end:3,title:'登记与容量',summary:'扫码登记书名和编号，每场限收 80 本。',merge:false},
+        ],
+        turns:[
+          {turn:1,question:'什么时候试运行？',answer:'周六 9 点；遇雨顺延至周日，提前两小时通知。'},
+          {turn:2,question:'达到什么条件才常态化？',answer:'20 人和 50 本书达标后仍需复盘，再决定是否常态化。'},
+          {turn:3,question:'书籍怎么登记？',answer:'扫码登记书名和编号，超出 80 本的留待下一场。'},
+        ],
+      } : {
         summary:'对话确定了授权、对话索引和恢复的处置顺序。先读取已有内容，补载时按身份合并，最后核对章节跳转。',
         topics:evidence.length < 9 ? [{start:1,end:evidence.length,title:'原文历史',summary:'已整理所有已核对的消息。'}] : [
           {start:1,end:4,title:'适用条件与执行限制',summary:'先核对页面授权和对话身份，再按具体限制规划执行。'},
@@ -1003,6 +1030,49 @@ viewport.addEventListener('scroll',()=>{
   assert.match(finalRevision.answer,/最终以第四位审核者/);
   await overview.locator('.zoom-ai-status').waitFor({state:'hidden',timeout:10000});
   note('保持可读摘要直至更新完成，慢响应返回后仍处理最后一次确认的正文修订。');
+
+  await chat.goto('https://chatgpt.com/c/'+stalledId);
+  const callsBeforeStall=await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length);
+  await host.locator('.compact-rail').hover();
+  await host.locator('[data-action="open-topics"]').click();
+  await overview.locator('.zoom-conversation-summary',{hasText:'周六 9 点试运行'}).waitFor({timeout:18000});
+  assert.match(await overview.locator('.zoom-coverage').textContent(),/部分会话 · 3 轮/);
+  assert(await overview.locator('[data-action="recover-topics-history"]').isVisible());
+  assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),callsBeforeStall+1);
+  const readEvidence=await sw.evaluate(()=>globalThis.fixtureTopicEvidence.at(-1));
+  assert.deepEqual(readEvidence.map(turn=>turn.answer),[
+    '重复章节标题\n\n周六 9 点试运行。遇雨延到周日，提前两小时通知。',
+    '重复章节标题\n\n20 人和 50 本书达标只说明本轮成功。复盘通过后再决定是否常态化。',
+    '重复章节标题\n\n扫码登记书名和编号。每场限收 80 本，余量留待下次。',
+  ]);
+  assert(readEvidence.every(turn=>turn.sections.includes('重复章节标题')));
+  const grouped=overview.locator('.zoom-topic[data-merged="true"]');
+  await grouped.getByText('周六 9 点启动',{exact:false}).waitFor();
+  const sources=grouped.locator('.zoom-sources');
+  assert.equal(await sources.evaluate(node=>node.open),false);
+  const independent=overview.locator('.zoom-topic:not([data-merged]) .zoom-line[data-role="assistant"][data-digest]');
+  assert.match(await independent.textContent(),/扫码登记书名和编号/);
+  assert.equal(await host.locator('.preview-panel').isVisible(),false,'摘要打开后，大纲不应覆盖正文');
+  await overview.screenshot({path:path.join(base,'partial-summary.png')});
+  await sources.locator(':scope > summary').click();
+  await sources.locator('.zoom-line[data-role="assistant"][data-digest]').nth(1).waitFor();
+  assert.equal(await sources.locator('.zoom-line[data-role="assistant"][data-digest]').count(),2);
+  const secondSource=sources.locator('.zoom-exchange').nth(1);
+  await secondSource.locator('.zoom-chapters summary').click();
+  await secondSource.locator('.zoom-chapter',{hasText:'重复章节标题'}).click();
+  await overview.waitFor({state:'hidden',timeout:6000});
+  await wait(()=>chat.locator('#fixture-native-heading-6').evaluate(node=>{
+    const bounds=node.getBoundingClientRect(), viewport=document.querySelector('#fixture-history-viewport').getBoundingClientRect();
+    return bounds.top>=viewport.top && bounds.bottom<=viewport.bottom;
+  }),'合并主题应准确跳到所选原始章节');
+  await chat.reload();
+  await host.locator('.compact-rail').hover();
+  await host.locator('[data-action="open-topics"]').click();
+  await overview.locator('.zoom-conversation-summary',{hasText:'周六 9 点试运行'}).waitFor({timeout:4000});
+  assert.match(await overview.locator('.zoom-coverage').textContent(),/部分会话 · 3 轮/);
+  assert.equal(await chat.evaluate(()=>window.fixtureStalledScrolls),0);
+  assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),callsBeforeStall+1);
+  note('历史加载卡在早期时，三轮已读取的完整回答自动概括，相邻追问合并并能精确跳转。刷新后直接读部分范围缓存。');
   await chat.close();
   await watch.close();
   await ctx.close();

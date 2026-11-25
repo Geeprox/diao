@@ -559,20 +559,20 @@ test('未安装 Mac 助手时原生功能保持关闭，并返回可操作的安
 
 test('新会话的 20 轮适配一次调用，升级前的 16 轮分段仍可命中缓存', async () => {
   await reset();
-  const {topicSnapshot,topicBatchLimit,topicSynthesis,saveTopicBatch} = await import('../extension/core/topics.mjs');
+  const {topicSnapshot,topicBatchLayout,topicSynthesis,saveTopicBatch} = await import('../extension/core/topics.mjs');
   const conversation = 'batch-layout-compatibility';
   const connection = {model:'gpt-6-luna'};
   const value = {conversation,format:'summary-v3',turns:Array.from({length:20},(_,index)=>({
     id:'turn-'+index,question:'明确要求',answer:'检查边界和结论。',sections:['检查条件'],
   }))};
-  const newPlan = await topicSnapshot(value,conversation,await topicBatchLimit(local,conversation,connection));
+  const newPlan = await topicSnapshot(value,conversation,await topicBatchLayout(local,conversation,connection));
   assert.deepEqual(newPlan.batches.map(batch=>batch.evidence.length),[20]);
   await local.set({threadTopicCache:{['c:'+conversation]:{version:2,model:connection.model,parts:{old:{}}}}});
-  const legacyPlan = await topicSnapshot(value,conversation,await topicBatchLimit(local,conversation,connection));
+  const legacyPlan = await topicSnapshot(value,conversation,await topicBatchLayout(local,conversation,connection));
   assert.deepEqual(legacyPlan.batches.map(batch=>batch.evidence.length),[16,4]);
   assert.equal(await topicSynthesis(newPlan,{}),null);
   await saveTopicBatch(local,newPlan,connection,newPlan.batches[0],{summary:'合成结果'});
-  assert.equal(await topicBatchLimit(local,conversation,connection),20);
+  assert.equal((await topicBatchLayout(local,conversation,connection)).limit,20);
 });
 
 
@@ -603,6 +603,61 @@ test('局部回复可复用完整缓存，忽略虚拟列表末尾位置，仍�
   ]});
   assert.equal(strict.state,'stale');
 });
+
+test('部分摘要独立保存范围，确认相同正文完整时复用模型结果', async () => {
+  await reset();
+  const {topicSnapshot,topicBatchLayout,readTopics,rememberTopicOverview,readLatestTopicOverview,saveTopicBatch} =
+    await import('../extension/core/topics.mjs');
+  const conversation='stalled-history-fixture', connection={model:'gpt-6-luna'};
+  const turns=[1,2].map(n=>({
+    id:'question-'+n,question:'询问试运行 '+n,answer:'试运行的条件 '+n,sections:[],
+    navigation:{role:'user',nodeId:'node-q-'+n,answers:[
+      {id:'answer-'+n,nodeId:'node-a-'+n,revision:'7:abcd',sections:[]},
+    ]},
+  }));
+  const partial=await topicSnapshot({conversation,format:'summary-v3',partial:true,turns},conversation);
+  await saveTopicBatch(local,partial,connection,partial.batches[0],{
+    summary:'确认了试运行的时间与门槛。',
+    topics:[{start:1,end:2,title:'试运行安排',summary:'先试运行，达标后复盘。',merge:true}],
+    turns:[{turn:1,question:'第一问',answer:'周六启动。'},{turn:2,question:'第二问',answer:'达标后复盘。'}],
+  });
+  const observed={conversation,messages:[{id:'answer-2',role:'assistant'}],allowPartial:true};
+  const partialView=await readLatestTopicOverview(local,conversation,observed);
+  assert.equal(partialView.partial,true);
+  assert.equal(partialView.groups[0].merge,true);
+  assert.equal((await readLatestTopicOverview(local,conversation,{...observed,navigationOnly:true})).state,'empty');
+  const complete=await topicSnapshot({conversation,format:'summary-v3',turns},conversation);
+  const {view,parts}=await readTopics(local,complete,connection);
+  assert.equal(view.state,'ready');
+  assert.equal(view.partial,undefined);
+  await rememberTopicOverview(local,complete,connection,parts);
+  assert.equal((await readLatestTopicOverview(local,conversation,observed)).partial,undefined);
+  turns[0].answer='试运行条件已修改。';
+  turns[0].navigation.answers[0].revision='9:efgh';
+  const revised=await topicSnapshot({conversation,format:'summary-v3',partial:true,turns},conversation);
+  await saveTopicBatch(local,revised,connection,revised.batches[0],{
+    ...parts[complete.batches[0].digest], summary:'试运行条件已修改，仍需复盘。',
+  });
+  const afterRevision=await readLatestTopicOverview(local,conversation,observed);
+  assert.equal(afterRevision.partial,true);
+  assert.match(afterRevision.summary,/条件已修改/);
+
+  const long=Array.from({length:20},(_,index)=>({
+    ...turns[0],id:'later-'+index,question:'稍后的问题 '+index,
+    navigation:{...turns[0].navigation,answers:[]},
+  }));
+  const later=await topicSnapshot({conversation,format:'summary-v3',partial:true,turns:long},conversation);
+  await saveTopicBatch(local,later,connection,later.batches[0],{
+    summary:'末尾二十轮的合成结果。',
+    topics:[{start:1,end:20,title:'后续问答',summary:'复用了原结论。'}],
+    turns:long.map((turn,index)=>({turn:index+1,question:turn.question,answer:'已确认条件。'})),
+  });
+  const extended=await topicSnapshot({conversation,format:'summary-v3',turns:[turns[0],...long]},conversation,
+    await topicBatchLayout(local,conversation,connection));
+  assert.deepEqual(extended.batches.map(batch=>batch.evidence.length),[1,20]);
+  assert.equal(extended.batches[1].digest,later.batches[0].digest);
+});
+
 
 test('保存自动验证一次，重复保存和读取状态复用成功结果',async()=>{
  await reset();
