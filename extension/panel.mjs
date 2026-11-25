@@ -1,11 +1,17 @@
-import {backlogPlan} from './core/backlog.mjs';
+import {backlogPlan,backlogWaiting,trackableTab} from './core/backlog.mjs';
 import {DEFAULTS,dayKey,safeURL,privateURL,fingerprint} from './core/policy.mjs';
+import {credentialOrigin,credentialStorage} from './core/credentials.mjs';
+import {createSyncPasskey,recoverSyncPasskey} from './core/passkey.mjs';
 import {duplicates,attentionOrder,organizationPlan} from './core/workspace.mjs';
 
 const $=s=>document.querySelector(s),preview=!globalThis.chrome?.runtime?.id;
 let chatEnabled=false,chatReady=false,chatRequest=0;
-let importedKey='',credentialNotice='',switcherDirty=false,data,filter='all',targetId,targetEvidence,view='workspace',preferences='connection',currentWindowId=1,organization,backlogPreview;
-const hovered=new Set(),focused=new Set(),analyzingTabs=new Set();
+let helperStatus='unknown',helperVersion='',helperChecking=false;
+const helperNeedsInstall = () => helperStatus==='missing';
+let importedKey='',switcherDirty=false,data,filter='all',targetId,targetEvidence,view='workspace',preferences='connection',currentWindowId=1,organization,backlogPreview,targetConnection;
+let backlogView='check',backlogVersion=0,startingBacklog=false,workspaceScroll=0,viewMotion;
+const hovered=new Set(),focused=new Set(),analyzingTabs=new Set(),renderedRows=new Map();
+let recentSignature='';
 const demo={
  settings:{...DEFAULTS},
  records:{1:{state:'resume',reason:'你设定的“构建成功”已出现，可以返回检查。',watching:true},2:{state:'waiting',reason:'正在本地监听，完成后提醒。',watching:true},4:{state:'suggested',reason:'相同网址已在另一个标签中打开。',decision:{state:'close',confidence:.98}},6:{state:'uncertain',reason:'状态文案同时出现，返回页面检查或调整监听。',watching:true}},
@@ -16,20 +22,22 @@ async function rpc(type,args={}) {
  if(preview){
   if(type==='threadWorkspace'){if(args.action==='setEnabled')chatEnabled=args.value;return {enabled:chatEnabled,refreshNeeded:0};}
   if(type==='state')return {...structuredClone(demo),duplicates:duplicates(demo.tabs)};
-  if(type==='backlogPlan'){const plan=backlogPlan(demo.tabs,args.windowId??null);return {id:'synthetic-plan',count:plan.targets.length,excluded:plan.skipped.length,sites:plan.sites,endpointOrigin:'https://api.openai.com'};}
+  if(type==='backlogPlan'){const plan=backlogPlan(demo.tabs,args.windowId??null);return {id:'synthetic-plan',count:plan.targets.length,excluded:plan.skipped.length,sites:plan.sites,waiting:plan.waiting,local:plan.local,unavailable:plan.unavailable,endpointOrigin:'https://api.openai.com'};}
   if(type==='backlogStart'){demo.analysisQueue={phase:'running',total:3,completed:0,analyzed:0,cached:0,skipped:0,failed:0,currentTitle:'Chrome 扩展开发文档'};return {ok:true};}
+  if(type==='backlogDismiss')demo.analysisQueue=null;
+  if(type==='backlogStop')demo.analysisQueue={...demo.analysisQueue,phase:'complete',reason:'本轮已结束。'};
   if(type==='backlogPause')demo.analysisQueue={...demo.analysisQueue,phase:'paused',reason:'已暂停，可随时继续。'};
   if(type==='backlogResume')demo.analysisQueue={...demo.analysisQueue,phase:'running',reason:''};
   if(type==='testAPI'||type==='analyze')throw Error('界面预览不调用 API；在 Chrome 中打开已加载的 Tab Cadence 后测试。');
   if(type==='snapshot')return {title:demo.tabs.find(t=>t.id===args.tabId)?.title,url:'https://example.com/task',excerpt:'构建成功，可以检查结果。',signals:{observed:'done',editable:false,dirty:false,media:false}};
-  if(type==='captureText')return {text:'任务已完成'};
   if(type==='saveSettings'){demo.settings=args.settings;demo.keyPresent=!!args.apiKey||demo.keyPresent;}
   if(type==='forgetKey'){demo.keyPresent=false;demo.credentialSaved=false;demo.settings.rememberKey=false;demo.credentialStatus=null;}
   if(type==='restoreKey'){demo.keyPresent=true;demo.credentialSaved=true;demo.credentialStatus={phase:'ready',reason:'连接已恢复，密钥保存在这台 Mac 的钥匙串中。'};}
+  if(type==='nativeCheck')return {status:demo.nativeSetup||'ready'};
   if(type==='saveNative')demo.settings.nativeEnabled=args.enabled;
   if(type==='saveSwitcher'){demo.settings.switcherEnabled=args.enabled;demo.switcherStatus={reason:args.enabled?'合成预览，请在实际扩展中验证快捷键。':'尚未启用。'};}
   if(type==='pardon')demo.records[args.tabId]={state:'keep',reason:'已保留本次。'};
-  if(type==='watch')demo.records[args.tabId]={state:'waiting',watching:true,reason:'正在本地监听，完成后提醒。'};
+  if(type==='watchPage'){demo.records[args.tabId]={state:'waiting',watching:true,reason:'正在监听状态变化。'};return {listening:true};}
   if(type==='stopWatch')delete demo.records[args.tabId];
   if(type==='organizationPlan')return organizationPlan(demo.tabs,args.windowId);
   if(type==='organize'){demo.canUndoOrganization=true;return {groups:args.plan.groups.length};}
@@ -49,7 +57,9 @@ function button(label,action,style='secondary',key) {
  b.addEventListener('click',()=>{b.disabled=true;task(()=>action(b)).finally(()=>{if(b.isConnected)b.disabled=false;});});return b;
 }
 const labels={resume:'待接手',waiting:'等待中',keep:'保留',closing:'即将关闭',paused:'已暂停',suggested:'建议清理',uncertain:'待确认'};
-function scopedTabs(){return data.tabs.filter(t=>!t.incognito&&($('#scope').value==='all'||t.windowId===currentWindowId));}
+function scopedTabs(){return data.tabs.filter(t=>!t.incognito);}
+function checkScope(){return $('#scope').value==='all'?null:currentWindowId;}
+function say(node,value){if(node.textContent!==value)node.textContent=value;}
 function tabState(t){return data.records[t.id]?.state||'keep';}
 function matchesFilter(t){const s=tabState(t);return filter==='all'||(filter==='suggested'?['suggested','closing','paused'].includes(s):s===filter);}
 function makeRow(t) {
@@ -66,8 +76,8 @@ function makeRow(t) {
  if(r.state==='resume')actions.append(button('返回接手',async()=>{await rpc('activate',{tabId:t.id});await refresh();},'secondary','resume'));
  if(['closing','paused'].includes(r.state)){
   const ring=document.createElement('span');ring.className='countdown';ring.dataset.deadline=r.closeAt||'';ring.dataset.remaining=r.remainingMs||'';ring.setAttribute('aria-hidden','true');ring.append(document.createElement('span'));actions.append(ring);
-  actions.append(button('保留本次',async()=>{await rpc('pardon',{tabId:t.id});hovered.delete(t.id);focused.delete(t.id);await refresh();status('已取消本次关闭；有新内容且冷却结束后才重新评估。');},'secondary','pardon'));
-  const hint=document.createElement('span');hint.className='hint';hint.textContent=r.state==='paused'?(r.visibilityPaused?'窗口与提醒可见后继续':'移开后继续倒计时'):'仅在窗口与提醒可见时计时';actions.append(hint);
+  actions.append(button('保留',async()=>{await rpc('pardon',{tabId:t.id});hovered.delete(t.id);focused.delete(t.id);await refresh();status('已取消本次关闭；有新内容且冷却结束后才重新评估。');},'secondary','pardon'));
+  const hint=document.createElement('span');hint.className='hint close-note';actions.append(hint);
   const synchronize=async()=>{
    const paused=hovered.has(t.id)||focused.has(t.id);
    if((paused&&data.records[t.id]?.state==='closing')||(!paused&&data.records[t.id]?.state==='paused')){await rpc('pauseClose',{tabId:t.id,paused});await refresh();}
@@ -78,143 +88,469 @@ function makeRow(t) {
   row.addEventListener('focusout',e=>{if(!row.isConnected||row.contains(e.relatedTarget))return;focused.delete(t.id);task(synchronize);});
  }else if(r.state==='suggested'){
   actions.append(button('开始 30 秒关闭提醒',async()=>{await heartbeat();await rpc('armClose',{tabId:t.id});await refresh();status('关闭提醒已开始。看不见提醒时暂停，选择「保留」可取消。');},'danger','arm'));
-  actions.append(button('保留本次',async()=>{await rpc('pardon',{tabId:t.id});await refresh();},'secondary','pardon'));
- }else if(safeURL(t.url))actions.append(button(r.watching?'调整监听':'监听任务',()=>openWatch(t),'secondary','watch'));
+  actions.append(button('保留',async()=>{await rpc('pardon',{tabId:t.id});await refresh();},'secondary','pardon'));
+ }else if(r.state!=='resume'&&safeURL(t.url))actions.append(button(r.watching?'重选状态':'开始监听',()=>openWatch(t),'secondary','watch'));
  const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='页面操作与详情';summary.dataset.action='details';
  const more=document.createElement('div');more.className='row-actions';
  if(safeURL(t.url)){
   const analyzeButton=button(analyzingTabs.has(t.id)?'正在分析…':'分析页面',()=>openAnalysis(t),'secondary','analyze');analyzeButton.disabled=analyzingTabs.has(t.id);more.append(analyzeButton);
-  if(r.state==='suggested'||r.state==='resume')more.append(button(r.watching?'调整监听':'监听任务',()=>openWatch(t),'secondary','watch-more'));
+  if(r.state==='suggested'||r.state==='resume')more.append(button(r.watching?'重选状态':'开始监听',()=>openWatch(t),'secondary','watch-more'));
  }
  if(r.watching)more.append(button('停止监听',async()=>{await rpc('stopWatch',{tabId:t.id});await refresh();status('已停止此页的本地监听。');},'secondary','stop-watch'));
  if(r.autoReview)more.append(button('停止自动复查',async()=>{await rpc('autoReview',{tabId:t.id});await refresh();status('已停止此页的自动复查。');},'secondary','stop-review'));
- if(data.settings.nativeEnabled)more.append(button('显示标签提醒',async()=>{await rpc('nativeShow',{tabId:t.id});status('已请求显示提醒；定位状态可在 macOS 设置中查看。');},'secondary','native'));
+ if(data.settings.nativeEnabled&&['resume','closing','paused'].includes(r.state))more.append(button('显示标签提醒',async()=>{await rpc('nativeShow',{tabId:t.id});status('已请求显示提醒；定位状态可在 macOS 设置中查看。');},'secondary','native'));
  const address=document.createElement('p');address.className='full-url';address.dir='auto';address.textContent=t.url||'地址暂不可用';
  details.append(summary,more,address);row.append(meta,title,reason);if(actions.childNodes.length)row.append(actions);row.append(details);return row;
 }
 function render() {
  const scoped=scopedTabs().filter(tab=>['resume','waiting','suggested','uncertain','closing','paused'].includes(tabState(tab))||analyzingTabs.has(tab.id)),records=scoped.map(t=>data.records[t.id]).filter(Boolean),today=data.ledger?.date===dayKey()?data.ledger:null;
  const resume=records.filter(r=>r.state==='resume').length,waiting=records.filter(r=>r.state==='waiting').length,suggested=records.filter(r=>['suggested','closing','paused'].includes(r.state)).length;
- $('#waiting-count').textContent=resume;$('#watching-count').textContent=waiting;$('#suggested-count').textContent=suggested;
+ for(const [id,count] of [['#waiting-count',resume],['#watching-count',waiting],['#suggested-count',suggested]]){
+  const element=$(id);
+  element.hidden=!count;
+  say(element,String(count));
+ }
  $('#request-count').textContent=String(today?.requests||0);
+ $('#usage-link').hidden=!today?.requests;
  $('#usage-summary').textContent='今日已调用 '+(today?.requests||0)+' 次，累计约 '+new Intl.NumberFormat('zh-CN').format(today?.tokens||0)+' token。';
  $('.filters').hidden=scoped.length===0;
  $('#item-search').hidden=scoped.length<6&&!$('#tab-search').value.trim();
  const query=$('#tab-search').value.trim().toLocaleLowerCase(),tabs=attentionOrder(scoped,data.records).filter(t=>matchesFilter(t)&&((t.title||'')+' '+(t.url||'')).toLocaleLowerCase().includes(query));
+ $('#tab-count').hidden=scoped.length===0;
  $('#tab-count').textContent=query||filter!=='all'?tabs.length+' / '+scoped.length:scoped.length;
- const active=document.activeElement,activeRow=active?.closest('[data-tab-id]'),focusKey=active?.dataset.action,focusId=activeRow?.dataset.tabId;
- const opened=new Set([...$('#tabs').querySelectorAll('article details[open]')].map(n=>n.closest('article').dataset.tabId));
- $('#tabs').replaceChildren();
- if(!tabs.length){
-  const empty=document.createElement('div');empty.className='empty';const h=document.createElement('h2'),p=document.createElement('p');
-  h.textContent=query?'没有找到“'+$('#tab-search').value.trim()+'”':filter==='all'?'暂无需要处理的事项':filter==='resume'?'暂时没有待接手事项':filter==='waiting'?'暂时没有等待中的任务':'暂时没有清理建议';
-  p.textContent=query?'换个关键词，或清除筛选条件。':filter==='all'?'在网页或标签上点右键，选择「开始监听」。':'可切回全部事项查看其他进展。';
-  empty.append(h,p);
-  if(query||filter!=='all')empty.append(button('显示全部事项',()=>{filter='all';$('#tab-search').value='';updateFilters();render();}));
-  $('#tabs').append(empty);
+ const container=$('#tabs');
+ const shown=new Set(tabs.map(tab=>tab.id));
+ for(const [id,entry] of renderedRows){
+  if(shown.has(id))continue;
+  hovered.delete(id);
+  focused.delete(id);
+  entry.node.remove();
+  renderedRows.delete(id);
  }
- for(const tab of tabs){const row=makeRow(tab);if(opened.has(String(tab.id)))row.querySelector('details').open=true;$('#tabs').append(row);}
- if(focusId&&focusKey)$('#tabs').querySelector('[data-tab-id="'+focusId+'"] [data-action="'+focusKey+'"]')?.focus({preventScroll:true});
+ if(!tabs.length){
+  const title=query?'未找到匹配的事项':filter==='all'?'暂无待处理事项':
+   filter==='resume'?'暂无待接手事项':filter==='waiting'?'暂无等待中的任务':'暂无清理建议';
+  if(container.firstElementChild?.dataset.empty!==title){
+   const empty=document.createElement('div');empty.className='empty';empty.dataset.empty=title;
+   const h=document.createElement('h2');h.textContent=title;empty.append(h);
+   if(!query&&filter==='all'){
+    const p=document.createElement('p');
+    p.textContent='在网页上右键选择「开始监听」。有进展时，会提醒你回来。';
+    empty.append(p);
+   }else empty.append(button('查看全部事项',()=>{filter='all';$('#tab-search').value='';updateFilters();render();},'text-button'));
+   container.replaceChildren(empty);
+  }
+ }else{
+  container.querySelector('.empty')?.remove();
+  for(const [index,tab] of tabs.entries()){
+   const record=data.records[tab.id],closing=['closing','paused'].includes(record?.state);
+   const key=JSON.stringify([tab.title,tab.url,tab.active,closing?'close':record?.state,
+    closing?'':record?.reason,record?.watching,record?.autoReview,record?.apiIssue,
+    data.settings.nativeEnabled,data.duplicates?.[tab.id]?.extra,analyzingTabs.has(tab.id)]);
+   let entry=renderedRows.get(tab.id);
+   if(entry?.key!==key){
+    const node=makeRow(tab),old=entry?.node;
+    if(old){
+     const active=old.contains(document.activeElement)?document.activeElement.dataset.action:null;
+     node.querySelector('details').open=old.querySelector('details').open;
+     old.replaceWith(node);
+     if(active)node.querySelector('[data-action="'+active+'"]')?.focus({preventScroll:true});
+    }
+    entry={key,node};renderedRows.set(tab.id,entry);
+   }
+   const {node}=entry;
+   if(container.children[index]!==node)container.insertBefore(node,container.children[index]||null);
+   if(closing){
+    node.dataset.state=record.state;
+    say(node.querySelector('.badge'),labels[record.state]);
+    say(node.querySelector('.reason'),record.reason||'');
+    say(node.querySelector('.close-note'),record.state==='paused'?
+     (record.visibilityPaused?'提醒可见后继续':'移开后继续计时'):'提醒可见时计时');
+    const ring=node.querySelector('.countdown');
+    ring.dataset.deadline=record.closeAt||'';
+    ring.dataset.remaining=record.remainingMs||'';
+   }
+  }
+ }
  $('#undo-organization').hidden=!data.canUndoOrganization;
- $('#recovery').hidden=!data.recentClosed?.length;$('#recent-closed').replaceChildren();
- for(const entry of data.recentClosed||[])$('#recent-closed').append(button('重新打开：'+entry.title,async()=>{await rpc('reopen',{id:entry.id});await refresh();status('已在后台重新打开网址。');}));
+ const recent=data.recentClosed||[],signature=recent.map(entry=>entry.id).join('|');
+ $('#recovery').hidden=!recent.length;
+ if(signature!==recentSignature){
+  recentSignature=signature;
+  $('#recent-closed').replaceChildren(...recent.map(entry=>button('重新打开 '+entry.title,async()=>{
+   await rpc('reopen',{id:entry.id});await refresh();status('已在后台重新打开。');
+  })));
+ }
  renderBacklog();updateCountdown();
 }
 function renderBacklog(){
- const q=data.analysisQueue||{phase:'idle'},active=q.phase==='running';
- $('#backlog-status').hidden=q.phase==='idle';$('#backlog-open').disabled=active;
+ const q=data.analysisQueue||{phase:'idle'},running=q.phase==='running',waiting=q.phase==='waiting';
+ $('#backlog-status').hidden=q.phase==='idle';
  if(q.phase==='idle')return;
- $('#backlog-title').textContent=active?'正在逐页分析':q.phase==='complete'?'本轮分析完成':q.blockedBy==='credentials'?'等待恢复模型连接':q.phase==='blocked'?'分析已暂停':'已暂停分析';
- $('#backlog-count').textContent=(q.completed||0)+' / '+(q.total||0);
- $('#backlog-progress').max=Math.max(1,q.total||0);$('#backlog-progress').value=q.completed||0;
- $('#backlog-current').textContent=active&&q.currentTitle?'正在分析：'+q.currentTitle:'';
- $('#backlog-note').textContent=(q.reason?q.reason+' ':'')+'已分析 '+(q.analyzed||0)+' · 复用 '+(q.cached||0)+' · 略过 '+(q.skipped||0)+(q.failed?' · 未完成 '+q.failed:'');
- $('#backlog-pause').hidden=!active;$('#backlog-resume').hidden=!['paused','blocked'].includes(q.phase)||q.blockedBy==='credentials';$('#backlog-connect').hidden=q.blockedBy!=='credentials';
+ say($('#backlog-title'),running?'正在分析网页':waiting?'等待网页载入':q.phase==='complete'?'网页检查完成':q.blockedBy==='credentials'?'恢复模型连接后继续':'分析已暂停');
+ say($('#backlog-count'),(q.completed||0)+' / '+(q.total||0));
+ $('#backlog-progress').max=Math.max(1,q.total||0);
+ $('#backlog-progress').value=q.completed||0;
+ say($('#backlog-current'),running&&q.currentTitle?q.currentTitle:'');
+ const results=[q.analyzed&&'已分析 '+q.analyzed,q.cached&&'复用 '+q.cached,q.waiting&&'等候 '+q.waiting,
+  q.skipped&&'未发送 '+q.skipped,q.failed&&'未完成 '+q.failed].filter(Boolean);
+ say($('#backlog-note'),[q.reason,results.join(' · ')].filter(Boolean).join(' '));
+ $('#backlog-pause').hidden=!(running||waiting);
+ $('#backlog-resume').hidden=!['paused','blocked'].includes(q.phase)||q.blockedBy==='credentials';
+ $('#backlog-connect').hidden=q.blockedBy!=='credentials';
+ $('#backlog-dismiss').hidden=q.phase!=='complete'||Boolean(q.currentTitle);
+ $('#backlog-stop').hidden=!['waiting','paused','blocked'].includes(q.phase);
+ $('#backlog-results').hidden=!scopedTabs().some(tab=>['suggested','closing','paused'].includes(tabState(tab)));
  $('#backlog-resume').textContent=q.blockedBy==='configuration'?'重新选择网站':'继续分析';
 }
-async function openBacklog(){
- if(!data.keyPresent&&!preview){preferences='connection';openView('settings');status('先恢复模型连接，再开始自动分析，无需逐页导入或设置。');return;}
- backlogPreview=await rpc('backlogPlan',{windowId:$('#scope').value==='all'?null:currentWindowId});
- $('#backlog-sites').replaceChildren();$('#backlog-auto-review').checked=false;$('#backlog-error').textContent='';$('#backlog-endpoint').textContent=backlogPreview.endpointOrigin;
- $('#backlog-plan-summary').textContent='将依次分析 '+backlogPreview.count+' 个页面。另有 '+backlogPreview.excluded+' 个正在使用、最近操作、固定、播放、休眠或不支持的页面保持原样。';
- for(const site of backlogPreview.sites){
-  const label=document.createElement('label');label.className='check';const input=document.createElement('input');input.type='checkbox';input.checked=true;input.value=site.origin;input.dataset.count=site.count;input.addEventListener('change',updateBacklogSelection);
-  const host=document.createElement('bdi');host.textContent=new URL(site.origin).host;const count=document.createElement('span');count.textContent=site.count+' 页';label.append(input,host,count);$('#backlog-sites').append(label);
+function renderWatchList(){
+ const term=$('#watch-search').value.trim().toLocaleLowerCase(),scope=checkScope();
+ const tabs=scopedTabs().filter(tab=>trackableTab(tab)&&(scope===null||tab.windowId===scope)&&
+  ((tab.title||'')+' '+tab.url).toLocaleLowerCase().includes(term));
+ const list=$('#watch-list'),items=document.createDocumentFragment();
+ for(const tab of tabs){
+  const item=document.createElement('li'),waiting=backlogWaiting(tab),watching=data.records[tab.id]?.watching;
+  const itemButton=button(tab.title||'无标题网页',async()=>{
+   try{
+    if(waiting){await rpc('activate',{tabId:tab.id});$('#backlog-dialog').close();return;}
+    await openWatch(tab,{pick:watching});
+    $('#backlog-dialog').close();
+   }catch(error){$('#backlog-error').textContent=error.message;}
+  },'watch-tab');
+  const site=document.createElement('bdi');
+  site.textContent=[new URL(tab.url).hostname,waiting?'打开网页':watching?'重选状态':''].filter(Boolean).join(' · ');
+  itemButton.append(site);item.append(itemButton);items.append(item);
  }
- updateBacklogSelection();$('#backlog-dialog').showModal();
+ list.replaceChildren(items);
+ $('#watch-list-empty').hidden=tabs.length>0;
+}
+function showCheckView(next){
+ backlogView=next;
+ const picking=next==='watch';
+ $('#backlog-options').hidden=picking;
+ $('#watch-selection').hidden=!picking;
+ say($('#backlog-dialog-title'),picking?'选择要监听的网页':'检查打开的网页');
+ $('#backlog-error').textContent='';
+ if(picking){$('#watch-search').value='';renderWatchList();$('#watch-search').focus();}
+ else $('#backlog-dialog-title').focus({preventScroll:true});
+}
+async function readBacklogPlan(){
+ const request=++backlogVersion;
+ backlogPreview=null;
+ $('#backlog-sites').replaceChildren();
+ $('#backlog-start').disabled=true;
+ say($('#backlog-plan-summary'),'正在检查网页…');
+ const plan=await rpc('backlogPlan',{windowId:checkScope()});
+ if(request!==backlogVersion)return;
+ backlogPreview=plan;
+ $('#backlog-sites').replaceChildren();
+ $('#backlog-endpoint').textContent=plan.endpointOrigin;
+ for(const site of plan.sites){
+  const label=document.createElement('label');label.className='check';
+  const input=document.createElement('input');input.type='checkbox';input.checked=true;input.value=site.origin;
+  input.dataset.count=site.count;input.dataset.waiting=site.waiting||0;
+  input.addEventListener('change',updateBacklogSelection);
+  const host=document.createElement('bdi');host.textContent=new URL(site.origin).host;
+  const count=document.createElement('span');count.textContent=site.count+' 页';
+  label.append(input,host,count);$('#backlog-sites').append(label);
+ }
+ updateBacklogSelection();
+}
+async function openBacklog(){
+ const dialog=$('#backlog-dialog');
+ if(!dialog.open){$('#backlog-auto-review').checked=false;dialog.showModal();}
+ showCheckView('check');
+ await readBacklogPlan();
 }
 function updateBacklogSelection(){
- const count=[...$('#backlog-sites').querySelectorAll('input:checked')].reduce((sum,input)=>sum+Number(input.dataset.count),0);
- $('#backlog-plan-summary').textContent='将依次分析 '+count+' 个页面；另有 '+backlogPreview.excluded+' 个受保护或不支持的页面不参与。';$('#backlog-start').disabled=count===0;
+ if(!backlogPreview||startingBacklog){$('#backlog-start').disabled=true;return;}
+ const chosen=[...$('#backlog-sites').querySelectorAll('input:checked')];
+ const count=chosen.reduce((sum,input)=>sum+Number(input.dataset.count),0);
+ const sleeping=chosen.reduce((sum,input)=>sum+Number(input.dataset.waiting),0);
+ const details=[
+  count-sleeping+' 页可分析',sleeping&&sleeping+' 页载入后分析',
+  backlogPreview.local&&backlogPreview.local+' 页仅本机监听',
+  backlogPreview.unavailable&&backlogPreview.unavailable+' 页受 Chrome 限制'
+ ].filter(Boolean);
+ say($('#backlog-plan-summary'),details.join(' · '));
+ const connected=data.keyPresent||preview;
+ $('#backlog-setup-connection').hidden=connected||!backlogPreview.count;
+ $('#backlog-ready').hidden=!connected||!backlogPreview.count;
+ const queue=data.analysisQueue;
+ const running=queue?.blockedBy!=='configuration'&&['running','waiting','paused','blocked'].includes(queue?.phase);
+ $('#backlog-start').disabled=!count||running;
+ $('#backlog-start').textContent=running?'先完成当前一轮':count?'分析 '+count+' 个网页':'开始分析';
 }
 $('#backlog-open').addEventListener('click',()=>task(openBacklog));
+$('#scope').addEventListener('change',()=>task(async()=>{
+ if(backlogView==='watch')renderWatchList();
+ await readBacklogPlan();
+}));
+$('#watch-picker-open').addEventListener('click',()=>showCheckView('watch'));
+$('#watch-search').addEventListener('input',renderWatchList);
+$('#watch-back').addEventListener('click',()=>showCheckView('check'));
+$('#backlog-setup-connection').addEventListener('click',()=>{$('#backlog-dialog').close();preferences='connection';openView('settings');});
 $('#backlog-pause').addEventListener('click',()=>task(async()=>{await rpc('backlogPause');await refresh();}));
+$('#backlog-stop').addEventListener('click',()=>task(async()=>{await rpc('backlogStop');await refresh();}));
+$('#backlog-dialog').addEventListener('close',()=>{++backlogVersion;backlogPreview=null;});
+$('#backlog-dismiss').addEventListener('click',()=>task(async()=>{await rpc('backlogDismiss');await refresh();}));
 $('#backlog-resume').addEventListener('click',()=>task(async()=>{if(data.analysisQueue?.blockedBy==='configuration')return openBacklog();await rpc('backlogResume');await refresh();}));
 $('#backlog-connect').addEventListener('click',()=>{preferences='connection';openView('settings');});
 $('#backlog-results').addEventListener('click',()=>{filter='suggested';updateFilters();render();$('#tabs').scrollIntoView({block:'start'});});
 $('#backlog-start').addEventListener('click',()=>task(async()=>{
- const b=$('#backlog-start'),origins=[...$('#backlog-sites').querySelectorAll('input:checked')].map(input=>input.value);$('#backlog-error').textContent='';
- if(!origins.length){$('#backlog-error').textContent='选择至少一个网站后开始。';return;}
- b.disabled=true;
+ if(startingBacklog||!backlogPreview)return;
+ const start=$('#backlog-start'),version=backlogVersion;
+ const origins=[...$('#backlog-sites').querySelectorAll('input:checked')].map(input=>input.value);
+ const consent={planId:backlogPreview.id,origins,consent:true,autoReview:$('#backlog-auto-review').checked};
+ const controls=[...document.querySelectorAll('#scope,#backlog-sites input,#backlog-auto-review,#watch-picker-open')];
+ startingBacklog=true;
+ controls.forEach(control=>control.disabled=true);
+ $('#backlog-error').textContent='';
+ start.disabled=true;start.textContent='正在开始…';
  try{
-  // 网站授权直接由这次点击发起，避免异步操作丢失 Chrome 的用户手势。
-  if(!preview&&!await chrome.permissions.request({origins:origins.map(origin=>origin+'/*')}))throw Error('未获得网站读取授权，尚未发送任何页面。');
-  await rpc('backlogStart',{planId:backlogPreview.id,origins,consent:true,autoReview:$('#backlog-auto-review').checked});$('#backlog-dialog').close();await refresh();status('已开始逐页分析。可随时暂停，页面不会自动关闭。');
- }catch(error){$('#backlog-error').textContent=error.message;}finally{b.disabled=false;}
+  if(!preview&&!await chrome.permissions.request({origins:origins.map(origin=>origin+'/*')}))throw Error('未允许读取所选网站。');
+  if(!$('#backlog-dialog').open||version!==backlogVersion)return;
+  await rpc('backlogStart',consent);
+  $('#backlog-dialog').close();await refresh();
+ }catch(error){$('#backlog-error').textContent=error.message;}
+ finally{
+  startingBacklog=false;
+  controls.forEach(control=>control.disabled=false);
+  updateBacklogSelection();
+ }
 }));
 function updateFilters(){document.querySelectorAll('[data-filter]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.filter===filter)));}
-async function refresh(){data=await rpc('state');render();if(data.keyPresent&&data.credentialStatus?.phase==='ready'&&credentialNotice!==data.credentialStatus.reason){credentialNotice=data.credentialStatus.reason;status(credentialNotice);}$('#native-status').textContent=data.nativeStatus?.reason||data.nativeStatus?.status||'尚未连接。';$('#switcher-status').textContent=data.switcherStatus?.reason||'尚未启用。';$('#native-enabled').checked=data.settings.nativeEnabled;if(view==='settings')updateCredentialUI();if(!switcherDirty)$('#switcher-enabled').checked=data.settings.switcherEnabled;}
+function paintHelperSetup() {
+ const install=helperNeedsInstall(),authorization=helperStatus==='accessibility_required';
+ const unavailable=['disconnected','unavailable'].includes(helperStatus);
+ $('#helper-discovery').hidden=!(install||authorization);
+ $('#helper-discovery-link').textContent=install?'安装 Mac 助手':'完成 Mac 助手设置';
+ $('#helper-setup').hidden=helperStatus==='ready'||helperStatus==='unknown';
+ $('#helper-title').textContent=install?'安装 Mac 助手':
+  authorization?'需要辅助功能权限':helperStatus==='unsupported'?'此设备不支持 Mac 功能':'连接 Mac 助手';
+ $('#helper-instructions').textContent=install?
+  '把助手拖到「应用程序」，打开后按提示完成设置。':
+  authorization?'打开 Tab Cadence Bridge，在系统设置中允许辅助功能访问。':
+  unavailable?'打开已安装的 Tab Cadence Bridge，按提示完成连接。':'';
+ $('#helper-download').hidden=!install;
+ $('#helper-release').hidden=!install;
+ $('#helper-check').hidden=!unavailable;
+ $('#helper-check').disabled=helperChecking;
+ $('#helper-check').textContent=helperChecking?'正在连接…':'重新连接';
+ $('#helper-connected').hidden=helperStatus!=='ready';
+ const [major,minor]=helperVersion.split('.').map(Number);
+ $('#helper-update').hidden=helperStatus!=='ready'||major!==0||!Number.isInteger(minor)||minor>=6;
+ $('#native-controls').hidden=helperStatus!=='ready';
+ $('#hide-native').hidden=helperStatus!=='ready'||!data?.settings.nativeEnabled;
+ $('#keychain-option').hidden=selectedStorage()!=='keychain'&&!data?.keychainAvailable;
+ $('#keychain-helper').hidden=selectedStorage()!=='keychain'||helperStatus==='ready';
+}
+async function checkHelper(refresh=false) {
+ if(helperChecking)return;
+ helperChecking=true;paintHelperSetup();
+ try{
+  const state=await rpc('nativeCheck',{refresh});
+  helperStatus=state.status;helperVersion=state.version||'';
+ }catch{helperStatus='unavailable';helperVersion='';}
+ finally{helperChecking=false;paintHelperSetup();}
+}
+function openHelperSettings() {
+ preferences='native';openView('settings');if(!$('#helper-setup').hidden)$('#helper-title').focus({preventScroll:true});
+}
+for(const id of ['#helper-discovery-link','#keychain-helper'])$(id).addEventListener('click',openHelperSettings);
+$('#helper-check').addEventListener('click',()=>void checkHelper(true));
+
+async function refresh(){
+ const previous = data;
+ data = await rpc('state');
+ render();
+ say($('#native-status'),data.settings.nativeEnabled?(data.nativeStatus?.reason||'已开启，事项有进展时会提醒。'):'');
+ say($('#switcher-status'),data.settings.switcherEnabled?(data.switcherStatus?.reason||'已开启。'):'');
+ $('#native-enabled').checked=data.settings.nativeEnabled;
+ if(view==='settings'){
+  if(previous?.settings.credentialRevision!==data.settings.credentialRevision && !connectionDirty) fillSettings();
+  updateCredentialUI();
+ }
+ if(!switcherDirty)$('#switcher-enabled').checked=data.settings.switcherEnabled;
+ if($('#backlog-dialog').open)updateBacklogSelection();
+ paintHelperSetup();
+}
 async function prepare(tab){
  if(preview)return;
  if(!safeURL(tab.url)||tab.incognito)throw Error('选择非隐身的普通网页后重试。');
  if(!await chrome.permissions.request({origins:[new URL(tab.url).origin+'/*']}))throw Error('尚未授权读取页面；再次选择监听或分析以授权。');
  await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js']});
 }
-async function openWatch(tab){
- await prepare(tab);targetId=tab.id;
- $('#adapter-page').textContent=tab.title;$('#adapter-error').textContent='';
- const url=new URL(tab.url),adapter=data.adapters?.find(a=>a.scope===url.origin+url.pathname);
- $('#waiting-text').value=adapter?.waiting||'';$('#done-text').value=adapter?.done||'';
- $('#adapter-dialog').showModal();
+async function openWatch(tab,{pick=data.records[tab.id]?.watching===true}={}){
+ if(!trackableTab(tab)||backlogWaiting(tab))throw Error('请在网页载入后开始监听。');
+ if(!preview&&!await chrome.permissions.request({origins:[new URL(tab.url).origin+'/*']}))throw Error('未允许读取此网站。');
+ const result=await rpc('watchPage',{tabId:tab.id,url:tab.url,pick});
+ await refresh();
+ if(result.listening)status('已开始监听「'+(tab.title||'这张网页')+'」。');
 }
 async function openAnalysis(tab){
- await prepare(tab);targetId=tab.id;targetEvidence=await rpc('snapshot',{tabId:tab.id});
+ await prepare(tab);
+ const {provider,endpoint,model}=data.settings;
+ targetConnection=JSON.stringify([provider,endpoint,model]);
+ say($('#analysis-endpoint'),new URL(endpoint).host);
+ targetId=tab.id;targetEvidence=await rpc('snapshot',{tabId:tab.id});
  const e=targetEvidence;$('#evidence').textContent=e.title+'\n'+e.url+'\n\n'+(e.excerpt||'未提取正文。')+'\n\n页面信号：'+(e.signals.editable?'有编辑控件；':'')+(e.signals.dirty?'有未提交输入；':'')+(e.signals.media?'有媒体播放；':'')+(e.signals.observed==='done'?'匹配完成文案':e.signals.observed==='waiting'?'匹配等待文案':'未匹配任务状态');
  $('#auto-review-label').hidden=privateURL(tab.url);$('#auto-review').checked=data.records[tab.id]?.autoReview===true&&!privateURL(tab.url);$('#auto-review-hint').textContent=privateURL(tab.url)?'本地和内网页面仅支持手动分析。':'启用后，此页闲置至少 10 分钟才复查，可随时停止。';
  $('#analyze-dialog').returnValue='';$('#analyze-dialog').showModal();
 }
+function settleView(element){
+ viewMotion?.cancel();
+ if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+ viewMotion=element.animate([{opacity:.72},{opacity:1}],{duration:165,easing:'cubic-bezier(.2,.8,.2,1)'});
+}
 function openView(next){
- view=next;$('#workspace').hidden=next!=='workspace';$('#settings').hidden=next!=='settings';$('#settings-toggle').setAttribute('aria-label',next==='settings'?'返回管理':'打开设置');$('#settings-toggle').title=next==='settings'?'返回管理':'打开设置';
- document.title=next==='settings'?'Tab Cadence · 设置':'Tab Cadence · 管理';if(next==='settings'){fillSettings();openPreferences(preferences);}$('#main').focus({preventScroll:true});window.scrollTo(0,0);
+ if(view===next){if(next==='settings')openPreferences(preferences);return;}
+ if(view==='workspace')workspaceScroll=window.scrollY;
+ view=next;
+ const isSettings=next==='settings',surface=isSettings?$('#settings'):$('#workspace');
+ $('#workspace').hidden=isSettings;$('#settings').hidden=!isSettings;$('#settings-toggle').hidden=isSettings;
+ document.title=isSettings?'Tab Cadence · 设置':'Tab Cadence · 管理';
+ if(isSettings){fillSettings();openPreferences(preferences,{motion:false});}
+ (isSettings?$('#settings-title'):$('#settings-toggle')).focus({preventScroll:true});
+ window.scrollTo(0,isSettings?0:workspaceScroll);
+ settleView(surface);
 }
-function openPreferences(next){
- preferences=next;document.querySelectorAll('[data-preferences]').forEach(n=>n.setAttribute('aria-pressed',String(n.dataset.preferences===next)));
+function openPreferences(next,{motion=true}={}){
+ const changed=preferences!==next;
+ preferences=next;
+ document.querySelectorAll('[data-preferences]').forEach(n=>n.setAttribute('aria-pressed',String(n.dataset.preferences===next)));
  document.querySelectorAll('[data-settings-section]').forEach(n=>n.hidden=n.dataset.settingsSection!==next);
- $('#settings-form').hidden=next==='native'||next==='chat';updateSaveLabel();
+ const form=$('#settings-form');
+ form.hidden=next==='native'||next==='chat';
+ updateSaveLabel();
+ if(next==='connection')updateCredentialUI();
  if(next==='chat')void refreshChatSettings();
+ if(next==='native')void checkHelper(true);
+ if(motion&&changed)settleView(form.hidden?document.querySelector('[data-settings-section='+next+']'):form);
 }
-const fields={provider:'provider',endpoint:'endpoint',model:'model',cooldownSeconds:'cooldown',inputPrice:'input-price',outputPrice:'output-price'};
-function fillSettings(){switcherDirty=false;
- for(const[k,id]of Object.entries(fields))$('#'+id).value=data.settings[k];
- $('#native-enabled').checked=data.settings.nativeEnabled;$('#switcher-enabled').checked=data.settings.switcherEnabled;$('#auto-analyze').checked=data.settings.autoAnalyze;
- $('#remember-key').checked=data.settings.rememberKey===true;updateCredentialUI();updateSaveLabel();
- $('#key-file').disabled=preview;syncProvider();
+const usageFields={cooldownSeconds:'cooldown',inputPrice:'input-price',outputPrice:'output-price'};
+const checked=name=>$('input[name='+name+']:checked').value;
+const selectedStorage=()=>checked('credentialStorage');
+const service=()=>checked('apiService');
+const selectedProvider=()=>checked(service()==='openai'?'provider':'compatibleProtocol');
+const checkOption=(name,value)=>{ $("input[name="+name+"][value="+value+"]").checked=true; };
+let connectionDirty=false,activeProvider='decisions',activeService='openai',savingConnection=false,unlockingSync=false;
+const providerDrafts=new Map();
+const draftKey=(kind,provider)=>kind+'|'+provider;
+function originOf(value){
+ try{return credentialOrigin(value);}
+ catch{return '';}
 }
-function updateSaveLabel(){$('#save-settings').textContent=preferences==='connection'?($('#remember-key').checked?'保存到钥匙串并连接':'保存并授权连接'):'保存调用设置';}
+function currentEndpoint(){
+ return activeService==='openai'?DEFAULTS.endpoint:$('#endpoint').value.trim();
+}
+function savedForDraft(){
+ return data?.keyPresent&&originOf(currentEndpoint())===originOf(data.settings.endpoint);
+}
+function clearKeyDraft(){importedKey='';$('#api-key').value='';}
+function fillSettings(){
+ switcherDirty=false;
+ connectionDirty=false;
+ for(const [key,id] of Object.entries(usageFields))$('#'+id).value=data.settings[key];
+ $('#native-enabled').checked=data.settings.nativeEnabled;
+ $('#switcher-enabled').checked=data.settings.switcherEnabled;
+ $('#auto-analyze').checked=data.settings.autoAnalyze;
+ activeProvider=data.settings.provider;
+ activeService=activeProvider==='chat'||originOf(data.settings.endpoint)!==originOf(DEFAULTS.endpoint)?'compatible':'openai';
+ checkOption('apiService',activeService);
+ checkOption(activeService==='openai'?'provider':'compatibleProtocol',activeProvider);
+ providerDrafts.clear();
+ for(const [slot,fields] of Object.entries(data.connectionProfiles||{}))providerDrafts.set(slot,fields);
+ providerDrafts.set(draftKey(activeService,activeProvider),{endpoint:data.settings.endpoint,model:data.settings.model});
+ const mode=credentialStorage(data.settings);
+ checkOption('credentialStorage',mode==='session'&&!data.settings.credentialStorage?'profile':mode);
+ $('#key-file').disabled=preview;
+ showProviderFields();
+ updateSaveLabel();
+ updateCredentialUI();
+}
+function updateSaveLabel(){
+ const mode=selectedStorage(),hints={
+  profile:'重启 Chrome 后自动恢复。',
+  sync:'由 Chrome 同步。新设备首次使用时验证通行密钥。',
+  keychain:'保存在 macOS 钥匙串。',
+  session:'仅在当前 Chrome 会话可用。',
+ };
+ say($('#credential-storage-hint'),hints[mode]);
+ if(data)paintHelperSetup();
+ if(!savingConnection)$('#save-settings').textContent=preferences==='connection'?'保存连接':'保存调用设置';
+}
 function updateCredentialUI(){
- const phase=data.credentialStatus?.phase||'',remembered=data.settings.rememberKey===true;
- $('#restore-key').hidden=!remembered||data.keyPresent;$('#restore-key').textContent=phase==='restoring'?'正在恢复…':'解锁并恢复连接';$('#restore-key').disabled=phase==='restoring';$('#connection-recovery').hidden=$('#restore-key').hidden;
- $('#key-state').dataset.phase=phase;
- if(importedKey||$('#api-key').value.trim())return;
- $('#api-key').placeholder=data.keyPresent?'已配置，留空保留':remembered&&['unlock_required','unavailable','restoring'].includes(phase)?'先恢复已保存连接，无需重新填写':'sk-…';
- $('#key-state').textContent=data.keyPresent?(data.credentialSaved?'已保存到 macOS 钥匙串，重载和重启后自动恢复。':remembered?'当前会话可用。点击保存，确认长期保存在这台 Mac。':'当前会话已配置密钥，留空保存会保留。'):(data.credentialStatus?.reason||(remembered?'正在恢复已保存连接…':'尚未配置密钥。首次配置可填写或从本机文件填入。'));
+ if(preferences!=='connection'||!data)return;
+ const phase=data.credentialStatus?.phase,mode=credentialStorage(data.settings),remote=data.syncConnection;
+ const showingSaved=savedForDraft();
+ const remoteMatches=remote&&originOf(remote.settings.endpoint)===originOf(currentEndpoint());
+ const showRecovery=remote&&(remoteMatches||!data.settings.credentialRevision)&&
+  (!showingSaved||mode==='sync'&&remote.id!==data.settings.credentialRevision);
+ $('#sync-recovery').hidden=!showRecovery;
+ $('#sync-unlock').hidden=Boolean(remote?.passkey);
+ $('#unlock-sync').disabled=unlockingSync;
+ if(!unlockingSync)$('#unlock-sync').textContent=remote?.passkey?'验证并恢复':'解锁此设备';
+ say($('#sync-origin'),showRecovery?
+  new URL(remote.settings.endpoint).host+' · '+(remote.passkey?'验证这台设备即可恢复。':'请输入原来的同步口令。'):'');
+ $('#sync-setup').hidden=selectedStorage()!=='sync'||!showingSaved||mode!=='sync'||!remoteMatches||Boolean(remote?.passkey);
+ $('#sync-upgrade').disabled=savingConnection;
+ const restore=$('#restore-key');
+ restore.hidden=mode!=='keychain'||showingSaved||phase==='missing'||originOf(currentEndpoint())!==originOf(data.settings.endpoint);
+ restore.disabled=phase==='restoring';
+ restore.textContent=phase==='restoring'?'正在恢复…':'解锁钥匙串';
+ $('#connection-recovery').hidden=restore.hidden;
+ $('#api-key').placeholder=showingSaved?'已保存 · 可替换':'粘贴 API Key';
+ if(!importedKey)say($('#key-state'),showingSaved
+  ? {profile:'已保存在当前 Chrome 配置。',sync:'已连接 · Chrome 同步',keychain:'已保存至钥匙串。',session:'此会话已连接。'}[mode]
+  : !showRecovery&&originOf(currentEndpoint())===originOf(data.settings.endpoint)&&['unavailable','unlock_required'].includes(phase)
+   ? data.credentialStatus.reason : '');
+ $('#key-state').dataset.phase=phase||'';
+ $('#forget-key').hidden=originOf(currentEndpoint())!==originOf(data.settings.endpoint)||
+  !data.keyPresent&&(!data.settings.rememberKey||phase==='missing');
+ $('#forget-key').textContent=mode==='sync'?'从同步中移除':'移除密钥';
+ const sameSettings=selectedProvider()===data.settings.provider&&
+  currentEndpoint()===data.settings.endpoint&&$('#model').value.trim()===data.settings.model;
+ const receipt=$('#api-receipt'),check=showingSaved&&sameSettings?data.connectionCheck:null;
+ say(receipt,check?.pending?'正在验证连接…':check?.ok?'连接验证通过':check?.reason||'');
+ receipt.classList.toggle('error',Boolean(check?.reason));
 }
-$('#remember-key').addEventListener('change',updateSaveLabel);
-$('#restore-key').addEventListener('click',()=>task(async()=>{const b=$('#restore-key');b.disabled=true;try{importedKey='';$('#api-key').value='';await rpc('restoreKey');await refresh();updateCredentialUI();status('已恢复保存的连接。');}finally{b.disabled=false;}}));
-function syncProvider(){
- const decision=$('#provider').value==='decisions';$('#model').readOnly=decision;$('#endpoint').readOnly=decision;
- if(decision){$('#model').value='gpt-6-luna';$('#endpoint').value='https://api.openai.com/v1';}
- $('#model-hint').textContent=decision?'Decisions 使用 gpt-6-luna。':'填写服务商支持的模型名称。';
+for(const option of document.querySelectorAll('input[name=credentialStorage]')){
+ option.addEventListener('change',()=>{connectionDirty=true;updateSaveLabel();updateCredentialUI();});
+}
+$('#restore-key').addEventListener('click',()=>task(async()=>{await rpc('restoreKey');await refresh();}));
+function showProviderFields(){
+ const official=activeService==='openai',decision=activeProvider==='decisions';
+ const draft=providerDrafts.get(draftKey(activeService,activeProvider));
+ $('#openai-protocols').hidden=!official;
+ $('#compatible-protocols').hidden=official;
+ $('#credential-label').textContent=official?'OpenAI API Key':'服务 API Key';
+ $('#provider-fields').hidden=decision;
+ $('#endpoint-field').hidden=official;
+ $('#endpoint').disabled=official;
+ $('#model').disabled=decision;
+ $('#endpoint').value=official?DEFAULTS.endpoint:draft?.endpoint||'';
+ $('#model').value=decision?DEFAULTS.model:draft?.model||(official?DEFAULTS.model:'');
+}
+for(const option of document.querySelectorAll('input[name=apiService],input[name=provider],input[name=compatibleProtocol]')){
+ option.addEventListener('change',()=>{
+  const previousOrigin=originOf(currentEndpoint());
+  providerDrafts.set(draftKey(activeService,activeProvider),{endpoint:currentEndpoint(),model:$('#model').value});
+  const serviceChanged=activeService!==service();
+  activeService=service();
+  activeProvider=selectedProvider();
+  connectionDirty=true;
+  showProviderFields();
+  if(serviceChanged||previousOrigin!==originOf(currentEndpoint()))clearKeyDraft();
+  $('#settings-error').textContent='';
+  updateCredentialUI();
+ });
+}
+async function authorizeEndpoint(endpoint){
+ if(preview)return;
+ const url=new URL(endpoint);
+ if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash)throw Error('请填写完整的 HTTPS API 地址。');
+ if(!await chrome.permissions.request({origins:[url.origin+'/*']}))throw Error('请授权此 API 地址。');
 }
 const undo=button('撤销整理',async()=>{await rpc('undoOrganization');await refresh();status('已撤销本次分组整理。');});undo.id='undo-organization';undo.hidden=true;$('.workspace-toolbar').append(undo);
 $('#settings-toggle').addEventListener('click',()=>openView(view==='settings'?'workspace':'settings'));
@@ -222,63 +558,106 @@ $('#back').addEventListener('click',()=>openView('workspace'));
 $('#usage-link').addEventListener('click',()=>{preferences='usage';openView('settings');});
 document.querySelectorAll('[data-preferences]').forEach(b=>b.addEventListener('click',()=>openPreferences(b.dataset.preferences)));
 document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{filter=b.dataset.filter;updateFilters();render();}));
-$('#scope').addEventListener('change',render);$('#tab-search').addEventListener('input',render);
-$('#refresh').addEventListener('click',()=>task(async()=>{await refresh();status('标签列表已更新。');}));
-$('#provider').addEventListener('change',()=>{syncProvider();$('#input-price').value=0;$('#output-price').value=0;});
-$('#settings-form').addEventListener('submit',e=>{
- e.preventDefault();task(async()=>{
-  const scope=preferences==='usage'?'usage':'connection',settings={...data.settings};
-  for(const[k,id]of Object.entries(fields)){const connectionField=['provider','endpoint','model'].includes(k);if((scope==='connection')!==connectionField)continue;settings[k]=connectionField?$('#'+id).value.trim():Number($('#'+id).value);}
-  if(scope==='connection')settings.rememberKey=$('#remember-key').checked;else settings.autoAnalyze=$('#auto-analyze').checked;
-  $('#settings-error').textContent='';const b=$('#save-settings');b.disabled=true;
-  const imported=importedKey,typed=$('#api-key').value;
-  try{
-   if(!preview&&scope==='connection'){const u=new URL(settings.endpoint);if(u.protocol!=='https:')throw Error('填写完整的 HTTPS API 地址后重试。');if(!await chrome.permissions.request({origins:[u.origin+'/*']}))throw Error('未授权 API 地址；再次保存以选择授权。');}
-   await rpc('saveSettings',{scope,settings,rememberConsent:scope==='connection'&&settings.rememberKey,apiKey:scope==='connection'?(imported||typed):''});
-   if(scope==='connection'){if(importedKey===imported)importedKey='';if($('#api-key').value===typed)$('#api-key').value='';}
-   await refresh();if(scope==='connection')fillSettings();status(scope==='usage'?'调用设置已保存。':settings.rememberKey?'已保存到 macOS 钥匙串，今后会自动恢复连接。':'设置已保存。');
-  }catch(error){$('#settings-error').textContent=error.message;}finally{b.disabled=false;}
- });
+$('#tab-search').addEventListener('input',render);
+$('#settings-form').addEventListener('submit',event=>{event.preventDefault();void saveConnection();});
+$('#sync-upgrade').addEventListener('click',()=>void saveConnection({upgrade:true}));
+async function saveConnection({upgrade=false}={}){
+ if(savingConnection)return;
+ const scope=preferences==='usage'?'usage':'connection',settings={...data.settings},remote=data.syncConnection;
+ if(scope==='connection'){
+  settings.provider=selectedProvider();
+  settings.endpoint=currentEndpoint();
+  settings.model=$('#model').value.trim();
+  settings.credentialStorage=selectedStorage();
+  settings.rememberKey=settings.credentialStorage!=='session';
+ }else{
+  for(const [key,id] of Object.entries(usageFields))settings[key]=Number($('#'+id).value);
+  settings.autoAnalyze=$('#auto-analyze').checked;
+ }
+ const error=$('#settings-error'),save=$('#save-settings');
+ error.textContent='';
+ save.disabled=true;savingConnection=true;save.textContent='正在保存…';
+ try{
+  let passkeyOptions;
+  const apiKey=scope==='connection'?(importedKey||$('#api-key').value):'';
+  if(scope==='connection'){
+   if(!settings.model||!originOf(settings.endpoint))throw Error('填写有效的 HTTPS API 地址和模型。');
+   const sync=settings.credentialStorage==='sync';
+   if(sync&&remote&&apiKey&&remote.id!==data.settings.credentialRevision){
+    throw Error('恢复已同步的连接后再更新。');
+   }
+   if(sync&&remote&&originOf(remote.settings.endpoint)!==originOf(settings.endpoint)){
+    throw Error('这份同步连接属于另一个 API 地址。这个地址可先保存在此设备。');
+   }
+   if(sync&&!remote&&!apiKey&&!savedForDraft())throw Error('先填写或导入 API Key。');
+   await authorizeEndpoint(settings.endpoint);
+   if(sync&&(!remote||upgrade)){
+    if(preview)throw Error('请在 Chrome 中验证通行密钥。');
+    passkeyOptions=await createSyncPasskey();
+   }
+  }
+  await rpc('saveSettings',{scope,settings,rememberConsent:scope==='connection'&&settings.rememberKey,
+   verify:true,apiKey,syncId:remote?.id,...passkeyOptions});
+  if(scope==='connection'){clearKeyDraft();connectionDirty=false;}
+  await refresh();
+  if(scope==='connection')fillSettings();
+  else status('调用设置已保存。');
+ }catch(cause){error.textContent=cause.message;}
+ finally{savingConnection=false;save.disabled=false;updateSaveLabel();updateCredentialUI();}
+}
+$('#unlock-sync').addEventListener('click',async()=>{
+ const remote=data.syncConnection,input=$('#sync-unlock'),control=$('#unlock-sync');
+ if(!remote||unlockingSync)return;
+ if(!remote.passkey&&!input.value){input.focus();return;}
+ unlockingSync=true;control.disabled=true;control.textContent='正在恢复…';$('#sync-error').textContent='';
+ try{
+  await authorizeEndpoint(remote.settings.endpoint);
+  const passkeyKey=remote.passkey?await recoverSyncPasskey(remote.passkey):undefined;
+  await rpc('unlockSync',{syncId:remote.id,syncPassphrase:input.value,passkeyKey});
+  input.value='';clearKeyDraft();connectionDirty=false;
+  await refresh();fillSettings();
+ }catch(error){$('#sync-error').textContent=error.message;}
+ finally{unlockingSync=false;updateCredentialUI();}
 });
-$('#api-key').addEventListener('input',()=>{importedKey='';});
-$('#endpoint').addEventListener('input',()=>{importedKey='';});
-$('#forget-key').addEventListener('click',()=>task(async()=>{importedKey='';$('#api-key').value='';await rpc('forgetKey');await refresh();fillSettings();status('连接密钥已从本机移除。');}));
+$('#api-key').addEventListener('input',()=>{importedKey='';connectionDirty=true;updateCredentialUI();});
+let editedOrigin='';
+$('#endpoint').addEventListener('focus',()=>{editedOrigin=originOf(currentEndpoint());});
+$('#endpoint').addEventListener('input',()=>{
+ const next=originOf(currentEndpoint());
+ if(editedOrigin!==next)clearKeyDraft();
+ editedOrigin=next;connectionDirty=true;updateCredentialUI();
+});
+$('#model').addEventListener('input',()=>{connectionDirty=true;updateCredentialUI();});
+$('#forget-key').addEventListener('click',()=>task(async()=>{
+ if(credentialStorage(data.settings)==='sync'&&!window.confirm('从 Chrome 同步中移除密钥？已连接的设备随后会断开。'))return;
+ await rpc('forgetKey');
+ importedKey='';$('#api-key').value='';$('#key-state').textContent='';
+ await refresh();fillSettings();
+}));
 $('#key-file').addEventListener('change',()=>task(async()=>{
  const input=$('#key-file'),file=input.files?.[0];
  try{
-  if(!file||preview)return;if(file.size>32768)throw Error('选择小于 32 KB 的 API 配置文件。');
+  if(!file||preview)return;
+  if(file.size>32768)throw Error('请选择小于 32 KB 的配置文件。');
   const text=await file.text(),match=text.match(/^\s*(?:export\s+)?OPENAI_API_KEY\s*=\s*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^#\s\r\n]+))\s*(?:#.*)?$/m),key=match?.[1]||match?.[2]||match?.[3];
-  if(!key||key.length>512)throw Error('文件中没有可识别的 OPENAI_API_KEY；选择安全配置流程生成的 env 文件。');
-  importedKey=key;$('#api-key').value='';$('#key-state').textContent='已从本机文件读入密钥，保存后生效。';status('已在本机读入密钥，保存后生效。');
+  if(!key||key.length>512)throw Error('文件中找不到有效的 OPENAI_API_KEY。');
+  importedKey=key;$('#api-key').value='';$('#key-state').textContent='密钥已导入，保存后连接。';
+  connectionDirty=true;
  }finally{input.value='';}
 }));
-$('#test-api').addEventListener('click',()=>task(async()=>{
- const b=$('#test-api');b.disabled=true;b.textContent='正在测试…';
- try{const result=await rpc('testAPI');$('#api-receipt').hidden=false;$('#api-receipt').textContent='连接通过 · '+result.provider+' · '+result.elapsedMs+' ms · 输入 '+(result.usage?.input_tokens??result.usage?.prompt_tokens??'未知')+' token';await refresh();status('合成样本测试完成。');}
- finally{b.disabled=false;b.textContent='测试连接';await refresh().catch(()=>{});}
+$('#native-enabled').addEventListener('change',()=>task(async()=>{
+ try{await rpc('saveNative',{enabled:$('#native-enabled').checked});await refresh();status('原生提醒设置已保存。');}
+ catch(error){$('#native-enabled').checked=data.settings.nativeEnabled;await checkHelper();throw error;}
 }));
-$('#native-enabled').addEventListener('change',()=>task(async()=>{await rpc('saveNative',{enabled:$('#native-enabled').checked});await refresh();status('原生提醒设置已保存。');}));
 $('#hide-native').addEventListener('click',()=>task(async()=>{await rpc('nativeHide');status('已请求隐藏原生提醒。');}));
 $('#analyze-dialog').addEventListener('close',()=>{
  if($('#analyze-dialog').returnValue==='send')task(async()=>{
-  const tabId=targetId,evidence=targetEvidence,autoReview=$('#auto-review').checked;
+  const tabId=targetId,evidence=targetEvidence,expectedConnection=targetConnection,autoReview=$('#auto-review').checked;
   if(analyzingTabs.has(tabId))return;analyzingTabs.add(tabId);render();status('正在分析页面…');
-  try{const result=await rpc('analyze',{tabId,autoReview,expectedHash:await fingerprint(evidence)});status(result.skipped||(result.uncertain?'判断仍不确定，已保留页面供你确认。':'分析完成，建议已更新。'));}
+  try{const result=await rpc('analyze',{tabId,autoReview,expectedConnection,expectedHash:await fingerprint(evidence)});status(result.skipped||(result.uncertain?'判断仍不确定，已保留页面供你确认。':'分析完成，建议已更新。'));}
   finally{analyzingTabs.delete(tabId);await refresh();}
  });
 });
-$('#close-adapter').addEventListener('click',()=>$('#adapter-dialog').close());
-$('#adapter-form').addEventListener('submit',e=>{
- e.preventDefault();task(async()=>{
-  try{await rpc('watch',{tabId:targetId,adapter:{waiting:$('#waiting-text').value.trim(),done:$('#done-text').value.trim()}});$('#adapter-dialog').close();await refresh();status('本地监听已开始，完成后会标为待接手。');}
-  catch(error){$('#adapter-error').textContent=error.message;}
- });
-});
-document.querySelectorAll('[data-capture]').forEach(b=>b.addEventListener('click',()=>task(async()=>{
- try{const result=await rpc('captureText',{tabId:targetId});if(!result.text)throw Error('先在目标页面选中一段完整状态文案，再返回取用。');
- $('#adapter-error').textContent='';$('#'+b.dataset.capture).value=result.text;$('#'+b.dataset.capture).focus();}
- catch(error){$('#adapter-error').textContent=error.message;}
-})));
 $('#organize').addEventListener('click',()=>task(async()=>{
  organization=await rpc('organizationPlan',{windowId:currentWindowId});$('#organization-plan').replaceChildren();
  if(!organization.groups.length){const p=document.createElement('p');p.className='hint';p.textContent='当前窗口没有需要合并的同站标签。';$('#organization-plan').append(p);}
@@ -286,10 +665,15 @@ $('#organize').addEventListener('click',()=>task(async()=>{
  $('#apply-organization').disabled=!organization.groups.length;$('#organize-dialog').returnValue='';$('#organize-dialog').showModal();
 }));
 $('#organize-dialog').addEventListener('close',()=>{if($('#organize-dialog').returnValue==='apply')task(async()=>{const result=await rpc('organize',{plan:organization});await refresh();status('已整理为 '+result.groups+' 个网站分组，可在上方撤销。');});});
-$('#switcher-enabled').addEventListener('change',()=>{switcherDirty=true;});
-$('#switcher-form').addEventListener('submit',e=>{
- e.preventDefault();const b=$('#save-switcher');b.disabled=true;$('#switcher-error').textContent='';
- task(async()=>{try{await rpc('saveSwitcher',{enabled:$('#switcher-enabled').checked});switcherDirty=false;await refresh();}catch(error){$('#switcher-error').textContent=error.message;}finally{b.disabled=false;}});
+$('#switcher-enabled').addEventListener('change',()=>{
+ const control=$('#switcher-enabled');
+ switcherDirty=true;control.disabled=true;$('#switcher-error').textContent='';
+ say($('#switcher-status'),'正在应用…');
+ void (async()=>{
+  try{await rpc('saveSwitcher',{enabled:control.checked});}
+  catch(error){$('#switcher-error').textContent=error.message;await checkHelper();}
+  finally{switcherDirty=false;control.disabled=false;await refresh();}
+ })().catch(error=>{$('#switcher-error').textContent=error.message;});
 });
 function updateCountdown(){
  document.querySelectorAll('.countdown').forEach(n=>{
@@ -301,6 +685,9 @@ async function heartbeat(){updateCountdown();if(preview)return;try{const w=await
 if(preview){
  $('#preview-note').hidden=false;$('#mode-label').textContent='合成预览 · 本机交互';
  const state=new URLSearchParams(location.search).get('state');if(state==='empty')demo.tabs=[];
+ if(state==='helper-missing')demo.nativeSetup='missing';
+ if(state==='helper-permission')demo.nativeSetup='accessibility_required';
+ if(state==='sync-recovery')demo.syncConnection={id:'preview',settings:{...DEFAULTS},passkey:{credentialId:'preview'}};
  if(state?.startsWith('backlog-')){demo.keyPresent=true;demo.analysisQueue={phase:state.slice(8),total:18,completed:7,analyzed:5,cached:2,skipped:0,failed:0,currentTitle:'Chrome 扩展开发文档',reason:state==='backlog-paused'?'已暂停，可随时继续。':''};}
  if(state==='keychain-locked'){demo.settings.rememberKey=true;demo.credentialStatus={phase:'unlock_required',reason:'macOS 需要确认钥匙串访问。选择“解锁并恢复连接”，在系统对话框允许 Tab Cadence；无需重新导入密钥。'};}
  if(state==='keychain-ready'){demo.settings.rememberKey=true;demo.keyPresent=true;demo.credentialSaved=true;demo.credentialStatus={phase:'ready'};}
@@ -310,11 +697,18 @@ if(preview){
  chrome.runtime.onMessage.addListener(m=>{if(m.type==='updated')refresh().catch(()=>{});});
 }
 try{
- await refresh();const state=new URLSearchParams(location.search).get('state');
- if(state==='settings'||state?.startsWith('keychain-'))openView('settings');
+ await refresh();void checkHelper();const state=new URLSearchParams(location.search).get('state');
+ if(state==='settings'||state==='sync-recovery'||state?.startsWith('keychain-')||new URLSearchParams(location.search).get('view')==='connection')openView('settings');
+ if(state==='helper-missing'||state==='helper-permission')openHelperSettings();
  if(state==='loading'){$('#tabs').setAttribute('aria-busy','true');$('#tabs').textContent='正在读取标签列表…';}
 }catch(error){status(error.message+' 可选择刷新重试。',true);}
-setInterval(heartbeat,1000);document.addEventListener('visibilitychange',heartbeat);await heartbeat();
+setInterval(heartbeat,1000);
+document.addEventListener('visibilitychange',()=>{
+ void heartbeat();
+ if(document.visibilityState==='visible'&&view==='settings'&&preferences==='native')void checkHelper(true);
+});
+window.addEventListener('focus',()=>{if(view==='settings'&&preferences==='native')void checkHelper(true);});
+await heartbeat();
 
 function paintChatSettings(message){
  const control=$('#chat-enable');

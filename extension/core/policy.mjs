@@ -1,5 +1,5 @@
 export const STATES = ['keep', 'waiting', 'resume', 'close'];
-export const DEFAULTS = Object.freeze({provider:'decisions', endpoint:'https://api.openai.com/v1', model:'gpt-6-luna', cooldownSeconds:120, autoAnalyze:false, rememberKey:false, nativeEnabled:false, switcherEnabled:false, inputPrice:0, outputPrice:0});
+export const DEFAULTS = Object.freeze({provider:'decisions', endpoint:'https://api.openai.com/v1', model:'gpt-6-luna', cooldownSeconds:120, autoAnalyze:false, rememberKey:false, credentialStorage:'', nativeEnabled:false, switcherEnabled:false, inputPrice:0, outputPrice:0});
 export function safeURL(raw) {
   try { const u=new URL(raw); return ['http:','https:'].includes(u.protocol) && !u.username && !u.password; } catch { return false; }
 }
@@ -22,7 +22,7 @@ export function guard(tab, snapshot, now=Date.now()) {
   if (tab.pinned || tab.audible || tab.active || tab.discarded) return '当前使用、固定、播放声音或休眠中的页面会保留。';
   if (!snapshot || now-snapshot.at>15000) return '页面状态已过期；刷新检测后重试。';
   if (['waiting','unknown'].includes(snapshot.observed)) return '任务仍在等待或状态不明确，已保留。';
-  if (snapshot.editable || snapshot.dirty || snapshot.media || snapshot.visibility==='hidden-unknown') return '页面可能有编辑内容或媒体，已保留。';
+  if (snapshot.editable || snapshot.embedded || snapshot.dirty || snapshot.media || snapshot.visibility==='hidden-unknown') return '页面可能有编辑内容或媒体，已保留。';
   if (now-Math.max(snapshot.lastInteraction||0,tab.lastAccessed||0)<60000) return '页面最近有操作，稍后重新评估。';
   return null;
 }

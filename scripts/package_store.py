@@ -33,7 +33,7 @@ def main():
     output = args.output_dir or ROOT / 'releases' / f'TabCadence-{version}'
     files = {
         'manifest.json', 'sidepanel.html', 'panel.mjs', 'worker.mjs', 'sensor.js',
-        'watch-prompt.js', 'threaddeck.js', 'ui.css', 'THIRD_PARTY_LICENSES.txt', 'icons/mark.svg',
+        'watch-prompt.js', 'thread-history.js', 'threaddeck.js', 'ui.css', 'THIRD_PARTY_LICENSES.txt', 'icons/mark.svg',
         *manifest['icons'].values(), *manifest['action']['default_icon'].values(),
         *(str(p.relative_to(SOURCE)) for p in (SOURCE / 'core').glob('*.mjs')),
     }
