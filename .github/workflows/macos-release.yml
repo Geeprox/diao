@@ -12,29 +12,73 @@ permissions:
 jobs:
   build:
     runs-on: xcode-27
-    timeout-minutes: 15
+    timeout-minutes: 40
+    outputs:
+      signed: ${{ steps.package.outputs.signed }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Build and verify Apple silicon DMG
+        id: package
         env:
           DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
           DIAO_UPDATE_PUBLIC_KEY: ${{ vars.DIAO_UPDATE_PUBLIC_KEY }}
           DIAO_SPARKLE_PRIVATE_KEY: ${{ github.ref_type == 'tag' && secrets.DIAO_SPARKLE_PRIVATE_KEY || '' }}
+          DIAO_DEVELOPER_ID_P12: ${{ github.ref_type == 'tag' && secrets.DIAO_DEVELOPER_ID_P12 || '' }}
+          DIAO_DEVELOPER_ID_PASSWORD: ${{ github.ref_type == 'tag' && secrets.DIAO_DEVELOPER_ID_PASSWORD || '' }}
+          DIAO_NOTARY_API_KEY: ${{ github.ref_type == 'tag' && secrets.DIAO_NOTARY_API_KEY || '' }}
+          DIAO_NOTARY_KEY_ID: ${{ github.ref_type == 'tag' && vars.DIAO_NOTARY_KEY_ID || '' }}
+          DIAO_NOTARY_ISSUER_ID: ${{ github.ref_type == 'tag' && vars.DIAO_NOTARY_ISSUER_ID || '' }}
         shell: bash
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          if [[ "$GITHUB_REF_TYPE" != tag ]]; then version=0.1; fi
-          if [[ -n "${DIAO_UPDATE_PUBLIC_KEY:-}" && "$GITHUB_REF_TYPE" == tag && -z "${DIAO_SPARKLE_PRIVATE_KEY:-}" ]]; then
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            version=0.1
+            unset DIAO_UPDATE_PUBLIC_KEY
+          fi
+          if [[ -n "${DIAO_UPDATE_PUBLIC_KEY:-}" && -z "${DIAO_SPARKLE_PRIVATE_KEY:-}" ]]; then
             echo '缺少 Diao 更新签名密钥。' >&2
             exit 1
           fi
-          bash scripts/build_macos_release.sh "$RUNNER_TEMP/tab-cadence" "$version"
+          signed=false
+          if [[ -n "${DIAO_UPDATE_PUBLIC_KEY:-}${DIAO_DEVELOPER_ID_P12:-}${DIAO_NOTARY_KEY_ID:-}" ]]; then
+            : "${DIAO_DEVELOPER_ID_P12:?缺少 Developer ID 证书}"
+            : "${DIAO_DEVELOPER_ID_PASSWORD:?缺少证书导入口令}"
+            : "${DIAO_NOTARY_API_KEY:?缺少 Apple 公证 API key}"
+            : "${DIAO_NOTARY_KEY_ID:?缺少 Apple 公证 API key ID}"
+            : "${DIAO_NOTARY_ISSUER_ID:?缺少 Apple 公证团队 Issuer ID}"
+            previous_umask="$(umask)"
+            umask 077
+            signing="$(mktemp -d "$RUNNER_TEMP/diao-signing.XXXXXXXX")"
+            export DIAO_SIGNING_KEYCHAIN="$signing/signing.keychain-db"
+            trap 'security delete-keychain "$DIAO_SIGNING_KEYCHAIN" 2>/dev/null || true; rm -rf -- "$signing"' EXIT
+            password="$(openssl rand -hex 32)"
+            security create-keychain -p "$password" "$DIAO_SIGNING_KEYCHAIN"
+            security unlock-keychain -p "$password" "$DIAO_SIGNING_KEYCHAIN"
+            security set-keychain-settings "$DIAO_SIGNING_KEYCHAIN"
+            printf '%s' "$DIAO_DEVELOPER_ID_P12" | base64 -D > "$signing/certificate.p12"
+            security import "$signing/certificate.p12" -k "$DIAO_SIGNING_KEYCHAIN" -f pkcs12 -P "$DIAO_DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$DIAO_SIGNING_KEYCHAIN" >/dev/null
+            DIAO_CODESIGN_IDENTITY="$(security find-identity -v -p codesigning "$DIAO_SIGNING_KEYCHAIN" | awk '/"Developer ID Application: / {print $2; exit}')"
+            : "${DIAO_CODESIGN_IDENTITY:?证书未提供有效的 Developer ID Application 身份}"
+            export DIAO_CODESIGN_IDENTITY DIAO_NOTARY_PROFILE=diao-release
+            printf '%s' "$DIAO_NOTARY_API_KEY" > "$signing/AuthKey.p8"
+            xcrun notarytool store-credentials "$DIAO_NOTARY_PROFILE" --keychain "$DIAO_SIGNING_KEYCHAIN" \
+              --key "$signing/AuthKey.p8" --key-id "$DIAO_NOTARY_KEY_ID" --issuer "$DIAO_NOTARY_ISSUER_ID"
+            rm -f -- "$signing/certificate.p12" "$signing/AuthKey.p8"
+            unset DIAO_DEVELOPER_ID_P12 DIAO_DEVELOPER_ID_PASSWORD DIAO_NOTARY_API_KEY password
+            umask "$previous_umask"
+            signed=true
+          fi
+          output="$(mktemp -d "$RUNNER_TEMP/diao-release.XXXXXXXX")"
+          bash scripts/build_macos_release.sh "$output" "$version"
+          printf 'signed=%s\nassets=%s\n' "$signed" "$output" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v6
         with:
           name: tab-cadence-macos-arm64
-          path: ${{ runner.temp }}/tab-cadence/*
+          path: ${{ steps.package.outputs.assets }}/*
           if-no-files-found: error
           retention-days: 7
 
@@ -53,11 +97,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          DIAO_RELEASE_SIGNED: ${{ needs.build.outputs.signed }}
         shell: bash
         run: |
           cd release-assets
           shasum -a 256 -c *.sha256
+          notes='Apple silicon, macOS 27.2+. This DMG uses ad hoc signing. See the installation guide in the disk image.'
+          if [[ "$DIAO_RELEASE_SIGNED" == true ]]; then
+            notes='Apple silicon, macOS 27.2+. Signed with Developer ID and notarized by Apple.'
+          fi
           gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
-            --title "Diao ${GITHUB_REF_NAME#v}" \
-            --notes 'Apple silicon, macOS 27.2+. This DMG uses ad hoc signing. See the installation guide in the disk image.' \
-            ./*
+            --title "Diao ${GITHUB_REF_NAME#v}" --notes "$notes" ./*

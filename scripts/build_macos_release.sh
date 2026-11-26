@@ -1,5 +1,5 @@
 #!/bin/bash
-# 构建用户手动信任的 Apple silicon DMG，供本机或 GitHub Actions 使用。
+# 构建 Apple silicon DMG。正式签名和公证由发布环境提供。
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 if [[ $# != 2 || "$1" != /* || ! "$2" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
@@ -8,6 +8,22 @@ if [[ $# != 2 || "$1" != /* || ! "$2" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
 fi
 output=$1
 version=$2
+sign_identity="${DIAO_CODESIGN_IDENTITY:-}"
+notary_profile="${DIAO_NOTARY_PROFILE:-}"
+if [[ -n "$sign_identity" && -z "$notary_profile" ]]; then
+  echo 'Developer ID 构建需要 Apple 公证的钥匙串配置。' >&2
+  exit 2
+fi
+if [[ -n "${DIAO_SPARKLE_PRIVATE_KEY:-}" ]]; then
+  if [[ -z "${DIAO_UPDATE_PUBLIC_KEY:-}" ]]; then
+    echo '缺少 Diao 更新公钥。' >&2
+    exit 2
+  fi
+  if [[ -z "$sign_identity" ]]; then
+    echo '正式 Diao 更新包需要 Developer ID 签名和 Apple 公证。' >&2
+    exit 2
+  fi
+fi
 [[ "$(uname -m)" == arm64 ]] || { echo 'Apple silicon runner required.' >&2; exit 1; }
 mkdir -p "$output"
 digest="$(printf '%s' "$root" | shasum -a 256 | cut -c1-12)"
@@ -59,7 +75,27 @@ xcrun swiftc -O -target arm64-apple-macos27.2 -swift-version 5 -parse-as-library
   native/Mapping.swift native/Shortcuts.swift native/NativeHost.swift native/Credentials.swift native/StoreSetup.swift native/Updates.swift \
   "${framework_flags[@]}"
 python3 -B scripts/bundle.py "$app" --store-extension-id jbamhjcmjhmmhehjnnblflckmikhjojm --release-version "$version" --icon "$work/Diao.icns"
-codesign --force --timestamp=none --sign - "$app"
+if [[ -n "$sign_identity" ]]; then
+  sign_args=(--force --timestamp --sign "$sign_identity")
+  notary_args=(--keychain-profile "$notary_profile")
+  if [[ -n "${DIAO_SIGNING_KEYCHAIN:-}" ]]; then
+    sign_args+=(--keychain "$DIAO_SIGNING_KEYCHAIN")
+    notary_args+=(--keychain "$DIAO_SIGNING_KEYCHAIN")
+  fi
+  framework="$app/Contents/Frameworks/Sparkle.framework"
+  if [[ -d "$framework" ]]; then
+    # 保留 Sparkle 下载服务的沙盒权限，按嵌套顺序先签内部程序。
+    codesign "${sign_args[@]}" --options runtime "$framework/Versions/B/XPCServices/Installer.xpc"
+    codesign "${sign_args[@]}" --options runtime --preserve-metadata=entitlements "$framework/Versions/B/XPCServices/Downloader.xpc"
+    codesign "${sign_args[@]}" --options runtime "$framework/Versions/B/Autoupdate"
+    codesign "${sign_args[@]}" --options runtime "$framework/Versions/B/Updater.app"
+    codesign "${sign_args[@]}" --options runtime "$framework"
+  fi
+  codesign "${sign_args[@]}" --options runtime "$app"
+  codesign --verify -R='anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "$app"
+else
+  codesign --force --timestamp=none --sign - "$app"
+fi
 codesign --verify --deep --strict "$app"
 minimum="$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$app/Contents/Info.plist")"
 if python3 -B - "$minimum" "$(sw_vers -productVersion)" <<'PY2'
@@ -81,11 +117,35 @@ cp docs/mac-install.md "$work/disk/安装说明.md"
 dmg="Diao-$version-macOS-arm64.dmg"
 hdiutil create -quiet -fs HFS+ -format UDZO -volname 'Diao' \
   -srcfolder "$work/disk" "$work/$dmg"
-hdiutil verify "$work/$dmg"
-cp "$work/$dmg" "$output/$dmg"
-(cd "$output" && shasum -a 256 "$dmg" > "$dmg.sha256")
-if [[ -n "${DIAO_SPARKLE_PRIVATE_KEY:-}" ]]; then
-  [[ -n "${DIAO_UPDATE_PUBLIC_KEY:-}" ]] || { echo '缺少 Diao 更新公钥。' >&2; exit 1; }
-  bash scripts/publish_macos_update.sh "$work" "$app" "$output" "$version"
+if [[ -n "$sign_identity" ]]; then
+  codesign "${sign_args[@]}" "$work/$dmg"
+  # 公证 DMG 时 Apple 同时为嵌入的 App 签发票据，供更新 ZIP 使用。
+  xcrun notarytool submit "$work/$dmg" "${notary_args[@]}" --output-format json > "$work/notary-submit.json"
+  submission="$(python3 -B -c 'import json, sys; print(json.load(sys.stdin)["id"])' < "$work/notary-submit.json")"
+  printf 'Apple notarization submission %s\n' "$submission"
+  if ! xcrun notarytool wait "$submission" "${notary_args[@]}" --output-format json > "$work/notary-result.json"; then
+    cat "$work/notary-result.json" >&2
+    exit 1
+  fi
+  status="$(python3 -B -c 'import json, sys; print(json.load(sys.stdin)["status"])' < "$work/notary-result.json")"
+  printf 'Apple notarization status %s\n' "$status"
+  if [[ "$status" != Accepted ]]; then
+    xcrun notarytool log "$submission" "${notary_args[@]}" >&2 || true
+    exit 1
+  fi
+  for path in "$work/$dmg" "$app"; do
+    xcrun stapler staple "$path"
+    xcrun stapler validate "$path"
+  done
+  /usr/bin/syspolicy_check distribution "$app"
 fi
-echo "Built $dmg (ad hoc, manual trust)."
+hdiutil verify "$work/$dmg"
+assets="$work/release"
+mkdir "$assets"
+if [[ -n "${DIAO_SPARKLE_PRIVATE_KEY:-}" ]]; then
+  bash scripts/publish_macos_update.sh "$work" "$app" "$assets" "$version"
+fi
+cp "$work/$dmg" "$assets/$dmg"
+(cd "$assets" && shasum -a 256 "$dmg" > "$dmg.sha256")
+cp "$assets/"* "$output/"
+echo "Built $dmg."

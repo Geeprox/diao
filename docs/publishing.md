@@ -12,12 +12,12 @@
 
 ## macOS 助手
 
-首发使用 [GitHub Actions](../.github/workflows/macos-release.yml) 生成手动信任的 DMG，详见 [Mac 助手安装说明](mac-install.md)。本机开发构建使用 Apple Development 签名。若以后提供 Developer ID 签名和公证版本，可沿用以下分发流程。
+[GitHub Actions](../.github/workflows/macos-release.yml) 支持手动验收和 Developer ID 正式分发。安装步骤见 [Mac 助手安装说明](mac-install.md)。
 
 1. 构建入口使用 `bash scripts/build_macos_release.sh /absolute/output-directory 0.4`。商店身份写入签名包的 Info.plist，凭据调用者校验检查该身份和签名 Chrome 父进程。安装器需将相同 origin 写入 Native Messaging `allowed_origins`。 [Chrome 原生宿主](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
-2. 使用 Developer ID Application 签名，启用 hardened runtime 和可信时间戳。需要 PKG 时配置 Developer ID Installer 签名。
-3. 提供可下载安装器和卸载说明。安装器注册当前用户的宿主配置，并引导用户给助手授权辅助功能。
-4. 公证并装订票据，在干净 Mac 上验收 Gatekeeper、首次授权、浮标、遮挡暂停、保留、钥匙串、升级和卸载。当前开发验收覆盖 Apple silicon，其他系统范围以实际测试为准。 [Apple 签名与公证](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+2. 给正式发布工作流配置 Developer ID Application 证书和 Apple 公证团队 API key。将 Base64 编码的 PKCS#12 证书、导入口令和 .p8 私钥分别保存到 Actions secrets `DIAO_DEVELOPER_ID_P12`、`DIAO_DEVELOPER_ID_PASSWORD`、`DIAO_NOTARY_API_KEY`。将 key ID 和 Issuer ID 保存到 Actions 变量 `DIAO_NOTARY_KEY_ID` 和 `DIAO_NOTARY_ISSUER_ID`。工作流使用独立临时钥匙串。本机签名构建可使用已安装的 `DIAO_CODESIGN_IDENTITY` 与 `DIAO_NOTARY_PROFILE`。
+3. 构建使用 Hardened Runtime 和可信时间戳签名。公证通过后为安装 DMG 和更新 ZIP 内的 App 装订票据，再输出归档和校验值。 [Apple 签名与公证](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+4. 在干净 Mac 上验收首次安装和授权、旧助手迁移、Chrome 接续与更新。新旧正式版使用同一 Apple 开发团队的签名。
 
 分发版使用独立的 App bundle ID 和钥匙串服务。干净账户的助手安装及辅助功能权限需要独立验收。签名版本升级到新二进制后，还需验证系统授权及钥匙串的连续性。
 
@@ -25,7 +25,7 @@
 
 首次激活自动更新时，使用固定的 Sparkle 2.10.1 工具生成专用于 Diao 的更新签名密钥。将公开部分配置到 GitHub Actions 变量 `DIAO_UPDATE_PUBLIC_KEY`，私密部分存入 Actions secret `DIAO_SPARKLE_PRIVATE_KEY`，并单独保留发布密钥备份。保持所有发布的更新公钥一致。
 
-打标签后，工作流生成 DMG、Sparkle 更新 ZIP、SHA-256 和签名的 `diao-appcast.xml`，核对归档签名可用，再放入同一个 GitHub Release 草稿。确认更新包后发布为最新正式 Release。助手通过固定的最新正式 Release 地址检查签名更新。缺少更新公钥时生成的手动安装包不广告自动更新；配置公钥的正式发布必须具备配套签名密钥。
+打标签后，工作流生成 DMG、Sparkle 更新 ZIP、SHA-256 和签名的 `diao-appcast.xml`，核对归档签名可用，再放入同一个 GitHub Release 草稿。确认更新包后发布为最新正式 Release。助手通过固定的最新正式 Release 地址检查签名更新。正式更新包需要稳定的 Developer ID 签名、公证凭据与配套的 Sparkle 签名密钥。手动构建不附带更新通道。
 
 先安装具备更新通道的 Diao Bridge，再用下一版本的签名归档实测下载、忙时延后、原子安装与 Chrome 重新连接。开发版、已安装商店版和正式发布签名通道分别验收。[Sparkle 更新发布文档](https://sparkle-project.org/documentation/publishing/)
 
