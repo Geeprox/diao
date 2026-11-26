@@ -13820,7 +13820,7 @@ function tdNavScrollRoot(target) {
                 </select>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">隐藏 ChatGPT 原生导航</span><span class="setting-description">显示 Tab Cadence 大纲时，收起 ChatGPT 自带的右侧导航。</span></span>
+                <span class="setting-copy"><span class="setting-name">隐藏 ChatGPT 原生导航</span><span class="setting-description">显示 Diao 大纲时，收起 ChatGPT 自带的右侧导航。</span></span>
                 <span class="switch"><input type="checkbox" name="hideNativeChatGptRail"><span class="switch-track"></span></span>
               </label>
             </section>

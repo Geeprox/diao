@@ -72,7 +72,7 @@ final class ChromeShortcuts {
         return sameWindow(rect,c.window.rect)
     }
     func handle(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {end(cancel:false);stop();report("paused","快捷键接管已暂停；在 Tab Cadence 的 Mac 设置中重新连接。");return Unmanaged.passUnretained(event)}
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {end(cancel:false);stop();report("paused","快捷键接管已暂停；在 Diao 的 Mac 设置中重新连接。");return Unmanaged.passUnretained(event)}
         if type == .flagsChanged {if !event.flags.contains(.maskControl){end(cancel:false)};return Unmanaged.passUnretained(event)}
         if type == .leftMouseDown || type == .rightMouseDown {end(cancel:false);return Unmanaged.passUnretained(event)}
         // Do not read Unicode characters or record general keystrokes.
@@ -134,6 +134,14 @@ final class ChromeShortcuts {
 }
 
 enum NativeColors {
+    static let brandCanvas = NSColor(name: nil) { appearance in
+        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return OverlayPalette.color(dark ? 0x211B2C : 0xFAF8FD)
+    }
+    static let brandAccent = NSColor(name: nil) { appearance in
+        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return OverlayPalette.color(dark ? 0xCEBEF7 : 0x5A477F)
+    }
     static let secondaryLabel = NSColor(name: nil) { appearance in
         let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         return NSColor(srgbRed: dark ? 0.73 : 0.34, green: dark ? 0.73 : 0.34,
@@ -312,7 +320,7 @@ final class SwitcherContent: NSView {
             iconTile.layer?.cornerRadius = 6
             icon.imageScaling = .scaleProportionallyDown
             marker.image = Self.symbol("checkmark", size: 11)
-            marker.contentTintColor = .labelColor
+            marker.contentTintColor = NativeColors.brandAccent
             title.font = .systemFont(ofSize: 13, weight: .medium)
             site.font = .systemFont(ofSize: 11)
             site.textColor = NativeColors.secondaryLabel
@@ -337,7 +345,8 @@ final class SwitcherContent: NSView {
         private func updateAppearance() {
             let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let tint: NSColor = dark ? .white : .black
-            selection.layer?.backgroundColor = tint.withAlphaComponent(dark ? 0.18 : 0.10).cgColor
+            let selectionTint = OverlayPalette.color(dark ? 0xBAA4F2 : 0x8568B8)
+            selection.layer?.backgroundColor = selectionTint.withAlphaComponent(dark ? 0.22 : 0.15).cgColor
             iconTile.layer?.backgroundColor = tint.withAlphaComponent(dark ? 0.08 : 0.05).cgColor
         }
 

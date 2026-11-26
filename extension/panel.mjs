@@ -7,7 +7,7 @@ import {duplicates,attentionOrder,organizationPlan} from './core/workspace.mjs';
 
 const $=s=>document.querySelector(s),preview=!globalThis.chrome?.runtime?.id;
 let chatEnabled=false,chatReady=false,chatRequest=0;
-let helperStatus='unknown',helperVersion='',helperChecking=false;
+let helperStatus='unknown',helperVersion='',helperChecking=false,helperUpdates=false;
 const helperNeedsInstall = () => helperStatus==='missing';
 let importedKey='',switcherDirty=false,data,filter='all',targetId,targetEvidence,view='workspace',preferences='connection',currentWindowId=1,organization,backlogPreview,targetConnection;
 let backlogView='check',backlogVersion=0,startingBacklog=false,workspaceScroll=0,viewMotion;
@@ -29,7 +29,7 @@ async function rpc(type,args={}) {
   if(type==='backlogStop')demo.analysisQueue={...demo.analysisQueue,phase:'complete',reason:'本轮已结束。'};
   if(type==='backlogPause')demo.analysisQueue={...demo.analysisQueue,phase:'paused',reason:'已暂停，可随时继续。'};
   if(type==='backlogResume')demo.analysisQueue={...demo.analysisQueue,phase:'running',reason:''};
-  if(type==='testAPI'||type==='analyze')throw Error('界面预览不调用 API；在 Chrome 中打开已加载的 Tab Cadence 后测试。');
+  if(type==='testAPI'||type==='analyze')throw Error('界面预览不调用 API；在 Chrome 中打开已加载的 Diao 后测试。');
   if(type==='snapshot')return {title:demo.tabs.find(t=>t.id===args.tabId)?.title,url:'https://example.com/task',excerpt:'构建成功，可以检查结果。',signals:{observed:'done',editable:false,dirty:false,media:false}};
   if(type==='saveSettings'){demo.settings=args.settings;demo.keyPresent=!!args.apiKey||demo.keyPresent;}
   if(type==='forgetKey'){demo.keyPresent=false;demo.credentialSaved=false;demo.settings.rememberKey=false;demo.credentialStatus=null;}
@@ -40,6 +40,7 @@ async function rpc(type,args={}) {
   if(type==='pardon')demo.records[args.tabId]={state:'keep',reason:'已保留本次。'};
   if(type==='watchPage'){demo.records[args.tabId]={state:'waiting',watching:true,reason:'正在监听状态变化。'};return {listening:true};}
   if(type==='stopWatch')delete demo.records[args.tabId];
+  if(type==='setAutoGroupLinks'){demo.autoGroupLinks=args.enabled;return {enabled:args.enabled};}
   if(type==='setTabTidyHours'){demo.tabTidyHours=args.hours;return {hours:args.hours};}
   if(type==='organizationPlan')return organizationPlan(demo.tabs,args.windowId);
   if(type==='organize'){demo.canUndoOrganization=true;return {groups:args.plan.groups.length};}
@@ -327,21 +328,27 @@ function paintHelperSetup() {
  const unavailable=['disconnected','unavailable'].includes(helperStatus);
  $('#helper-discovery').hidden=!(install||authorization);
  $('#helper-discovery-link').textContent=install?'安装 Mac 助手':'完成 Mac 助手设置';
- $('#helper-setup').hidden=helperStatus==='ready'||helperStatus==='unknown';
+ $('#helper-setup').hidden=['ready','unknown','updating'].includes(helperStatus);
  $('#helper-title').textContent=install?'安装 Mac 助手':
   authorization?'需要辅助功能权限':helperStatus==='unsupported'?'此设备不支持 Mac 功能':'连接 Mac 助手';
  $('#helper-instructions').textContent=install?
-  '把助手拖到「应用程序」，打开后按提示完成设置。':
-  authorization?'打开 Tab Cadence Bridge，在系统设置中允许辅助功能访问。':
-  unavailable?'打开已安装的 Tab Cadence Bridge，按提示完成连接。':'';
+  '下载后打开助手，按提示安装。':
+  authorization?'打开 Diao Bridge，在系统设置中允许辅助功能访问。':
+  unavailable?'打开已安装的 Diao Bridge，按提示完成连接。':'';
  $('#helper-download').hidden=!install;
  $('#helper-release').hidden=!install;
  $('#helper-check').hidden=!unavailable;
  $('#helper-check').disabled=helperChecking;
  $('#helper-check').textContent=helperChecking?'正在连接…':'重新连接';
- $('#helper-connected').hidden=helperStatus!=='ready';
- const [major,minor]=helperVersion.split('.').map(Number);
- $('#helper-update').hidden=helperStatus!=='ready'||major!==0||!Number.isInteger(minor)||minor>=6;
+ const phase=data?.helperUpdate?.phase||'idle';
+ const updating=['checking','staged','installing'].includes(phase);
+ const labels={checking:'正在检查更新…',staged:'更新已就绪，空闲时安装。',installing:'正在更新并重新连接…',current:'已是最新版。',installed:'更新完成。',failed:'更新未完成，可以重试。'};
+ $('#helper-health').hidden=helperStatus!=='ready'&&!updating;
+ $('#helper-connected').textContent=helperVersion?'Mac 助手 · '+helperVersion:'Mac 助手';
+ $('#helper-update-status').textContent=labels[phase]||(helperUpdates?'自动更新已开启。':'');
+ $('#helper-check-update').hidden=!helperUpdates;
+ $('#helper-check-update').disabled=updating;
+ $('#helper-update').hidden=helperUpdates||helperStatus!=='ready';
  $('#native-controls').hidden=helperStatus!=='ready';
  $('#hide-native').hidden=helperStatus!=='ready'||!data?.settings.nativeEnabled;
  $('#keychain-option').hidden=selectedStorage()!=='keychain'&&!data?.keychainAvailable;
@@ -352,7 +359,7 @@ async function checkHelper(refresh=false) {
  helperChecking=true;paintHelperSetup();
  try{
   const state=await rpc('nativeCheck',{refresh});
-  helperStatus=state.status;helperVersion=state.version||'';
+  helperStatus=state.status;helperVersion=state.release||state.version||'';helperUpdates=state.updatesAvailable===true;
  }catch{helperStatus='unavailable';helperVersion='';}
  finally{helperChecking=false;paintHelperSetup();}
 }
@@ -361,11 +368,13 @@ function openHelperSettings() {
 }
 for(const id of ['#helper-discovery-link','#keychain-helper'])$(id).addEventListener('click',openHelperSettings);
 $('#helper-check').addEventListener('click',()=>void checkHelper(true));
+$('#helper-check-update').addEventListener('click',()=>void task(async()=>{await rpc('helperCheckUpdate');}));
 
 async function refresh(){
  const previous = data;
  data = await rpc('state');
  render();
+ if(view==='settings'&&preferences==='native'&&data.helperUpdate?.phase==='installed'&&previous?.helperUpdate?.phase!=='installed')void checkHelper(true);
  say($('#native-status'),data.settings.nativeEnabled?(data.nativeStatus?.reason||'已开启，事项有进展时会提醒。'):'');
  say($('#switcher-status'),data.settings.switcherEnabled?(data.switcherStatus?.reason||'已开启。'):'');
  $('#native-enabled').checked=data.settings.nativeEnabled;
@@ -374,6 +383,7 @@ async function refresh(){
   updateCredentialUI();
  }
  if(!switcherDirty)$('#switcher-enabled').checked=data.settings.switcherEnabled;
+ if(!$('#auto-group-links').disabled)$('#auto-group-links').checked=data.autoGroupLinks!==false;
  if(!$('#tab-tidy-hours').disabled)$('#tab-tidy-hours').value=String(data.tabTidyHours||0);
  if($('#backlog-dialog').open)updateBacklogSelection();
  paintHelperSetup();
@@ -412,7 +422,7 @@ function openView(next){
  view=next;
  const isSettings=next==='settings',surface=isSettings?$('#settings'):$('#workspace');
  $('#workspace').hidden=isSettings;$('#settings').hidden=!isSettings;$('#settings-toggle').hidden=isSettings;
- document.title=isSettings?'Tab Cadence · 设置':'Tab Cadence · 管理';
+ document.title=isSettings?'Diao · 设置':'Diao · 管理';
  if(isSettings){fillSettings();openPreferences(preferences,{motion:false});}
  (isSettings?$('#settings-title'):$('#settings-toggle')).focus({preventScroll:true});
  window.scrollTo(0,isSettings?0:workspaceScroll);
@@ -564,6 +574,17 @@ async function authorizeEndpoint(endpoint){
 }
 const undo=button('撤销网站分组',async()=>{await rpc('undoOrganization');await refresh();status('已撤销网站分组。');});
 undo.id='undo-organization';undo.hidden=true;$('.tidy-tools').append(undo);
+$('#auto-group-links').addEventListener('change',event=>task(async()=>{
+ const control=event.currentTarget;
+ control.disabled=true;
+ try {
+  const result=await rpc('setAutoGroupLinks',{enabled:control.checked});
+  data.autoGroupLinks=result.enabled;
+ } catch(error) {
+  control.checked=data.autoGroupLinks!==false;
+  throw error;
+ } finally {control.disabled=false;}
+}));
 $('#tab-tidy-hours').addEventListener('change',event=>{
  const control=event.currentTarget, result=$('#tab-tidy-result');
  control.disabled=true;result.hidden=false;say(result,'正在保存…');
@@ -752,7 +773,7 @@ if(preview){
  if(state==='helper-permission')demo.nativeSetup='accessibility_required';
  if(state==='sync-recovery')demo.syncConnection={id:'preview',settings:{...DEFAULTS},passkey:{credentialId:'preview'}};
  if(state?.startsWith('backlog-')){demo.keyPresent=true;demo.analysisQueue={phase:state.slice(8),total:18,completed:7,analyzed:5,cached:2,skipped:0,failed:0,currentTitle:'Chrome 扩展开发文档',reason:state==='backlog-paused'?'已暂停，可随时继续。':''};}
- if(state==='keychain-locked'){demo.settings.rememberKey=true;demo.credentialStatus={phase:'unlock_required',reason:'macOS 需要确认钥匙串访问。选择“解锁并恢复连接”，在系统对话框允许 Tab Cadence；无需重新导入密钥。'};}
+ if(state==='keychain-locked'){demo.settings.rememberKey=true;demo.credentialStatus={phase:'unlock_required',reason:'macOS 需要确认钥匙串访问。选择“解锁并恢复连接”，在系统对话框允许 Diao；无需重新导入密钥。'};}
  if(state==='keychain-ready'){demo.settings.rememberKey=true;demo.keyPresent=true;demo.credentialSaved=true;demo.credentialStatus={phase:'ready'};}
  if(state==='error')status('API 额度或速率受限；在设置中检查账户余额，冷却后重试。',true);
 }else{

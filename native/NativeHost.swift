@@ -50,8 +50,7 @@ final class BrowserGeometry {
         }
     }
 }
-// Clear pastel surfaces stay opaque so Chrome content cannot alter text contrast.
-// Dark appearance keeps a soft, luminous fill rather than turning the state colors muddy.
+// 浮标使用不透明的柔和状态色，让浏览器背景变化时文字依然清晰。
 struct OverlayPalette {
     let surface:NSColor
     let ink:NSColor
@@ -63,13 +62,13 @@ struct OverlayPalette {
         let dark=appearance.bestMatch(from:[.aqua,.darkAqua]) == .darkAqua
         let values:(UInt32,UInt32,UInt32)
         if kind != "countdown" {
-            values=dark ? (0xBFE9D6,0x204E40,0x8FC6AD):(0xDAF5E8,0x275E50,0xA5D8C3)
+            values=dark ? (0xC5EADB,0x205445,0x93BEAA):(0xDDF5EB,0x25594E,0xA8D6C4)
         }else if paused {
-            values=dark ? (0xCBE3F8,0x2C506F,0x92BBDC):(0xE0F1FF,0x345E81,0xA7CDEB)
+            values=dark ? (0xDACDF8,0x402D63,0xA98FC8):(0xEDE6FA,0x4A386C,0xC8B6E5)
         }else if seconds<=5 {
-            values=dark ? (0xF4CCD6,0x773246,0xD99BAA):(0xFFE4E9,0x8D3E50,0xE8B1BB)
+            values=dark ? (0xF2C6D1,0x722F47,0xCD8FA4):(0xFCE4EC,0x81364F,0xE4AEC1)
         }else{
-            values=dark ? (0xF4DFA8,0x614916,0xCDB276):(0xFFF2CF,0x725618,0xE6CE8A)
+            values=dark ? (0xF0DAB8,0x634323,0xC5A275):(0xFCEDD8,0x714B29,0xDEBC94)
         }
         return OverlayPalette(surface:color(values.0),ink:color(values.1),border:color(values.2))
     }
@@ -321,6 +320,8 @@ final class OverlayView:NSView {
 }
 final class NativeController:NSObject {
     lazy var shortcuts=ChromeShortcuts(send:{[weak self] value in self?.send(value)})
+    private var updates: DiaoUpdates?
+    private var vaultWork = 0
     let vault=CredentialVault();let geometry=BrowserGeometry();var panel:NSPanel?;var target:TabTarget?;var timer:Timer?;var lastStatus="";var nativeMessaging=false
     var overlayState:[String:Any]?
     var visibleRemaining:Double=20;var lastDisplayTick:TimeInterval?;var lastVisibility:Bool?;var lastVisibilityAt=Date.distantPast
@@ -385,20 +386,20 @@ final class NativeController:NSObject {
     func reason(_ s:String)->String {[
         "mapped":"已定位原生标签，浮标已显示。",
         "accessibility_required":"需要辅助功能授权；在系统设置的隐私与安全性中，打开设备控制和数据访问（或辅助功能），开启 Mac 助手后重试。",
-        "duplicate_title":"标题重复，已隐藏浮标；在 Tab Cadence 侧栏查看。",
-        "ambiguous_mapping":"无法唯一确定标签，已隐藏浮标；在 Tab Cadence 侧栏查看。",
+        "duplicate_title":"标题重复，已隐藏浮标；在 Diao 侧栏查看。",
+        "ambiguous_mapping":"无法唯一确定标签，已隐藏浮标；在 Diao 侧栏查看。",
         "tab_not_visible":"标签不在可见范围，已隐藏浮标；滚动到标签后重试。",
-        "tab_not_found":"标签标题或 Chrome 界面发生变化，已隐藏；在 Tab Cadence 侧栏重新发起定位。",
+        "tab_not_found":"标签标题或 Chrome 界面发生变化，已隐藏；在 Diao 侧栏重新发起定位。",
         "chrome_not_frontmost":"Chrome 不在前台，提醒已暂停，返回后继续。",
         "window_occluded":"Chrome 窗口被遮挡，提醒已暂停。",
         "window_not_frontmost":"目标窗口不在前台，浮标已隐藏。",
-        "window_not_matched":"窗口不能唯一匹配，已隐藏；在 Tab Cadence 侧栏重新发起定位。",
+        "window_not_matched":"窗口不能唯一匹配，已隐藏；在 Diao 侧栏重新发起定位。",
         "window_minimized":"窗口已最小化，浮标已隐藏。",
-        "screen_not_matched":"无法确定目标显示器，已隐藏；使用 Tab Cadence 侧栏查看。",
+        "screen_not_matched":"无法确定目标显示器，已隐藏；使用 Diao 侧栏查看。",
         "chrome_not_running":"Chrome 未运行；打开 Chrome 后重试。",
         "hidden":"浮标已收起。",
-        "expired":"本次浮标已结束；可从 Tab Cadence 侧栏再次显示。"
-    ][s] ?? "定位暂不可用；在 Tab Cadence 侧栏重试。"}
+        "expired":"本次浮标已结束；可从 Diao 侧栏再次显示。"
+    ][s] ?? "定位暂不可用；在 Diao 侧栏重试。"}
     func show(_ target: TabTarget, duration: Double = 20, overlay: [String: Any]? = nil) {
         let sameTarget = self.target?.tabId == target.tabId && self.target?.title == target.title &&
             self.target?.window.rect == target.window.rect
@@ -483,7 +484,7 @@ final class NativeController:NSObject {
         window.ignoresMouseEvents = true
         window.animationBehavior = .none
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        window.title = "Tab Cadence 标签提醒"
+        window.title = "Diao 标签提醒"
         window.hidesOnDeactivate = false
         let view = OverlayView()
         view.onPardon = { [weak self] in
@@ -508,21 +509,38 @@ final class NativeController:NSObject {
     }
     func handle(_ data:Data){
         guard data.count<=65536,let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],let type=object["type"] as? String else{hide("hidden");return}
-        if type.hasPrefix("credential."){vault.perform(object){[weak self] response in self?.send(response)};return}
+        if type.hasPrefix("credential.") {
+            guard let id = object["requestId"] as? String, !id.isEmpty, id.count <= 64 else { return }
+            vaultWork += 1
+            vault.perform(object) { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.vaultWork -= 1
+                    self.send(response)
+                }
+            }
+            return
+        }
+        if type == "updates.check" {
+            updates?.checkNow()
+            return
+        }
         if type=="mruConfigure"{shortcuts.configure(object);return}
         if type=="mruPreview"{shortcuts.preview(object);return}
         if type=="mruDismiss"{shortcuts.dismiss();return}
         if type=="hide"{stopOverlay(status:"hidden");return}
         if type == "hello" {
             let trusted = AXIsProcessTrusted()
-            let name = CredentialVault.storeBuild ? "Tab Cadence Bridge" : "TabPilotBridge"
+            let name = CredentialVault.storeBuild ? "Diao Bridge" : "TabPilotBridge"
             var capabilities = ["countdown-v1", "visibility-v1"]
+            if updates != nil { capabilities.append("updates-v1") }
             if !CredentialVault.storeBuild || CredentialVault.stableCodeIdentity() {
                 capabilities += ["credentials-v1", "credentials-v2"]
             }
             send(["type":"status","status":trusted ? "ready" : "accessibility_required",
                   "reason":trusted ? "辅助程序已连接。" : "请在系统隐私设置中授权 \(name)。",
                   "version":Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "unknown",
+                  "release":Bundle.main.object(forInfoDictionaryKey:"DiaoReleaseVersion") as? String ?? "",
                   "capabilities":capabilities])
             return
         }
@@ -531,6 +549,16 @@ final class NativeController:NSObject {
     }
     func readMessages(){
         nativeMessaging=true
+        if DiaoUpdates.available {
+            updates = DiaoUpdates(nativeHost: true, canRestart: { [weak self] in
+                guard let self else { return false }
+                return self.target == nil && self.shortcuts.state.token == nil && self.vaultWork == 0
+            }, notify: { [weak self] status, release in
+                var message: [String:Any] = ["type":"helperUpdate","status":status]
+                if let release { message["release"] = release }
+                self?.send(message)
+            })
+        }
         DispatchQueue.global(qos:.utility).async{[weak self] in
             func exact(_ count:Int)->Data? {var data=Data();while data.count<count{guard let part=try? FileHandle.standardInput.read(upToCount:count-data.count),!part.isEmpty else{return nil};data.append(part)};return data}
             while let header=exact(4){let length=header.withUnsafeBytes{UInt32(littleEndian:$0.loadUnaligned(as:UInt32.self))};guard length>0,length<=65536,let body=exact(Int(length)) else{break};DispatchQueue.main.async{self?.handle(body)}}
@@ -545,8 +573,8 @@ final class SetupController: NSObject, NSWindowDelegate {
         var presentation: (title: String, detail: String, action: String, symbol: String) {
             switch self {
             case .install:
-                return ("先安装 Mac 助手", "把 Tab Cadence Bridge 拖入「应用程序」，再从那里打开。",
-                        "打开应用程序", "folder")
+                return ("安装 Diao Bridge", "安装到「应用程序」后会打开助手，并接续现有的 Chrome 连接。",
+                        "安装助手", "arrow.down.circle")
             case .invalid:
                 return ("请重新下载 Mac 助手", "这份助手的安装文件不完整。",
                         "打开下载页", "arrow.down.circle")
@@ -557,11 +585,11 @@ final class SetupController: NSObject, NSWindowDelegate {
                 return ("暂时无法准备助手", "Chrome 的助手连接未能保存。请检查此 Mac 的本地设置后重试。",
                         "重试", "arrow.clockwise")
             case .authorize:
-                let name = CredentialVault.storeBuild ? "Tab Cadence Bridge" : "Tab Pilot Bridge"
+                let name = CredentialVault.storeBuild ? "Diao Bridge" : "Tab Pilot Bridge"
                 return ("允许辅助功能访问", "在辅助功能列表中开启 \(name)。如果列表中没有，从「应用程序」添加。",
                         "打开辅助功能设置", "hand.raised")
             case .ready:
-                return ("Mac 助手已就绪", "在 Tab Cadence 的 macOS 设置中开启标签提醒或最近使用切换。",
+                return ("Mac 助手已就绪", "在 Diao 的 macOS 设置中开启标签提醒或最近使用切换。",
                         "返回 Chrome", "checkmark.circle")
             }
         }
@@ -572,14 +600,16 @@ final class SetupController: NSObject, NSWindowDelegate {
     private let heading = NSTextField(labelWithString: "")
     private let detail = NSTextField(wrappingLabelWithString: "")
     private let symbol = NSImageView()
+    private let mark = NSImageView()
     private lazy var action = NSButton(title: "", target: self, action: #selector(performStep))
 
     func show() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 416, height: 214),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 424, height: 226),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = CredentialVault.storeBuild ? "Tab Cadence Bridge" : "Tab Pilot Bridge"
+        window.title = CredentialVault.storeBuild ? "Diao Bridge" : "Tab Pilot Bridge"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.backgroundColor = NativeColors.brandCanvas
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -588,15 +618,20 @@ final class SetupController: NSObject, NSWindowDelegate {
         detail.font = .systemFont(ofSize: 13)
         detail.textColor = NativeColors.secondaryLabel
         detail.maximumNumberOfLines = 4
-        symbol.contentTintColor = .secondaryLabelColor
+        symbol.contentTintColor = NativeColors.brandAccent
         symbol.imageScaling = .scaleProportionallyDown
         symbol.setAccessibilityElement(false)
         action.bezelStyle = .rounded
+        action.bezelColor = NativeColors.brandAccent
         action.keyEquivalent = "\r"
         action.controlSize = .large
         window.defaultButtonCell = action.cell as? NSButtonCell
 
-        let header = NSStackView(views: [symbol, heading])
+        mark.image = Bundle.main.url(forResource: "Diao", withExtension: "icns").flatMap(NSImage.init(contentsOf:))
+        mark.imageScaling = .scaleProportionallyDown
+        mark.setAccessibilityElement(false)
+        let visual = mark.image == nil ? symbol : mark
+        let header = NSStackView(views: [visual, heading])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 11
@@ -612,8 +647,8 @@ final class SetupController: NSObject, NSWindowDelegate {
         content.addSubview(action)
         window.contentView = content
         NSLayoutConstraint.activate([
-            symbol.widthAnchor.constraint(equalToConstant: 26),
-            symbol.heightAnchor.constraint(equalToConstant: 26),
+            visual.widthAnchor.constraint(equalToConstant: 38),
+            visual.heightAnchor.constraint(equalToConstant: 38),
             text.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
             text.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
             text.topAnchor.constraint(equalTo: content.topAnchor, constant: 34),
@@ -655,22 +690,50 @@ final class SetupController: NSObject, NSWindowDelegate {
         symbol.image = NSImage(systemSymbolName: presentation.symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
         if animated, !NativeMotion.reduced {
+            mark.alphaValue = 0.85
             symbol.alphaValue = 0.75
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = NativeMotion.presentationDuration
                 context.timingFunction = NativeMotion.easing
+                mark.animator().alphaValue = 1
                 symbol.animator().alphaValue = 1
             }
         } else {
+            mark.alphaValue = 1
             symbol.alphaValue = 1
         }
+    }
+
+    @objc private func showApplications() {
+        NSWorkspace.shared.open(StoreSetup.applications)
     }
 
     @objc private func performStep() {
         guard let step else { return }
         switch step {
         case .install:
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications", isDirectory: true))
+            action.isEnabled = false
+            action.title = "正在安装…"
+            do {
+                let destination = try StoreSetup.install()
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.createsNewApplicationInstance = true
+                NSWorkspace.shared.openApplication(at: destination, configuration: configuration) { [weak self] _, error in
+                    DispatchQueue.main.async {
+                        if error == nil { NSApp.terminate(nil) }
+                        else {
+                            self?.detail.stringValue = "已安装。请从「应用程序」打开 Diao Bridge。"
+                            self?.action.title = "打开应用程序"
+                            self?.action.action = #selector(SetupController.showApplications)
+                            self?.action.isEnabled = true
+                        }
+                    }
+                }
+            } catch {
+                detail.stringValue = "未能写入「应用程序」。请打开该文件夹核对权限，再重试。"
+                action.title = "重试安装"
+                action.isEnabled = true
+            }
         case .invalid:
             NSWorkspace.shared.open(URL(string: "https://github.com/Geeprox/tab-cadence/releases/latest")!)
         case .conflict:
@@ -686,7 +749,7 @@ final class SetupController: NSObject, NSWindowDelegate {
             if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
                 NSWorkspace.shared.open(chrome)
             } else {
-                detail.stringValue = "安装 Chrome 和 Tab Cadence 后，即可在扩展设置中开启 Mac 功能。"
+                detail.stringValue = "安装 Chrome 和 Diao 后，即可在扩展设置中开启 Mac 功能。"
             }
         }
     }

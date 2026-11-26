@@ -6,6 +6,7 @@ import {CredentialManager,credentialOrigin,credentialStorage} from './core/crede
 import {connectionSyncSlot} from './core/connection-sync.mjs';
 import {MRUController} from './core/mru-controller.mjs';
 import {createTidyTabs, tidyAlarm} from './core/tidy-tabs.mjs';
+import {createLinkGroups} from './core/link-groups.mjs';
 import {DEFAULTS,safeURL,privateURL,boundedEvidence,fingerprint,reserve,settle,mayReevaluate,pardon,mayClose,closeCandidate,visibilityLease,guard} from './core/policy.mjs';
 import {invoke,buildRequest} from './core/providers.mjs';
 import {duplicates,organizationPlan,identity,scheduledCandidate} from './core/workspace.mjs';
@@ -29,6 +30,7 @@ async function checkNative(refresh = false) {
   if (chrome.runtime.getPlatformInfo && (await chrome.runtime.getPlatformInfo()).os !== 'mac') {
     return {status:'unsupported'};
   }
+  if (helperUpdate.phase==='installing' && !native) return {status:'updating'};
   const connected = native;
   try {
     const port = await connectNative();
@@ -40,7 +42,7 @@ async function checkNative(refresh = false) {
   } catch {
     return {status:'unavailable'};
   }
-  return nativeConnection;
+  return {...nativeConnection,updatesAvailable:nativeCapabilities.has('updates-v1')};
 }
 
 async function requireNativeAccessibility() {
@@ -50,6 +52,7 @@ async function requireNativeAccessibility() {
     info.status === 'unsupported' ? '此功能仅适用于支持的 Mac。' : '请先下载并连接 Mac 助手，再开启此功能。');
 }
 const configRun=fn=>{const task=configSerial.then(fn,fn);configSerial=task.catch(()=>{});return task;};
+let helperUpdate={phase:'idle'},helperReconnect;
 let nativeCapabilities=new Set(),nativeHello=Promise.resolve(),finishNativeHello=()=>{},activeOverlay=null;
 const run=fn=>{const next=serial.then(fn,fn);serial=next.catch(()=>{});return next;};
 const cloudRun=fn=>{const next=cloudSerial.then(fn,fn);cloudSerial=next.catch(()=>{});return next;};
@@ -60,6 +63,7 @@ const saveRecords=records=>chrome.storage.local.set({records});
 async function leaseFor(record){if(!record)return null;const {leases={}}=await session();return Object.values(leases).find(lease=>visibilityLease(lease,record))||null;}
 const emit=()=>chrome.runtime.sendMessage({type:'updated'}).catch(()=>{});
 const tidyTabs=createTidyTabs(chrome,async()=>(await load()).records,emit);
+const linkGroups=createLinkGroups(chrome);
 const mru=new MRUController({chrome,getPort:()=>connectNative(),emit});
 const keychain=new CredentialManager({chrome,request:nativeCredential,settings:async()=>(await load()).settings,mutate:run,changed:()=>{emit();void resumeQueueAfterConnection().catch(()=>{});}});
 const connectionKey=settings=>JSON.stringify([settings.provider,settings.endpoint,settings.model]);
@@ -299,8 +303,48 @@ async function testAPI() {
     return {...result,provider:context.settings.provider,elapsedMs:Date.now()-start};
   }catch(error){await rememberModelCooldown(context.settings,error);throw error;}
 }
-async function connectNative(){
+function publishHelperUpdate(state) {
+  helperUpdate=state;
+  emit();
+}
+
+function installedTarget(actual,target) {
+  const a=String(actual||'').split('.').map(Number);
+  const b=String(target||'').split('.').map(Number);
+  if (!actual || !target || ![...a,...b].every(Number.isInteger)) return false;
+  for(let index=0;index<Math.max(a.length,b.length);index++){
+    const difference=(a[index]||0)-(b[index]||0);
+    if(difference) return difference>0;
+  }
+  return true;
+}
+
+async function reconnectUpdatedHelper(previous) {
+  for(const delay of [2200,4000,8000,12000]){
+    await new Promise(resolve=>setTimeout(resolve,delay));
+    if(helperUpdate!==previous)return;
+    try {
+      const port=await connectNative(true);
+      await nativeHello;
+      if(['ready','accessibility_required'].includes(nativeConnection.status) &&
+         installedTarget(nativeConnection.release,previous.release)){
+        publishHelperUpdate({phase:'installed',release:nativeConnection.release});
+        const {records,settings}=await load();
+        if(settings.rememberKey)void keychain.restore(settings).catch(()=>{});
+        if(settings.switcherEnabled)void mru.configure(true).catch(()=>{});
+        const reminder=Object.values(records).find(record=>['closing','paused'].includes(record.state)&&record.closeSurface==='native');
+        if(reminder)void run(()=>nativeShow(reminder.tabId,'countdown')).catch(()=>{});
+        return;
+      }
+      port.disconnect();
+    } catch {}
+  }
+  if(helperUpdate===previous)publishHelperUpdate({phase:'failed'});
+}
+
+async function connectNative(upgrade=false){
   if(native)return native;
+  if(!upgrade&&helperUpdate.phase==='installing')throw Error('Mac 助手正在更新。');
   const port=chrome.runtime.connectNative('app.tabpilot.bridge');native=port;
   expectNativeHello(port);
   port.onDisconnect.addListener(()=>{
@@ -313,6 +357,9 @@ async function connectNative(){
     nativeConnection = {status:/host (?:was )?not found|no such native application/i.test(linkError) ? 'missing' : 'disconnected'};
     finishNativeHello();
     mru.disconnected();
+    if(helperUpdate.phase==='installing'&&!helperReconnect) {
+      helperReconnect=reconnectUpdatedHelper(helperUpdate).finally(()=>{helperReconnect=null;});
+    }
     chrome.storage.session.set({nativeStatus:{status:nativeConnection.status,reason:'Mac 助手未连接。'}}).then(emit);
   });
   port.onMessage.addListener(message=>{
@@ -326,11 +373,17 @@ async function connectNative(){
       }
       return;
     }
+    if(message.type==='helperUpdate'){
+      if(['checking','staged','installing','current','failed'].includes(message.status)){
+        publishHelperUpdate({phase:message.status,release:message.release||helperUpdate.release});
+      }
+      return;
+    }
     if(message.type?.startsWith('mru')){mru.receive(message);return;}
     if(Array.isArray(message.capabilities))nativeCapabilities=new Set(message.capabilities);
     if (message.type === 'status') {
       if (['ready','accessibility_required'].includes(message.status)) {
-        nativeConnection = {status:message.status, version:message.version};
+        nativeConnection = {status:message.status, version:message.version,release:message.release};
         finishNativeHello();
       }
       chrome.storage.session.set({nativeStatus:message}).then(emit);
@@ -472,8 +525,8 @@ async function armClose(tabId,{manual=false}={}){
     }
   }
   if(surface==='panel'&&(manual||!await leaseFor(record)))throw Error(manual?
-    '标签栏关闭提醒需要 Mac 助手。请打开 Tab Cadence 的「设置 → macOS」，下载安装助手并开启标签提醒。':
-    '请从可见的管理面板开始关闭提醒，或在 Tab Cadence 的「设置 → macOS」安装助手并开启标签提醒。');
+    '标签栏关闭提醒需要 Mac 助手。请打开 Diao 的「设置 → macOS」，下载安装助手并开启标签提醒。':
+    '请从可见的管理面板开始关闭提醒，或在 Diao 的「设置 → macOS」安装助手并开启标签提醒。');
   const next={...record,tabId,windowId:tab.windowId,url:tab.url,title:tab.title,state:'paused',closeSurface:surface,
     closeIntent:manual?'manual':'suggestion',hash:await fingerprint(boundedEvidence(tab,snapshot)),
     evidenceRevision:snapshot.revision??0,closeAt:null,remainingMs:30000,counting:false,hoverPaused:false,
@@ -694,7 +747,7 @@ async function onMessage(message,sender) {
       keychain.sync.info().catch(()=>null),chrome.storage.local.get(['connectionCheck','connectionProfiles'])]);
     if(d.settings.rememberKey&&!currentKey(d.settings,s))void keychain.restore(d.settings);
     const liveRecords=Object.fromEntries(tabs.filter(t=>d.records[t.id]?.url===t.url&&d.records[t.id]?.windowId===t.windowId).map(t=>[t.id,d.records[t.id]]));
-    return {...d,tabTidyHours:await tidyTabs.setting(),analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:currentKey(d.settings,s),nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,syncConnection,connectionProfiles,connectionCheck:connectionCheck?.revision===d.settings.credentialRevision?connectionCheck:null,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
+    return {...d,helperUpdate,tabTidyHours:await tidyTabs.setting(),autoGroupLinks:await linkGroups.enabled(),analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:currentKey(d.settings,s),nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,syncConnection,connectionProfiles,connectionCheck:connectionCheck?.revision===d.settings.credentialRevision?connectionCheck:null,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
   }
   if(m.type==='backlogPlan'){
     const {settings}=await load();let tabs=await chrome.tabs.query({});
@@ -731,6 +784,12 @@ async function onMessage(message,sender) {
   if(m.type==='backlogPause'){await backlog.pause();return {ok:true};}
   if(m.type==='backlogResume'){await backlog.resume();return {ok:true};}
   if(m.type==='nativeCheck')return checkNative(m.refresh===true);
+  if(m.type==='helperCheckUpdate'){
+    await checkNative();
+    if(!native||!nativeCapabilities.has('updates-v1'))throw Error('当前助手需要安装一次新版。');
+    native.postMessage({type:'updates.check'});
+    return {ok:true};
+  }
   if(m.type==='saveSwitcher'){
     if(typeof m.enabled!=='boolean')throw new Error('重新选择快捷切换开关后重试。');
     if (m.enabled) await requireNativeAccessibility();
@@ -829,6 +888,7 @@ async function onMessage(message,sender) {
     if(r?.state==='resume'){records[m.tabId]={...r,state:'keep',watching:false,reason:'已接手。需要继续等待时可重新开始监听。'};await saveRecords(records);await chrome.tabs.sendMessage(m.tabId,{type:'adapter',adapter:null}).catch(()=>{});emit();}
     const tab=await chrome.tabs.update(m.tabId,{active:true});await chrome.windows.update(tab.windowId,{focused:true});return {ok:true};
   }
+  if(m.type==='setAutoGroupLinks')return {enabled:await linkGroups.configure(m.enabled===true)};
   if(m.type==='setTabTidyHours'){
     const hours=await tidyTabs.configure(m.hours);
     if(hours)void run(()=>tidyTabs.sweep()).catch(()=>{});
@@ -940,7 +1000,9 @@ async function observeTabLifecycle(tabId, change={}) {
   }
   emit();
 }
-chrome.tabs.onUpdated.addListener((tabId,change)=>{
+chrome.tabs.onUpdated.addListener((tabId,change,tab)=>{
+  if ('url' in change || change.status==='complete') void run(()=>linkGroups.groupLink(tabId)).catch(()=>{});
+  if (change.groupId === -1) void run(()=>linkGroups.membershipChanged(tab?.windowId)).catch(()=>{});
   if (change.groupId === -1 || 'url' in change) void run(()=>tidyTabs.touch(tabId)).catch(()=>{});
   if(change.status==='complete'||change.discarded===false||'url' in change)void backlog.wake(tabId).catch(()=>{});
   if(['url','status','audible','discarded','pinned','title'].some(key=>key in change))
@@ -963,8 +1025,10 @@ chrome.tabs.onReplaced?.addListener((added,removed)=>{
   emit();
 }).catch(()=>{});});
 
-chrome.tabs.onRemoved.addListener(tabId=>{void backlog.wake(tabId).catch(()=>{});return run(async()=>{const {records}=await load();delete records[tabId];await saveRecords(records);const {snapshots={}}=await session();delete snapshots[tabId];await chrome.storage.session.set({snapshots});await chrome.storage.session.remove('watchPrompt:'+tabId);hideOverlay(tabId);emit();});});
-chrome.tabs.onCreated?.addListener(()=>emit());
+chrome.tabs.onRemoved.addListener((tabId,info)=>{linkGroups.removed(tabId);if(info&&!info.isWindowClosing)void run(()=>linkGroups.membershipChanged(info.windowId)).catch(()=>{});void backlog.wake(tabId).catch(()=>{});return run(async()=>{const {records}=await load();delete records[tabId];await saveRecords(records);const {snapshots={}}=await session();delete snapshots[tabId];await chrome.storage.session.set({snapshots});await chrome.storage.session.remove('watchPrompt:'+tabId);hideOverlay(tabId);emit();});});
+chrome.tabs.onCreated?.addListener(tab=>{void run(()=>linkGroups.created(tab)).catch(()=>{});emit();});
+chrome.tabGroups?.onUpdated?.addListener(group=>{void run(()=>linkGroups.prune(group.id)).catch(()=>{});});
+chrome.tabGroups?.onRemoved?.addListener(group=>{void run(()=>linkGroups.prune(group.id)).catch(()=>{});});
 chrome.runtime.onInstalled.addListener(()=>{chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true});void registerTabMenus().catch(()=>{});chrome.alarms.create('review',{periodInMinutes:5});});
 chrome.runtime.onStartup.addListener(()=>run(async()=>{
   const {records:prior}=await load();

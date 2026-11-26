@@ -1,11 +1,11 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tab Cadence</title><link rel="stylesheet" href="ui.css"><script type="module" src="panel.mjs"></script></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Diao</title><link rel="stylesheet" href="ui.css"><script type="module" src="panel.mjs"></script></head>
 <body>
 <a class="skip" href="#main">跳到主要内容</a>
 <div class="shell">
 <header class="topbar">
-  <div class="brand"><img class="brandmark" src="icons/mark.svg" alt="" width="24" height="24"><span>Tab Cadence</span></div>
+  <div class="brand"><img class="brandmark" src="icons/icon-48.png" alt="" width="24" height="24"><span>Diao</span></div>
   <button id="settings-toggle" class="icon-button" aria-label="打开设置" title="打开设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" /></svg></button>
 </header>
 <div id="preview-note" class="preview-note" hidden>界面预览 · 合成页面 · 不调用 API</div>
@@ -117,8 +117,13 @@
     <button id="chat-enable" class="primary" type="button" disabled>检查授权中</button>
     <p id="chat-status" class="hint" role="status" aria-live="polite"></p>
   </section>
-  <section data-settings-section="tabs" hidden class="chat-settings" aria-labelledby="tidy-title">
-    <h2 id="tidy-title">闲置标签</h2>
+  <section data-settings-section="tabs" hidden class="chat-settings" aria-labelledby="tab-settings-title">
+    <h2 id="tab-settings-title">标签</h2>
+    <div class="tab-setting">
+      <label class="check"><input id="auto-group-links" type="checkbox" aria-describedby="auto-group-help"><span>将链接与来源页分组</span></label>
+      <p id="auto-group-help" class="hint">在后台打开链接时，Chrome 会把它与来源页放在一起。右键标签可取消分组。</p>
+    </div>
+    <div class="tab-setting">
     <label for="tab-tidy-hours">自动收纳间隔</label>
     <select id="tab-tidy-hours" aria-describedby="tab-tidy-help">
       <option value="0">关闭</option><option value="12">12 小时</option><option value="24">24 小时</option>
@@ -126,6 +131,7 @@
     </select>
     <p id="tab-tidy-help" class="hint">闲置页面会集中到标签栏的「闲置标签」。点击分组即可找回，右键可以取消分组。</p>
     <p id="tab-tidy-result" class="hint" role="status" hidden></p>
+    </div>
     <div class="row-actions tidy-tools">
       <button id="organize" class="secondary" type="button">按网站分组</button>
     </div>
@@ -135,14 +141,18 @@
       <h2 id="helper-title" tabindex="-1">安装 Mac 助手</h2>
       <p id="helper-instructions" class="hint"></p>
       <div class="row-actions helper-actions">
-        <a id="helper-download" class="primary" href="https://github.com/Geeprox/tab-cadence/releases/download/v0.4/TabCadence-0.4-macOS-arm64.dmg" target="_blank" rel="noopener noreferrer">下载 Mac 助手</a>
+        <a id="helper-download" class="primary" href="https://github.com/Geeprox/tab-cadence/releases/latest" target="_blank" rel="noopener noreferrer">下载 Mac 助手</a>
         <button id="helper-check" class="secondary" type="button">重新连接</button>
       </div>
-      <p id="helper-release" class="hint">适用 Apple 芯片和 macOS 27.2 起。<a href="https://github.com/Geeprox/tab-cadence/releases/tag/v0.4" target="_blank" rel="noopener noreferrer">版本与校验文件</a></p>
+      <p id="helper-release" class="hint">适用 Apple 芯片和 macOS 27.2 起。<a href="https://github.com/Geeprox/tab-cadence/releases/latest" target="_blank" rel="noopener noreferrer">版本与校验文件</a></p>
     </section>
-    <div class="helper-health">
-      <p id="helper-connected" class="hint helper-connected" role="status" hidden>Mac 助手已连接</p>
-      <a id="helper-update" href="https://github.com/Geeprox/tab-cadence/releases/download/v0.4/TabCadence-0.4-macOS-arm64.dmg" target="_blank" rel="noopener noreferrer" class="hint" hidden>更新 Mac 助手</a>
+    <div class="helper-health" id="helper-health" hidden>
+      <div>
+        <p id="helper-connected" class="hint helper-connected" role="status">Mac 助手已连接</p>
+        <p id="helper-update-status" class="hint" role="status"></p>
+      </div>
+      <button id="helper-check-update" class="secondary" type="button" hidden>检查更新</button>
+      <a id="helper-update" href="https://github.com/Geeprox/tab-cadence/releases/latest" target="_blank" rel="noopener noreferrer" class="hint" hidden>查看发布版本</a>
     </div>
     <fieldset id="native-controls" class="native-controls">
       <legend class="sr-only">Mac 功能</legend>

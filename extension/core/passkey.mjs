@@ -1,4 +1,4 @@
-const rp = {name: 'Tab Cadence'};
+const rp = {name: 'Diao'};
 const publicKeyParameters = [{type: 'public-key', alg: -7}, {type: 'public-key', alg: -257}];
 const requestTimeout = 60000;
 
@@ -96,7 +96,7 @@ export async function createSyncPasskey(credentials = globalThis.navigator?.cred
       user: {
         id: crypto.getRandomValues(new Uint8Array(32)),
         name: 'tab-cadence-model-connection',
-        displayName: 'Tab Cadence 模型连接',
+        displayName: 'Diao 模型连接',
       },
       pubKeyCredParams: publicKeyParameters,
       authenticatorSelection: {

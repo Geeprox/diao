@@ -247,6 +247,41 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   console.log('watch picker attached');
   await watch.screenshot({path:path.join(base,'watch.png'),timeout:8000});
   console.log('watch screenshot saved');
+  const sourceLink=await ctx.newPage();
+  await sourceLink.goto('https://watch.fixture.invalid/linked-source');
+  await sourceLink.evaluate(()=>{
+    document.title='旧城调研 | 合成验收';
+    for (const number of [1,2]) {
+      const anchor=document.createElement('a');
+      anchor.href='/linked-'+number;
+      anchor.textContent='调研链接 '+number;
+      document.body.append(anchor,document.createElement('br'));
+    }
+  });
+  const shortcut=process.platform==='darwin'?'Meta':'Control';
+  const opened=[];
+  for(const number of [1,2]) {
+    const newTab=ctx.waitForEvent('page');
+    await sourceLink.getByRole('link',{name:'调研链接 '+number}).click({modifiers:[shortcut]});
+    opened.push(await newTab);
+    await wait(()=>sw.evaluate(index=>chrome.tabs.query({url:'https://watch.fixture.invalid/linked-'+index}).then(result=>result.length>0),number),
+      'Chrome 未载入后台打开的链接 '+number,5000).catch(async error=>{
+      console.log('链接验收快照',await sw.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.map(({id,url,pendingUrl,openerTabId,groupId,active})=>({id,url,pendingUrl,openerTabId,groupId,active})))));
+      throw error;
+    });
+  }
+  const inspectLinks=()=>sw.evaluate(async()=> {
+    const [source]=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-source'});
+    const children=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-*'});
+    if(!source||source.groupId<0)return null;
+    const group=await chrome.tabGroups.get(source.groupId);
+    return {title:group.title,count:children.filter(child=>child.id!==source.id&&child.groupId===group.id).length};
+  });
+  await wait(async()=>{const group=await inspectLinks();return group?.count===2&&group.title==='旧城调研';},'真实 Chrome 后台链接未按来源自动编入原生分组');
+  for(const page of opened)await page.close();
+  await wait(async()=>!await inspectLinks(),'最后一个来源链接关闭后未恢复来源标签');
+  await sourceLink.close();
+  note('真实 Chrome 后台打开两个来源链接时共用原生分组，关闭两个子页后恢复来源标签。');
   await watch.locator('#state').click();
   const record=()=>sw.evaluate(async id=>(await chrome.storage.local.get('records')).records?.[id],tabId);
   await wait(async()=>(await record())?.watching,'右键监听未保存');
@@ -287,15 +322,15 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   }
   await panel.screenshot({path:path.join(base,'connection-light.png')});
   await panel.emulateMedia({colorScheme:'dark',reducedMotion:'reduce'});
-  assert.equal(await panel.locator('body').evaluate(node=>getComputedStyle(node).backgroundColor),'rgb(33, 33, 33)');
+  assert.equal(await panel.locator('body').evaluate(node=>getComputedStyle(node).backgroundColor),'rgb(31, 27, 40)');
   assert.deepEqual(await panel.locator('.preferences-tabs [aria-pressed=true]').evaluate(node=>{
     const style=getComputedStyle(node);
     return [style.backgroundColor,style.color];
-  }),['rgb(51, 51, 51)','rgb(244, 244, 244)']);
+  }),['rgb(59, 49, 77)','rgb(246, 241, 252)']);
   assert.deepEqual(await panel.locator('#save-settings').evaluate(node=>{
     const style=getComputedStyle(node);
     return [style.backgroundColor,style.color];
-  }),['rgb(244, 244, 244)','rgb(23, 23, 23)']);
+  }),['rgb(206, 190, 247)','rgb(35, 29, 49)']);
   await panel.screenshot({path:path.join(base,'connection-dark.png')});
   await panel.emulateMedia({colorScheme:'light'});
   assert.equal(await panel.locator('input[name=credentialStorage]:checked').inputValue(),'profile');

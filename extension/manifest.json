@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Tab Cadence",
+  "name": "Diao",
   "version": "0.9.0",
-  "description": "右键监听网页任务，在标签旁接手；在 ChatGPT 原位批注、浏览大纲并排队续发。",
+  "description": "让新开的链接留在同一组。网页任务在标签旁提醒，ChatGPT 支持原位批注、排队和会话概览。",
   "minimum_chrome_version": "120",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy7oaee56CZwJR98/VKEXnvowqJrJ6guLUHN9oDj/6kSvWsIrZ0gVlux5+P4gpTT04NH3hTS5/IQwl33Aj1uFUAjkCp6APpFzbFopM6T82gr38qDiu5erhxk+EY5lXB6VoBFoLbpCAA1LkLhnS50aKbVXaBL48yqp0gPdvAscwgp4MqxFDtgM6GZqk4xKKXuJwkjf8czCpz65Ouo4iHSquaQbFuV5r81uU0bTxL6AGq4sSJnNe5uL/cWdS10jdsB/NZEjwNBYhUh6D4AFw1gSPe0TmLXTY/TTSmweypN99rBM41Z7nT455LOkJ76dyTfIumjQzt5EpJwdIBt/PN1qiQIDAQAB",
   "permissions": [
@@ -26,7 +26,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "打开 Tab Cadence",
+    "default_title": "打开 Diao",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"

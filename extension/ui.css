@@ -1,39 +1,39 @@
 :root {
   color-scheme: light dark;
-  --color-bg: #fff;
+  --color-bg: #faf8fd;
   --color-surface: #fff;
-  --color-text: #171717;
-  --color-secondary: #606060;
-  --color-border: #8b8b8b;
-  --color-divider: #e8e8e8;
-  --color-accent: #171717;
-  --color-accent-hover: #333;
-  --color-accent-soft: #f1f1f1;
+  --color-text: #231d31;
+  --color-secondary: #625a70;
+  --color-border: #91869f;
+  --color-divider: #e8e3ef;
+  --color-accent: #5a477f;
+  --color-accent-hover: #4b386f;
+  --color-accent-soft: #efe9f9;
   --color-on-accent: #fff;
   --color-warning: #814609;
   --color-warning-soft: #fff2df;
   --color-danger: #a5322a;
-  --color-focus: #3c638f;
+  --color-focus: #7158a3;
   --motion-fast: 110ms cubic-bezier(.2,.8,.2,1);
   --motion-settle: 165ms cubic-bezier(.2,.8,.2,1);
   --page-gutter: clamp(16px, 5.5vw, 24px);
 font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;scrollbar-color:var(--color-border) var(--color-bg);caret-color:var(--color-accent)}
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-bg: #212121;
-    --color-surface: #252525;
-    --color-text: #f4f4f4;
-    --color-secondary: #b3b3b3;
-    --color-border: #808080;
-    --color-divider: #404040;
-    --color-accent: #f4f4f4;
-    --color-accent-hover: #dcdcdc;
-    --color-accent-soft: #333;
-    --color-on-accent: #171717;
+    --color-bg: #1f1b28;
+    --color-surface: #282332;
+    --color-text: #f6f1fc;
+    --color-secondary: #c3b8d0;
+    --color-border: #90829e;
+    --color-divider: #3e3749;
+    --color-accent: #cebef7;
+    --color-accent-hover: #e0d4ff;
+    --color-accent-soft: #3b314d;
+    --color-on-accent: #231d31;
     --color-warning: #ffd099;
     --color-warning-soft: #382c20;
     --color-danger: #ffaaa4;
-    --color-focus: #aecbf2;
+    --color-focus: #c9b5f6;
   }
 }
 
@@ -44,7 +44,7 @@ input[readonly]{background:var(--color-accent-soft);border-color:var(--color-div
 a{color:var(--color-accent);text-underline-offset:.2em}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--color-focus);outline-offset:3px}
 svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 .shell{max-width:560px;margin-inline:auto;min-height:100dvh;padding-inline:var(--page-gutter)}.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-block:10px;border-bottom:1px solid var(--color-divider)}
-.brand{display:flex;align-items:center;gap:9px;font-size:.9375rem;font-weight:650;letter-spacing:-.01em}.brandmark{width:24px;height:24px;display:block;flex-shrink:0}
+.brand{display:flex;align-items:center;gap:9px;font-size:.9375rem;font-weight:650;letter-spacing:-.01em}.brand span{color:var(--color-accent)}.brandmark{width:24px;height:24px;display:block;flex-shrink:0}
 .icon-button{min-width:36px;min-height:36px;padding:7px;border-color:transparent;background:transparent}.close-button{font-size:1.4rem}
 h1,h2{overflow-wrap:anywhere}
 h1{font-size:1.25rem;line-height:1.3;letter-spacing:-.02em;margin:0;font-weight:650;text-wrap:balance}h2{font-size:1.0625rem;line-height:1.4;font-weight:650;margin:0}
@@ -204,6 +204,10 @@ dialog::backdrop{background:#0005}dialog .section-heading{margin-block:0 12px}di
 .workspace-heading .count { margin-inline-start: 0; }
 .workspace-toolbar { margin-bottom: 16px; gap: 8px; }
 .workspace-toolbar button > svg { width: 16px; height: 16px; }
+.tab-setting { padding-block: 14px; }
+.tab-setting + .tab-setting { border-top: 1px solid var(--color-divider); }
+.tab-setting > label { margin-top: 0; }
+.tab-setting .check { font-weight: 600; }
 .tidy-tools { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--color-divider); }
 button:not(:disabled):active, .import-key:active { box-shadow: inset 0 0 0 1px currentColor; }
 .primary:not(:disabled):active { box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 25%, transparent); }

@@ -1,4 +1,4 @@
-name: macOS DMG
+name: Diao macOS release
 
 on:
   workflow_dispatch:
@@ -20,10 +20,16 @@ jobs:
       - name: Build and verify Apple silicon DMG
         env:
           DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+          DIAO_UPDATE_PUBLIC_KEY: ${{ vars.DIAO_UPDATE_PUBLIC_KEY }}
+          DIAO_SPARKLE_PRIVATE_KEY: ${{ github.ref_type == 'tag' && secrets.DIAO_SPARKLE_PRIVATE_KEY || '' }}
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF_TYPE" != tag ]]; then version=0.1; fi
+          if [[ -n "${DIAO_UPDATE_PUBLIC_KEY:-}" && "$GITHUB_REF_TYPE" == tag && -z "${DIAO_SPARKLE_PRIVATE_KEY:-}" ]]; then
+            echo '缺少 Diao 更新签名密钥。' >&2
+            exit 1
+          fi
           bash scripts/build_macos_release.sh "$RUNNER_TEMP/tab-cadence" "$version"
       - uses: actions/upload-artifact@v6
         with:
@@ -52,6 +58,6 @@ jobs:
           cd release-assets
           shasum -a 256 -c *.sha256
           gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
-            --title "Tab Cadence ${GITHUB_REF_NAME#v}" \
+            --title "Diao ${GITHUB_REF_NAME#v}" \
             --notes 'Apple silicon, macOS 27.2+. This DMG uses ad hoc signing. See the installation guide in the disk image.' \
-            ./*.dmg ./*.sha256
+            ./*

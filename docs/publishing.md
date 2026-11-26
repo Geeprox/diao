@@ -1,6 +1,6 @@
-# Tab Cadence 发布路线
+# Diao 发布路线
 
-使用 Geeprox 的现有 [Tab Cadence 商店条目](https://chromewebstore.google.com/detail/jbamhjcmjhmmhehjnnblflckmikhjojm) 发版本。安装身份为 jbamhjcmjhmmhehjnnblflckmikhjojm。资料见[隐私政策](https://geeprox.github.io/tab-cadence-support/)与[审核测试页](https://geeprox.github.io/tab-cadence-support/review-fixture.html)。
+使用 Geeprox 的现有 [商店条目](https://chromewebstore.google.com/detail/jbamhjcmjhmmhehjnnblflckmikhjojm) 发版本。安装身份为 jbamhjcmjhmmhehjnnblflckmikhjojm。资料见[隐私政策](https://geeprox.github.io/tab-cadence-support/)与[审核测试页](https://geeprox.github.io/tab-cadence-support/review-fixture.html)。
 
 ## Chrome 扩展
 
@@ -20,6 +20,14 @@
 4. 公证并装订票据，在干净 Mac 上验收 Gatekeeper、首次授权、浮标、遮挡暂停、保留、钥匙串、升级和卸载。当前开发验收覆盖 Apple silicon，其他系统范围以实际测试为准。 [Apple 签名与公证](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 
 分发版使用独立的 App bundle ID 和钥匙串服务。干净账户的助手安装及辅助功能权限需要独立验收。签名版本升级到新二进制后，还需验证系统授权及钥匙串的连续性。
+
+### 助手签名更新
+
+首次激活自动更新时，使用固定的 Sparkle 2.10.1 工具生成专用于 Diao 的更新签名密钥。将公开部分配置到 GitHub Actions 变量 `DIAO_UPDATE_PUBLIC_KEY`，私密部分存入 Actions secret `DIAO_SPARKLE_PRIVATE_KEY`，并单独保留发布密钥备份。保持所有发布的更新公钥一致。
+
+打标签后，工作流生成 DMG、Sparkle 更新 ZIP、SHA-256 和签名的 `diao-appcast.xml`，核对归档签名可用，再放入同一个 GitHub Release 草稿。确认更新包后发布为最新正式 Release。助手通过固定的最新正式 Release 地址检查签名更新。缺少更新公钥时生成的手动安装包不广告自动更新；配置公钥的正式发布必须具备配套签名密钥。
+
+先安装具备更新通道的 Diao Bridge，再用下一版本的签名归档实测下载、忙时延后、原子安装与 Chrome 重新连接。开发版、已安装商店版和正式发布签名通道分别验收。[Sparkle 更新发布文档](https://sparkle-project.org/documentation/publishing/)
 
 ## 审核与公开发布
 

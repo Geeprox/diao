@@ -30,10 +30,10 @@ def main():
     source_version = manifest['version']
     version = args.version if args.version is not None else source_version
     manifest['version'] = version
-    output = args.output_dir or ROOT / 'releases' / f'TabCadence-{version}'
+    output = args.output_dir or ROOT / 'releases' / f'Diao-{version}'
     files = {
         'manifest.json', 'sidepanel.html', 'panel.mjs', 'worker.mjs', 'sensor.js',
-        'watch-prompt.js', 'thread-history.js', 'threaddeck.js', 'ui.css', 'THIRD_PARTY_LICENSES.txt', 'icons/mark.svg',
+        'watch-prompt.js', 'thread-history.js', 'threaddeck.js', 'ui.css', 'THIRD_PARTY_LICENSES.txt',
         *manifest['icons'].values(), *manifest['action']['default_icon'].values(),
         *(str(p.relative_to(SOURCE)) for p in (SOURCE / 'core').glob('*.mjs')),
     }
@@ -50,7 +50,7 @@ def main():
         payload[name] = data
 
     output.mkdir(parents=True, exist_ok=True)
-    archive = output / f'TabCadence-{version}-store.zip'
+    archive = output / f'Diao-{version}-store.zip'
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as package:
         for name, data in payload.items():
             info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))

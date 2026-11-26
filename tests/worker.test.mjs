@@ -790,3 +790,42 @@ test('API 冷却遵守服务端 Retry-After，并在会话存储清空后继续�
     assert.equal(requests,1);
   } finally {globalThis.fetch=original;}
 });
+
+test('签名更新后读取新版并重新连接，同一个 Chrome 会话可以继续自动升级',async()=>{
+  await reset();
+  const connect=chrome.runtime.connectNative;
+  let release='0.5.0', port, connections=0;
+  chrome.runtime.connectNative=()=>{
+    const next={onMessage:new Event(),onDisconnect:new Event(),history:[]};
+    next.postMessage=message=>{
+      next.history.push(message.type);
+      if(message.type==='hello')void next.onMessage.fire({type:'status',status:'ready',version:'0.7.0',release,capabilities:['updates-v1']});
+    };
+    next.disconnect=()=>next.onDisconnect.fire();
+    port=next;
+    connections++;
+    return next;
+  };
+  try {
+    assert.equal((await send({type:'nativeCheck'})).data.updatesAvailable,true);
+    for(const next of ['0.5.1','0.5.2']){
+      assert.equal((await send({type:'helperCheckUpdate'})).ok,true);
+      assert(port.history.includes('updates.check'));
+      await port.onMessage.fire({type:'helperUpdate',status:'installing',release:next});
+      await port.disconnect();
+      assert.equal((await send({type:'nativeCheck'})).data.status,'updating');
+      release=next;
+      const until=Date.now()+5000;
+      let state;
+      do {
+        await new Promise(resolve=>setTimeout(resolve,70));
+        state=(await send({type:'state'})).data.helperUpdate;
+      }while(state.phase!=='installed'&&Date.now()<until);
+      assert.deepEqual(state,{phase:'installed',release:next});
+    }
+    assert.equal(connections,3);
+  }finally{
+    chrome.runtime.connectNative=connect;
+    await port?.disconnect();
+  }
+});
