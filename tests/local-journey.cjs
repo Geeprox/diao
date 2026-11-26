@@ -1048,6 +1048,26 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     element.style.getPropertyValue('--zoom-background')==='rgb(28, 25, 36)'),
     '已打开的概览没有跟随 ChatGPT 主题');
   await overview.screenshot({path:path.join(base,'overview-dark.png')});
+  const checkOverviewWidth=width=>overview.evaluate((surface,expectedWidth)=>{
+    const edge=surface.getBoundingClientRect();
+    const list=surface.querySelector('.zoom-list');
+    const top=surface.querySelector('.zoom-top');
+    const summary=top.querySelector('.zoom-conversation-summary').getBoundingClientRect();
+    const close=top.querySelector('.zoom-return').getBoundingClientRect();
+    const containsHorizontally=box=>box.width>0 && box.left>=edge.left-1 && box.right<=edge.right+1;
+    return innerWidth===expectedWidth && edge.width>200 && edge.left>=-1 && edge.right<=innerWidth+1 &&
+      list.scrollWidth<=list.clientWidth+1 && top.scrollWidth<=top.clientWidth+1 &&
+      containsHorizontally(summary) && containsHorizontally(close);
+  },width);
+  for(const width of [390,1680,1240]){
+    await chat.setViewportSize({width,height:880});
+    await wait(()=>checkOverviewWidth(width),'概览水平布局或摘要溢出 '+width);
+  }
+  await chat.waitForFunction(()=>document.querySelector('#threaddeck-host').shadowRoot
+    .querySelector('.semantic-zoom').dataset.settled==='true');
+  assert.equal(await overview.locator('.zoom-line[data-role="assistant"][data-digest="true"]').count(),12);
+  assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),1);
+  note('暗色会话概览在 390、1240 和 1680 像素视口切换后完整显示，没有横向溢出或新增模型请求。');
   await cdp.send('Input.dispatchMouseEvent',{type:'mouseWheel',x:w,y,deltaX:0,deltaY:-75,modifiers:2});
   await overview.waitFor({state:'hidden',timeout:5000});
   const zoomAfter=await sw.evaluate(async()=>chrome.tabs.getZoom((await chrome.tabs.query({url:'https://chatgpt.com/c/historyfixture'}))[0].id));
@@ -1151,6 +1171,8 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative);
   await chat.evaluate(()=>sessionStorage.setItem('fixture-progressive-cold-jump','on'));
   await chat.reload();
+  await chat.bringToFront();
+  await chat.emulateMedia({reducedMotion:'no-preference'});
   await host.locator('.compact-rail .rail-item').last().hover();
   const overviewProfiler=await ctx.newCDPSession(chat);
   await overviewProfiler.send('Performance.enable');
@@ -1161,7 +1183,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
       if(previous!==undefined)times.push(now-previous);
       previous=now;
       if(times.length<24)requestAnimationFrame(sample);
-      else resolve(Math.round(times.sort((a,b)=>a-b)[Math.floor((times.length-1)*.95)]));
+      else resolve(Math.round(times.sort((a,b)=>a-b)[Math.ceil(times.length*.95)-1]));
     };
     requestAnimationFrame(sample);
   }));
@@ -1169,25 +1191,37 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     window.fixtureWarmScrollWrites=0;
     const scrollTo=node.scrollTo.bind(node);
     node.scrollTo=(...args)=>{window.fixtureWarmScrollWrites++;return scrollTo(...args);};
-    const host=node.ownerDocument.querySelector('#threaddeck-host');
-    const trigger=host.shadowRoot.querySelector('[data-action="open-topics"]');
+    const shadow=node.ownerDocument.querySelector('#threaddeck-host').shadowRoot;
+    const trigger=shadow.querySelector('[data-action="open-topics"]');
+    const surface=shadow.querySelector('.semantic-zoom');
+    const summary=surface.querySelector('.zoom-conversation-summary');
     trigger.addEventListener('click',()=>{
-      const times=[];
       const start=performance.now();
-      let previous=start;
+      const intervals=[];
+      let previous, availableAt, visibleAt, settledAt;
       function sample(now){
-        times.push(now-previous);
+        const elapsed=performance.now()-start;
+        if(previous!==undefined)intervals.push(now-previous);
         previous=now;
-        if (host.shadowRoot.querySelector('.zoom-conversation-summary').hidden && now-start<4000) {
-          requestAnimationFrame(sample);
-        } else {
-          const ordered=times.slice(1).sort((a,b)=>a-b);
-          window.fixtureOverviewTiming={readyMs:Math.round(now-start),frames:ordered.length,
-            p95Ms:Math.round(ordered[Math.floor((ordered.length-1)*.95)] || 0)};
+        if(availableAt===undefined && !summary.hidden)availableAt=elapsed;
+        if(visibleAt===undefined && !summary.hidden && getComputedStyle(summary).visibility==='visible') {
+          visibleAt=elapsed;
         }
+        if(settledAt===undefined && surface.dataset.settled==='true')settledAt=elapsed;
+        if((settledAt===undefined || elapsed-settledAt<32) && elapsed<4000) {
+          requestAnimationFrame(sample);
+          return;
+        }
+        intervals.sort((a,b)=>a-b);
+        window.fixtureOverviewTiming={
+          availableMs:Math.round(availableAt),visibleMs:Math.round(visibleAt),
+          settledMs:Math.round(settledAt),frames:intervals.length,
+          p95Ms:Math.round(intervals[Math.ceil(intervals.length*.95)-1]),
+          longestMs:Math.round(intervals.at(-1)),
+        };
       }
       requestAnimationFrame(sample);
-    },{once:true});
+    },{capture:true,once:true});
   });
   const beforeOverview=new Map((await overviewProfiler.send('Performance.getMetrics')).metrics.map(({name,value})=>[name,value]));
   await host.locator('[data-action="open-topics"]').click();
@@ -1204,14 +1238,19 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
       head:overlay.top<=viewport.top+1,bottom:overlay.bottom>=viewport.bottom-1};
   });
   assert.deepEqual(cover,{opaque:'1',head:true,bottom:true});
-  await chat.waitForFunction(()=>Boolean(window.fixtureOverviewTiming));
+  await chat.waitForFunction(()=>Boolean(window.fixtureOverviewTiming),null,{timeout:5000});
   const overviewTiming=await chat.evaluate(()=>window.fixtureOverviewTiming);
   const afterOverview=new Map((await overviewProfiler.send('Performance.getMetrics')).metrics.map(({name,value})=>[name,value]));
   await overviewProfiler.detach();
+  assert(overviewTiming.frames>=6 && Number.isFinite(overviewTiming.settledMs),
+    '完整过渡必须有可测量的帧间隔 '+JSON.stringify(overviewTiming));
+  assert(overviewTiming.availableMs<=overviewTiming.visibleMs && overviewTiming.visibleMs<=overviewTiming.settledMs+20,
+    '缓存摘要应在概览过渡期间就绪并显示 '+JSON.stringify(overviewTiming));
   const cost=name=>Math.round((afterOverview.get(name)-beforeOverview.get(name))*1000);
-  note('原文覆盖、零宿主滚动和零额外模型请求通过。暖启动概览摘要 '+overviewTiming.readyMs+
-    ' ms，采样 '+overviewTiming.frames+' 帧，帧间隔 p95 '+overviewTiming.p95Ms+' ms，空闲 '+idleFrameP95+
-    ' ms，布局 '+cost('LayoutDuration')+' ms，脚本 '+cost('ScriptDuration')+' ms。');
+  note('原文覆盖、零宿主滚动和零额外模型请求通过。缓存摘要就绪 '+overviewTiming.availableMs+
+    ' ms，摘要可见 '+overviewTiming.visibleMs+' ms，过渡完成 '+overviewTiming.settledMs+
+    ' ms。'+overviewTiming.frames+' 个帧间隔，p95 '+overviewTiming.p95Ms+' ms，最长 '+overviewTiming.longestMs+
+    ' ms，空闲 p95 '+idleFrameP95+' ms，布局 '+cost('LayoutDuration')+' ms，脚本 '+cost('ScriptDuration')+' ms。');
   await overview.locator('.zoom-chapters summary').first().click();
   await overview.locator('.zoom-chapter',{hasText:'重复章节标题'}).first().click();
   await overview.waitFor({state:'hidden',timeout:7000}).catch(async error=>{
@@ -1270,6 +1309,34 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   assert.match(finalRevision.answer,/最终以第四位审核者/);
   await overview.locator('.zoom-ai-status').waitFor({state:'hidden',timeout:10000});
   note('保持可读摘要直至更新完成，慢响应返回后仍处理最后一次确认的正文修订。');
+  await overview.getByRole('button',{name:'返回对话'}).click();
+  await overview.waitFor({state:'hidden'});
+  await chat.emulateMedia({reducedMotion:'reduce'});
+  await host.locator('.compact-rail .rail-item').first().hover();
+  const motion=await overview.evaluate(surface=>{
+    const trigger=surface.getRootNode().querySelector('[data-action="open-topics"]');
+    const stream=surface.querySelector('.zoom-stream');
+    return new Promise(resolve=>{
+      let frames=0,scaled=false;
+      const start=performance.now();
+      function scan(){
+        frames++;
+        scaled=scaled || Boolean(stream.style.transform);
+        if(surface.dataset.settled==='true' || performance.now()-start>2000) {
+          resolve({frames,scaled,settled:surface.dataset.settled==='true'});
+        } else requestAnimationFrame(scan);
+      }
+      trigger.click();
+      scan();
+    });
+  });
+  assert(motion.settled&&motion.frames>=2&&!motion.scaled,JSON.stringify(motion));
+  await overview.locator('.zoom-conversation-summary',{hasText:'处置顺序'}).waitFor();
+  await chat.keyboard.press('Escape');
+  await overview.waitFor({state:'hidden'});
+  assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative+3);
+  await chat.emulateMedia({reducedMotion:'no-preference'});
+  note('减少动态效果开启时概览只淡入淡出，内容保留，无额外模型调用。');
 
   await chat.goto('https://chatgpt.com/c/'+stalledId);
   await chat.bringToFront();
