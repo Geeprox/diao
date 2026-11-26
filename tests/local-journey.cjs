@@ -274,12 +274,16 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     const [source]=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-source'});
     const children=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-*'});
     if(!source||source.groupId<0)return null;
-    const group=await chrome.tabGroups.get(source.groupId);
+    const group=await chrome.tabGroups.get(source.groupId).catch(()=>null);
+    if(!group)return null;
     return {title:group.title,count:children.filter(child=>child.id!==source.id&&child.groupId===group.id).length};
   });
   await wait(async()=>{const group=await inspectLinks();return group?.count===2&&group.title==='旧城调研';},'真实 Chrome 后台链接未按来源自动编入原生分组');
   for(const page of opened)await page.close();
-  await wait(async()=>!await inspectLinks(),'最后一个来源链接关闭后未恢复来源标签');
+  await wait(()=>sw.evaluate(async()=>{
+    const [tab]=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-source'});
+    return tab?.groupId===-1;
+  }),'最后一个来源链接关闭后未恢复来源标签');
   await sourceLink.close();
   note('真实 Chrome 后台打开两个来源链接时共用原生分组，关闭两个子页后恢复来源标签。');
   await watch.locator('#state').click();
