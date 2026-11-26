@@ -40,6 +40,7 @@ async function rpc(type,args={}) {
   if(type==='pardon')demo.records[args.tabId]={state:'keep',reason:'已保留本次。'};
   if(type==='watchPage'){demo.records[args.tabId]={state:'waiting',watching:true,reason:'正在监听状态变化。'};return {listening:true};}
   if(type==='stopWatch')delete demo.records[args.tabId];
+  if(type==='setTabTidyHours'){demo.tabTidyHours=args.hours;return {hours:args.hours};}
   if(type==='organizationPlan')return organizationPlan(demo.tabs,args.windowId);
   if(type==='organize'){demo.canUndoOrganization=true;return {groups:args.plan.groups.length};}
   if(type==='undoOrganization')demo.canUndoOrganization=false;
@@ -230,7 +231,7 @@ function showCheckView(next){
  const picking=next==='watch';
  $('#backlog-options').hidden=picking;
  $('#watch-selection').hidden=!picking;
- say($('#backlog-dialog-title'),picking?'选择要监听的网页':'检查打开的网页');
+ say($('#backlog-dialog-title'),picking?'选择要监听的网页':'添加事项');
  $('#backlog-error').textContent='';
  if(picking){$('#watch-search').value='';renderWatchList();$('#watch-search').focus();}
  else $('#backlog-dialog-title').focus({preventScroll:true});
@@ -373,6 +374,7 @@ async function refresh(){
   updateCredentialUI();
  }
  if(!switcherDirty)$('#switcher-enabled').checked=data.settings.switcherEnabled;
+ if(!$('#tab-tidy-hours').disabled)$('#tab-tidy-hours').value=String(data.tabTidyHours||0);
  if($('#backlog-dialog').open)updateBacklogSelection();
  paintHelperSetup();
 }
@@ -422,7 +424,7 @@ function openPreferences(next,{motion=true}={}){
  document.querySelectorAll('[data-preferences]').forEach(n=>n.setAttribute('aria-pressed',String(n.dataset.preferences===next)));
  document.querySelectorAll('[data-settings-section]').forEach(n=>n.hidden=n.dataset.settingsSection!==next);
  const form=$('#settings-form');
- form.hidden=next==='native'||next==='chat';
+ form.hidden=['native','chat','tabs'].includes(next);
  updateSaveLabel();
  if(next==='connection')updateCredentialUI();
  if(next==='chat')void refreshChatSettings();
@@ -560,7 +562,22 @@ async function authorizeEndpoint(endpoint){
  if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash)throw Error('请填写完整的 HTTPS API 地址。');
  if(!await chrome.permissions.request({origins:[url.origin+'/*']}))throw Error('请授权此 API 地址。');
 }
-const undo=button('撤销整理',async()=>{await rpc('undoOrganization');await refresh();status('已撤销本次分组整理。');});undo.id='undo-organization';undo.hidden=true;$('.workspace-toolbar').append(undo);
+const undo=button('撤销网站分组',async()=>{await rpc('undoOrganization');await refresh();status('已撤销网站分组。');});
+undo.id='undo-organization';undo.hidden=true;$('.tidy-tools').append(undo);
+$('#tab-tidy-hours').addEventListener('change',event=>{
+ const control=event.currentTarget, result=$('#tab-tidy-result');
+ control.disabled=true;result.hidden=false;say(result,'正在保存…');
+ void (async()=>{
+  try{
+   const saved=await rpc('setTabTidyHours',{hours:Number(control.value)});
+   control.value=String(saved.hours);
+   say(result,saved.hours?'已开启自动收纳':'已关闭自动收纳');
+  }catch(error){
+   control.value=String(data.tabTidyHours||0);
+   say(result,error.message);
+  }finally{control.disabled=false;await refresh();}
+ })().catch(error=>say(result,error.message));
+});
 $('#settings-toggle').addEventListener('click',()=>openView(view==='settings'?'workspace':'settings'));
 $('#back').addEventListener('click',()=>openView('workspace'));
 $('#usage-link').addEventListener('click',()=>{preferences='usage';openView('settings');});
@@ -710,7 +727,7 @@ $('#organize').addEventListener('click',()=>task(async()=>{
  for(const group of organization.groups){const row=document.createElement('div');row.className='plan-row';const name=document.createElement('bdi');name.textContent=group.title;const count=document.createElement('span');count.textContent=group.tabIds.length+' 个标签';row.append(name,count);$('#organization-plan').append(row);}
  $('#apply-organization').disabled=!organization.groups.length;$('#organize-dialog').returnValue='';$('#organize-dialog').showModal();
 }));
-$('#organize-dialog').addEventListener('close',()=>{if($('#organize-dialog').returnValue==='apply')task(async()=>{const result=await rpc('organize',{plan:organization});await refresh();status('已整理为 '+result.groups+' 个网站分组，可在上方撤销。');});});
+$('#organize-dialog').addEventListener('close',()=>{if($('#organize-dialog').returnValue==='apply')task(async()=>{const result=await rpc('organize',{plan:organization});await refresh();status('已整理为 '+result.groups+' 个网站分组。');});});
 $('#switcher-enabled').addEventListener('change',()=>{
  const control=$('#switcher-enabled');
  switcherDirty=true;control.disabled=true;$('#switcher-error').textContent='';

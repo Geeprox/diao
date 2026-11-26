@@ -1,10 +1,11 @@
 import {createThreadWorkspace} from './core/thread-workspace.mjs';
-import {conversationAt, topicConnection, topicBatchLayout, topicSnapshot, readTopics, readLatestTopicOverview, rememberTopicOverview, requestTopics, saveTopicBatch, topicSynthesis} from './core/topics.mjs';
+import {conversationAt, topicConnection, topicBatchLayout, topicSnapshot, readTopics, readLatestTopicOverview, rememberTopicOverview, markTopicHistoryProbed, requestTopics, saveTopicBatch, topicSynthesis} from './core/topics.mjs';
 import {BacklogQueue,backlogPlan,backlogExclusion,backlogWaiting,trackableTab,queueSummary} from './core/backlog.mjs';
 import {advanceCountdown,nativeVisibilityFresh} from './core/countdown.mjs';
 import {CredentialManager,credentialOrigin,credentialStorage} from './core/credentials.mjs';
 import {connectionSyncSlot} from './core/connection-sync.mjs';
 import {MRUController} from './core/mru-controller.mjs';
+import {createTidyTabs, tidyAlarm} from './core/tidy-tabs.mjs';
 import {DEFAULTS,safeURL,privateURL,boundedEvidence,fingerprint,reserve,settle,mayReevaluate,pardon,mayClose,closeCandidate,visibilityLease,guard} from './core/policy.mjs';
 import {invoke,buildRequest} from './core/providers.mjs';
 import {duplicates,organizationPlan,identity,scheduledCandidate} from './core/workspace.mjs';
@@ -58,6 +59,7 @@ const session=()=>chrome.storage.session.get(['apiKey','apiKeyOrigin','apiKeyRev
 const saveRecords=records=>chrome.storage.local.set({records});
 async function leaseFor(record){if(!record)return null;const {leases={}}=await session();return Object.values(leases).find(lease=>visibilityLease(lease,record))||null;}
 const emit=()=>chrome.runtime.sendMessage({type:'updated'}).catch(()=>{});
+const tidyTabs=createTidyTabs(chrome,async()=>(await load()).records,emit);
 const mru=new MRUController({chrome,getPort:()=>connectNative(),emit});
 const keychain=new CredentialManager({chrome,request:nativeCredential,settings:async()=>(await load()).settings,mutate:run,changed:()=>{emit();void resumeQueueAfterConnection().catch(()=>{});}});
 const connectionKey=settings=>JSON.stringify([settings.provider,settings.endpoint,settings.model]);
@@ -526,15 +528,17 @@ async function undoOrganization() {
   for(const group of t.created)await chrome.tabs.ungroup(group.tabIds);
   await restoreOrder(t.source);await chrome.storage.session.remove('organizationUndo');emit();return {ok:true};
 }
-async function topicConversation(sender) {
+async function topicConversation(sender, foreground = false) {
   const tab = await chrome.tabs.get(sender.tab.id).catch(() => null);
   if (!tab || tab.incognito || !await threadWorkspace.status().then(state => state.enabled)) {
     throw new Error('当前 ChatGPT 页面未获对话工具授权。');
   }
+  if (foreground && (!tab.active || (await chrome.windows.get(tab.windowId).catch(()=>null))?.focused !== true)) return '';
   return conversationAt(tab.url);
 }
 
-const topicActions = ['topicsRead','topicsOpen','topicsGenerate','topicsConnection','topicsCached'];
+const topicActions = ['topicsRead','topicsOpen','topicsPrepare','topicsGenerate','topicsConnection','topicsCached','topicsHistoryProbed'];
+const pendingTopics = new Map();
 const attemptKey = 'threadTopicAttempts';
 async function rememberTopicAttempt(storage, key, value) {
   const { [attemptKey]: current = {} } = await storage.get(attemptKey);
@@ -543,15 +547,20 @@ async function rememberTopicAttempt(storage, key, value) {
   await storage.set({[attemptKey]:Object.fromEntries(retained)});
 }
 async function conversationTopics(action, value, sender) {
-  const conversation = await topicConversation(sender);
+  const preparing = action === 'topicsPrepare';
+  const conversation = await topicConversation(sender,preparing);
+  if (preparing && !conversation) return {state:'deferred'};
   if (action === 'topicsConnection') {
     if (!conversation) throw Error('当前会话无法打开模型连接。');
     await chrome.tabs.create({url:chrome.runtime.getURL('sidepanel.html')+'?view=connection'});
     return {opened:true};
   }
-  const automatic = action === 'topicsOpen';
+  const automatic = action === 'topicsOpen' || preparing;
   const storage = chrome.storage.local;
-  if (action === 'topicsCached') return readLatestTopicOverview(storage, conversation, value);
+  if (action === 'topicsCached') return readLatestTopicOverview(storage,conversation,value);
+  if (action === 'topicsHistoryProbed') return run(()=>markTopicHistoryProbed(storage,conversation,value));
+  const preferences = async () => (await storage.get('threadWorkspacePreferences')).threadWorkspacePreferences;
+  if (preparing && (await preferences())?.prepareTopicSummary !== true) return {state:'deferred'};
   const settings = (await load()).settings;
   let connection;
   try {
@@ -560,14 +569,13 @@ async function conversationTopics(action, value, sender) {
     if (automatic || action === 'topicsRead') return {state:'connection',description:error.message};
     throw error;
   }
-  const snapshot = await topicSnapshot(value, conversation, await topicBatchLayout(storage, conversation, connection));
+  const snapshot = await topicSnapshot({...value,preparing},conversation,await topicBatchLayout(storage,conversation,connection));
   if (action === 'topicsRead') return (await readTopics(storage,snapshot,connection)).view;
-  if (automatic) {
-    const {threadWorkspacePreferences} = await storage.get('threadWorkspacePreferences');
-    if (threadWorkspacePreferences?.autoTopicSummary === false) return (await readTopics(storage,snapshot,connection)).view;
-  }
+  if (automatic && (await preferences())?.autoTopicSummary === false) return (await readTopics(storage,snapshot,connection)).view;
   const key = await fingerprint({conversation,model:connection.model,revision:settings.credentialRevision||'',batches:snapshot.batches.map(batch=>batch.digest)});
-  return cloudRun(async () => {
+  const flight = key + ':' + snapshot.partial;
+  if (pendingTopics.has(flight)) return pendingTopics.get(flight);
+  const work = cloudRun(async () => {
     const {view, parts} = await readTopics(storage, snapshot, connection);
     if (view.state === 'ready') { await rememberTopicOverview(storage,snapshot,connection,parts); return view; }
     if (automatic) {
@@ -579,7 +587,10 @@ async function conversationTopics(action, value, sender) {
     async function generate(batch) {
       if (parts[batch.digest]) return;
       const context = await run(async () => {
-        if (await topicConversation(sender) !== snapshot.conversation) throw new Error('已切换会话，分析已停止。');
+        if (await topicConversation(sender,preparing) !== snapshot.conversation ||
+            preparing && (await preferences())?.prepareTopicSummary !== true) {
+          throw Object.assign(new Error('摘要准备已暂停。'),{code:'topic_deferred'});
+        }
         const {settings, ledger} = await load();
         if (topicConnection(settings).model !== connection.model) throw new Error('模型已更改，请重新打开概览。');
         const key = await credentials(settings);
@@ -614,6 +625,10 @@ async function conversationTopics(action, value, sender) {
       if (ready.view.state === 'ready') await rememberTopicOverview(storage,snapshot,connection,ready.parts);
       return ready.view;
     } catch (error) {
+      if (error.code === 'topic_deferred') {
+        if (attempted) await rememberTopicAttempt(storage,key,null);
+        return {state:'deferred'};
+      }
       const quota = error.status === 429 || error.code === 'provider_backoff';
       const needsConnection = error.code === 'connection_required' || [401,403].includes(error.status);
       const result = needsConnection ? {state:'connection',description:'连接未就绪，可在模型连接中恢复。'} :
@@ -624,6 +639,9 @@ async function conversationTopics(action, value, sender) {
       throw error;
     }
   });
+  pendingTopics.set(flight,work);
+  try { return await work; }
+  finally { if (pendingTopics.get(flight) === work) pendingTopics.delete(flight); }
 }
 
 async function settleTopicUsage(context, usage) {
@@ -676,7 +694,7 @@ async function onMessage(message,sender) {
       keychain.sync.info().catch(()=>null),chrome.storage.local.get(['connectionCheck','connectionProfiles'])]);
     if(d.settings.rememberKey&&!currentKey(d.settings,s))void keychain.restore(d.settings);
     const liveRecords=Object.fromEntries(tabs.filter(t=>d.records[t.id]?.url===t.url&&d.records[t.id]?.windowId===t.windowId).map(t=>[t.id,d.records[t.id]]));
-    return {...d,analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:currentKey(d.settings,s),nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,syncConnection,connectionProfiles,connectionCheck:connectionCheck?.revision===d.settings.credentialRevision?connectionCheck:null,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
+    return {...d,tabTidyHours:await tidyTabs.setting(),analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:currentKey(d.settings,s),nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,syncConnection,connectionProfiles,connectionCheck:connectionCheck?.revision===d.settings.credentialRevision?connectionCheck:null,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
   }
   if(m.type==='backlogPlan'){
     const {settings}=await load();let tabs=await chrome.tabs.query({});
@@ -811,6 +829,11 @@ async function onMessage(message,sender) {
     if(r?.state==='resume'){records[m.tabId]={...r,state:'keep',watching:false,reason:'已接手。需要继续等待时可重新开始监听。'};await saveRecords(records);await chrome.tabs.sendMessage(m.tabId,{type:'adapter',adapter:null}).catch(()=>{});emit();}
     const tab=await chrome.tabs.update(m.tabId,{active:true});await chrome.windows.update(tab.windowId,{focused:true});return {ok:true};
   }
+  if(m.type==='setTabTidyHours'){
+    const hours=await tidyTabs.configure(m.hours);
+    if(hours)void run(()=>tidyTabs.sweep()).catch(()=>{});
+    return {hours};
+  }
   if(m.type==='organizationPlan')return organizationPlan(await chrome.tabs.query({windowId:m.windowId}),m.windowId);
   if(m.type==='organize')return applyOrganization(m.plan);
   if(m.type==='undoOrganization')return undoOrganization();
@@ -834,6 +857,7 @@ chrome.runtime.onMessage.addListener((m,sender,reply)=>{
   operation.then(data=>reply({ok:true,data}),error=>reply({ok:false,error:error.message}));return true;
 });
 chrome.alarms.onAlarm.addListener(alarm=>{
+  if(alarm.name===tidyAlarm)return run(()=>tidyTabs.sweep()).catch(()=>{});
   if(alarm.name==='backlog'){void backlog.tick().catch(()=>{});return;}
   if(alarm.name==='review') {
     cloudRun(async()=>{
@@ -855,6 +879,7 @@ chrome.alarms.onAlarm.addListener(alarm=>{
 });
 chrome.tabs.onActivated.addListener(({tabId})=>run(async()=>{
   await cancelClose(tabId);
+  await tidyTabs.touch(tabId);
   const {records}=await load(),record=records[tabId];
   if(record?.state==='resume'){
     records[tabId]={...record,state:'keep',watching:false,reason:'已接手。'};
@@ -916,6 +941,7 @@ async function observeTabLifecycle(tabId, change={}) {
   emit();
 }
 chrome.tabs.onUpdated.addListener((tabId,change)=>{
+  if (change.groupId === -1 || 'url' in change) void run(()=>tidyTabs.touch(tabId)).catch(()=>{});
   if(change.status==='complete'||change.discarded===false||'url' in change)void backlog.wake(tabId).catch(()=>{});
   if(['url','status','audible','discarded','pinned','title'].some(key=>key in change))
     void run(()=>observeTabLifecycle(tabId,change)).catch(()=>{});
@@ -966,7 +992,7 @@ chrome.runtime.onStartup.addListener(()=>run(async()=>{
   const queue=await backlog.read();if(queue){queue.autoReview=false;if(['running','waiting','blocked'].includes(queue.phase)){queue.phase='paused';queue.reason='浏览器已重启，可确认后继续本轮分析。';}await chrome.storage.local.set({analysisQueue:queue});}
   await saveRecords(records);
   for(const id of restored)await observeTabLifecycle(id,{restored:true});
-  await chrome.alarms.create('review',{periodInMinutes:5});emit();
+  await chrome.alarms.create('review',{periodInMinutes:5});await tidyTabs.schedule();emit();
 }));
 mru.start().catch(()=>mru.report('unavailable','快捷切换未连接；在设置中重新保存后重试。'));
 
@@ -979,6 +1005,7 @@ Promise.all([chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'
 chrome.windows.onFocusChanged?.addListener(windowId=>run(async()=>{await chrome.storage.session.set({chromeFocusedWindow:windowId});const {records,settings}=await load();if(windowId>=0&&settings.rememberKey)void keychain.restore(settings);for(const [id,r]of Object.entries(records))if(['closing','paused'].includes(r.state))await updateCountdownVisibility(Number(id));}));
 
 void backlog.recover().catch(()=>{});
+void tidyTabs.schedule().catch(()=>{});
 
 void run(()=>threadWorkspace.reconcile()).catch(()=>{});
 chrome.permissions.onRemoved?.addListener(({origins=[]})=>{if(origins.includes('https://chatgpt.com/*'))void run(()=>threadWorkspace.revoke()).catch(()=>{});});

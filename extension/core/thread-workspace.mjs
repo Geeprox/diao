@@ -93,10 +93,16 @@ export function createThreadWorkspace(chrome, handleTopics){
    }
    return until;
   }
-  if(['topicsRead','topicsOpen','topicsGenerate','topicsConnection','topicsCached'].includes(m.action)&&handleTopics)return handleTopics(m.action,m.value,sender);
+  if(['topicsRead','topicsOpen','topicsPrepare','topicsGenerate','topicsConnection','topicsCached','topicsHistoryProbed'].includes(m.action)&&handleTopics)return handleTopics(m.action,m.value,sender);
   if(m.key===settingsKey){
    if(m.action==='get')return (await local.get(prefs))[prefs]||null;
-   if(m.action==='set'&&m.value&&typeof m.value==='object'&&!Array.isArray(m.value)&&bytes(m.value)<=16384){await local.set({[prefs]:m.value});return true;}
+   if(m.action==='set'&&m.value&&typeof m.value==='object'&&!Array.isArray(m.value)&&bytes(m.value)<=16384){
+    await local.set({[prefs]:m.value});
+    const tabs=await chrome.tabs.query({url:[match]}).catch(()=>[]);
+    void Promise.allSettled(tabs.filter(tab=>tab.id!==sender.tab.id&&!tab.incognito&&!tab.discarded).map(tab=>
+      chrome.tabs.sendMessage(tab.id,{type:'THREAD_PILOT_PREFERENCES'},{frameId:0})));
+    return true;
+   }
   }
   if(m.action==='keys'||cacheKey(m.key)){
    const previous=(await local.get(cache))[cache]||{};

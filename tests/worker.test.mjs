@@ -540,6 +540,55 @@ test('自动摘要不可重复发起失败请求，关闭自动摘要也不会�
   }
 });
 
+test('提前准备和打开概览共用在途请求，后台标签与关闭偏好不发请求', async () => {
+  await reset();
+  const conversation='prepare-overview-fixture';
+  tabs[0]={...tabs[0],active:true,url:'https://chatgpt.com/c/'+conversation};
+  const sender={id:chrome.runtime.id,url:tabs[0].url,frameId:0,tab:tabs[0]};
+  const value={conversation,format:'summary-v3',partial:true,turns:[{
+    id:'fixture-question',question:'什么时候复盘？',answer:'周一复盘，达标后决定是否启动。',
+    sections:['复盘'],navigation:{role:'user',nodeId:'fixture-question',answers:[
+      {id:'fixture-answer',nodeId:'fixture-answer',sections:[]},
+    ]},
+  }]};
+  const call=(action,input=value)=>send({type:'threadWorkspace',action,value:input},sender);
+  await local.set({threadWorkspaceEnabled:true,threadWorkspacePreferences:{autoTopicSummary:true}});
+  const original=globalThis.fetch, windowGet=chrome.windows.get;
+  let release,calls=0;
+  chrome.windows.get=async()=>({focused:true});
+  globalThis.fetch=async()=>{
+    calls++;
+    await new Promise(resolve=>{release=resolve;});
+    const result={summary:'周一复盘后决定是否启动。',topics:[{start:1,end:1,title:'复盘',summary:'安排在周一。'}],
+      turns:[{turn:1,question:'何时复盘？',answer:'周一，达标后再决定。'}]};
+    return new Response(JSON.stringify({status:'completed',output:[{type:'message',
+      content:[{type:'output_text',text:JSON.stringify(result)}]}]}));
+  };
+  try{
+    assert.equal((await call('topicsPrepare')).data.state,'deferred');
+    await local.set({threadWorkspacePreferences:{autoTopicSummary:true,prepareTopicSummary:true}});
+    tabs[0].active=false;
+    assert.equal((await call('topicsPrepare')).data.state,'deferred');
+    assert.equal(calls,0);
+    tabs[0].active=true;
+    const preparing=call('topicsPrepare');
+    for(let turn=0;turn<40&&!release;turn++)await new Promise(resolve=>setImmediate(resolve));
+    assert(release);
+    const opening=call('topicsOpen');
+    release();
+    const [prepared,opened]=await Promise.all([preparing,opening]);
+    assert.equal(prepared.data.historyPending,true);
+    assert.equal(opened.data.summary,prepared.data.summary);
+    assert.equal(calls,1);
+    const evidence={conversation,allowPartial:true,messages:[{id:'fixture-answer',role:'assistant'}]};
+    assert.equal((await call('topicsCached',evidence)).data.historyPending,true);
+    await call('topicsHistoryProbed',prepared.data.historyKey);
+    assert.equal((await call('topicsCached',evidence)).data.historyPending,undefined);
+    assert.equal((await call('topicsOpen')).data.state,'ready');
+    assert.equal(calls,1);
+  }finally{globalThis.fetch=original;chrome.windows.get=windowGet;release?.();}
+});
+
 test('未安装 Mac 助手时原生功能保持关闭，并返回可操作的安装提示', async () => {
   await reset();
   const connect = chrome.runtime.connectNative;

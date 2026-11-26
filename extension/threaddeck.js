@@ -113,6 +113,7 @@
     navigationStyle: 'rail',
     pinchTopics: true,
     autoTopicSummary: true,
+    prepareTopicSummary: false,
     rightOffset: 12,
     hideBelowWidth: 720,
     sites: Object.freeze({
@@ -2729,6 +2730,7 @@ const TDAnswerOutline = (() => {
       'enableAnswerJump',
       'pinchTopics',
       'autoTopicSummary',
+      'prepareTopicSummary',
       'prefetchHistoryOnOutline',
       'hideNativeChatGptRail',
       'rememberPrompts',
@@ -6005,6 +6007,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
       const scene = tdZoom.scene;
       if (scene?.topicState === 'connection' && settings.autoTopicSummary) scene.localCacheRead = false;
       if (scene?.progress >= .999) tdZoomScheduleSettled(scene);
+      else if (!scene) tdZoomPrepare();
     });
   }
 
@@ -10957,7 +10960,7 @@ function tdNavScrollRoot(target) {
   const tdZoom = {
     root: null, listener: null, surface: null, backdrop: null, list: null, stream: null,
     button: null, index: null, records: [],
-    scene: null, control: false, tail: null, frame: 0, settle: 0,
+    scene: null, preparation: null, control: false, tail: null, frame: 0, settle: 0,
   };
   const tdZoomReducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const tdZoomExcluded = 'input,textarea,select,button,[contenteditable],[role="textbox"],[role="dialog"],nav,aside';
@@ -11409,6 +11412,13 @@ function tdNavScrollRoot(target) {
 
   function tdZoomHistoryStalled(scene) {
     if (tdZoom.scene !== scene || !tdAlive(scene.scope)) return;
+    if (scene.historyKey && scene.history.attempted) {
+      const proof = scene.historyKey;
+      void chrome.runtime.sendMessage({type:'threadWorkspace',action:'topicsHistoryProbed',value:proof}).catch(()=>{});
+      const ready = tdZoom.preparation?.view;
+      if (ready?.historyKey === proof) ready.historyPending = false;
+    }
+    scene.historyKey = null;
     // 网页不再补载时，允许使用已有正文生成部分摘要。
     scene.history.attempted = true;
     scene.history.exhausted = true;
@@ -11451,7 +11461,7 @@ function tdNavScrollRoot(target) {
       if (tdZoom.scene !== scene || !tdAlive(scene.scope) || tdZoomMoving(scene) || document.hidden) return;
       tdZoomApplyTopics(scene);
       tdZoomExtend();
-      void tdZoomLoadTopics(scene);
+      if (!tdZoomAdvancePreparedHistory(scene)) void tdZoomLoadTopics(scene);
       if (scene.deferredRefresh) {
         scene.deferredRefresh = false;
         scheduleRefresh('overview-motion-settled',0);
@@ -11506,6 +11516,8 @@ function tdNavScrollRoot(target) {
     tdZoom.touch = null;
     tdZoom.index = null;
     tdZoom.records = [];
+    clearTimeout(tdZoom.preparation?.timer);
+    tdZoom.preparation = null;
   }
 
   function tdZoomQuestionText(entry) {
@@ -11812,6 +11824,7 @@ function tdNavScrollRoot(target) {
       conversation: locator.id,
       format: 'summary-v3',
       partial: !scene.complete,
+      historyProbed:scene.history?.exhausted === true,
       turns: (scene.digestDraft || scene.records).map(entry => {
         const role = entryAnchorRole(entry), id = tdZoomEntryId(entry);
         const freshQuestion = changed?.has(id) && tdZoomReadableMessage(entry,'user');
@@ -11856,6 +11869,59 @@ function tdNavScrollRoot(target) {
     }
     return chrome.runtime.sendMessage({type:'threadWorkspace',action:'topicsCached',value:evidence})
       .then(reply=>reply?.ok ? reply.data : null).catch(()=>null);
+  }
+
+  function tdZoomRecordRevision(entry) {
+    return hashString([entry.rawQuestion || entry.text,...tdZoomChapters(entry).map(block=>block.label),
+      ...(entry.answerRecords || []).map(answer=>answer.rawText || answer.visibleRawText || '')].join('\n'));
+  }
+
+  function tdZoomPrepare() {
+    if (tdZoom.scene || !tdZoom.root?.isConnected || !tdZoomReady() || document.hidden || !document.hasFocus() ||
+        getChatGptConversationLocator().kind !== 'conversation') return;
+    const records = tdZoomRecords();
+    if (!records.length) return;
+    const outline = tdHistory.capture;
+    const complete = tdHealth.snapshot?.complete === true || Boolean(outline?.history.complete && tdAlive(outline.scope));
+    const generate = settings.autoTopicSummary !== false && settings.prepareTopicSummary && !tdReadBusy() && !tdZoomReplyRunning() &&
+      Boolean(complete || tdZoomReadableMessage(records.at(-1)?.answerRecords?.at(-1),'assistant'));
+    const revision = tdDomState.revision;
+    const prior = tdZoom.preparation;
+    if (prior && tdAlive(prior.scope) && prior.records === records && prior.revision === revision &&
+        prior.complete === complete && prior.generate === generate) return;
+    const key = JSON.stringify([complete,generate,records.map(entry=>[tdZoomEntryId(entry),
+      (entry.answerRecords || []).map(answer=>answer.messageId || answer.nodeId),tdZoomRecordRevision(entry)])]);
+    if (prior && tdAlive(prior.scope)) {
+      if (prior.key === key) {
+        Object.assign(prior,{records,revision});
+        return;
+      }
+      if (prior.running) return;
+    }
+    clearTimeout(prior?.timer);
+    const preparation = {scope:tdScope(),records,complete,generate,revision,key,timer:0};
+    tdZoom.preparation = preparation;
+    preparation.timer = setTimeout(async()=>{
+      if (tdZoom.preparation !== preparation || !tdAlive(preparation.scope)) return;
+      if (tdZoom.scene || document.hidden || !document.hasFocus()) { tdZoom.preparation = null; return; }
+      preparation.running = true;
+      try {
+        const cached = await tdZoomCachedOverview(preparation);
+        if (cached?.state === 'ready') { preparation.view = cached; return; }
+        if (!generate || tdZoom.scene || document.hidden || !document.hasFocus() || tdReadBusy() || tdZoomReplyRunning() ||
+            !tdAlive(preparation.scope) || tdZoom.preparation !== preparation) return;
+        if (cached?.changed?.length) preparation.revisedMessages = new Set(cached.changed);
+        const request = tdZoomTopicRequest(preparation);
+        if (!request?.turns.some(turn=>turn.answer)) return;
+        const reply = await chrome.runtime.sendMessage({type:'threadWorkspace',action:'topicsPrepare',value:request});
+        if (reply?.data?.state === 'ready') {
+          preparation.view = {...reply.data,entries:request.turns.map(turn=>({id:turn.id,...turn.navigation}))};
+        } else if (reply?.data?.state === 'deferred' && tdZoom.preparation === preparation) tdZoom.preparation = null;
+      } catch {} finally {
+        preparation.running = false;
+        if (tdZoom.preparation === preparation && tdAlive(preparation.scope)) tdZoomPrepare();
+      }
+    },generate ? (complete ? 1050 : 2400) : 75);
   }
 
   function tdZoomMountedEvidence(records) {
@@ -11911,6 +11977,35 @@ function tdNavScrollRoot(target) {
     });
   }
 
+  function tdZoomInstallDigest(scene, digest) {
+    if (digest.entries) {
+      scene.records = tdZoomRecordsFromCache(digest.entries,scene.digestDraft || scene.records);
+      tdZoomRememberDigest(scene,digest.entries,digest.partial);
+    }
+    scene.digestDraft = null;
+    scene.topics = digest.groups;
+    scene.complete = !digest.partial;
+    scene.digestPartial = digest.partial === true;
+    scene.summaries = new Map((digest.summaries || []).map(turn=>[turn.turn-1,turn]));
+    scene.cachedOverview = true;
+    scene.localCacheRead = true;
+    scene.historyKey = digest.historyPending && !scene.history.attempted ? digest.historyKey : null;
+    if (digest.partial && !scene.historyKey) { scene.history.attempted = true; scene.history.exhausted = true; }
+    const summary = tdZoom.surface.querySelector('.zoom-conversation-summary');
+    summary.textContent = digest.summary || '';
+    summary.hidden = !summary.textContent;
+    tdZoomRenderTopicIndex(scene);
+  }
+
+  function tdZoomAdvancePreparedHistory(scene) {
+    if (!scene.complete && scene.historyKey && !scene.history.attempted && !scene.history.running &&
+        !tdZoomReplyRunning() && !document.hidden) {
+      void tdZoomRecoverHistory(scene).catch(()=>tdZoomHistoryStalled(scene));
+      return true;
+    }
+    return false;
+  }
+
   function tdZoomApplyTopics(scene) {
     if (!scene.nextTopics || scene.progress < .999 || scene.pending || tdZoomMoving(scene) || scene.settledWork) return;
     const list = tdZoom.list;
@@ -11923,23 +12018,11 @@ function tdNavScrollRoot(target) {
     }
     const oldScroll = list.scrollTop;
     tdZoomClearEffects(scene);
-    scene.topics = scene.nextTopics.groups;
-    if (scene.nextTopics.entries) {
-      const first = tdZoomEntryId(scene.records[scene.first]);
-      const records = tdZoomRecordsFromCache(scene.nextTopics.entries,scene.digestDraft || scene.records);
-      scene.digestDraft = null;
-      const shift = records.findIndex(entry=>tdZoomEntryId(entry)===first);
-      const start = Math.max(0,shift);
-      scene.first = tdZoomChunkEdge(scene,start,-1);
-      scene.last = tdZoomChunkEdge(scene,Math.min(records.length,start+tdZoomChunk),1);
-      scene.records = records;
-    }
-    const summary = tdZoom.surface.querySelector('.zoom-conversation-summary');
-    summary.textContent = scene.nextTopics.summary || '';
-    summary.hidden = !summary.textContent;
-    scene.digestPartial = scene.nextTopics.partial === true;
-    tdZoomRenderTopicIndex(scene);
-    scene.summaries = new Map((scene.nextTopics.summaries || []).map(turn => [turn.turn - 1, turn]));
+    const first = tdZoomEntryId(scene.records[scene.first]);
+    tdZoomInstallDigest(scene,scene.nextTopics);
+    const start = Math.max(0,scene.records.findIndex(entry=>tdZoomEntryId(entry)===first));
+    scene.first = tdZoomChunkEdge(scene,start,-1);
+    scene.last = tdZoomChunkEdge(scene,Math.min(scene.records.length,start+tdZoomChunk),1);
     scene.nextTopics = null;
     scene.rows.clear();
     tdZoom.stream.replaceChildren();
@@ -11956,6 +12039,7 @@ function tdNavScrollRoot(target) {
       }
     }
     tdZoomTopicControls(scene,'ready');
+    tdZoomAdvancePreparedHistory(scene);
     // 更新分组标题时保持原来的阅读位置，也保留用户已滚动过的状态。
     scene.initialScroll += list.scrollTop - oldScroll;
   }
@@ -11991,7 +12075,7 @@ function tdNavScrollRoot(target) {
     const status = tdZoom.surface.querySelector('.zoom-ai-status');
     const complete = scene.summaries?.size ? !scene.digestPartial : scene.complete;
     const coverage = complete ? (scene.history.complete ? '网页历史' : '完整会话') : '部分会话';
-    const historyAction = state === 'history-retry' || state === 'ready' && !complete;
+    const historyAction = state === 'history-retry' || state === 'ready' && !complete && !scene.historyKey;
     const labels = {connection:'模型连接',error:'重试',cooldown:'重试'};
     const label = historyAction ? '继续补齐' : labels[state];
     tdZoom.surface.querySelector('.zoom-coverage').textContent = coverage + ' · ' + scene.records.length + ' 轮';
@@ -12024,15 +12108,8 @@ function tdNavScrollRoot(target) {
           scene.complete = tdHealth.snapshot?.complete === true || scene.history.complete;
         }
         if (cached?.state === 'ready' && (!cached.partial || !scene.complete)) {
-          scene.complete = !cached.partial;
-          if (cached.partial) {
-            scene.history.attempted = true;
-            scene.history.exhausted = true;
-          }
-          scene.cachedOverview = true;
           scene.localCacheRead = true;
           scene.nextTopics = cached;
-          tdZoomRememberDigest(scene,cached.entries,cached.partial);
           tdZoomApplyTopics(scene);
           return;
         }
@@ -12065,10 +12142,14 @@ function tdNavScrollRoot(target) {
       const result = reply.data;
       if (result.state === 'ready') {
         const entries = request.turns.map(turn=>({id:turn.id,...turn.navigation}));
-        tdZoomRememberDigest(scene,entries,result.partial);
         scene.nextTopics = {...result,entries};
-        scene.cachedOverview = true;
         tdZoomApplyTopics(scene);
+      } else if (result.state === 'deferred') {
+        if (!scene.deferredTopicRetried) {
+          scene.deferredTopicRetried = true;
+          scene.localCacheRead = false;
+          scene.reloadTopics = true;
+        } else tdZoomTopicControls(scene,'local');
       } else if (['empty','stale'].includes(result.state)) {
         tdZoomTopicControls(scene,request.partial ? 'history-retry' : 'local');
       } else tdZoomTopicControls(scene,result.state,result.description);
@@ -12383,6 +12464,16 @@ function tdNavScrollRoot(target) {
     tdZoom.scene = scene;
     delete tdZoom.surface.dataset.historyCoverage;
     tdZoom.surface.hidden = false;
+    const prepared = tdZoom.preparation;
+    const ready = prepared?.view && tdAlive(prepared.scope) && prepared.records === records &&
+      prepared.revision === tdDomState.revision && (!prepared.view.partial || !scene.complete);
+    if (ready) {
+      const focus = tdZoomEntryId(records[recordIndex]);
+      tdZoomInstallDigest(scene,prepared.view);
+      const index = Math.max(0,scene.records.findIndex(entry=>tdZoomEntryId(entry)===focus));
+      scene.first = tdZoomChunkEdge(scene,Math.max(0,index-18),-1);
+      scene.last = tdZoomChunkEdge(scene,Math.min(scene.records.length,index+19),1);
+    }
     navHost.dataset.overview = 'true';
     tdZoom.button?.setAttribute('aria-expanded', 'true');
     tdZoomRender(scene, scene.first, scene.last);
@@ -12417,11 +12508,11 @@ function tdNavScrollRoot(target) {
     window.addEventListener('resize',relayout,resizeOptions);
     window.visualViewport?.addEventListener('resize',relayout,resizeOptions);
     scene.cacheDOMRevision = tdDomState.revision;
-    scene.cacheLookup = tdZoomCachedOverview(scene).then(cached=>{
+    if (!ready) scene.cacheLookup = tdZoomCachedOverview(scene).then(cached=>{
       scene.warmCacheReady = cached?.state === 'ready';
       return cached;
     });
-    tdZoomTopicControls(scene,'checking');
+    tdZoomTopicControls(scene,ready ? 'ready' : 'checking');
     return scene;
   }
 
@@ -12571,17 +12662,17 @@ function tdNavScrollRoot(target) {
     const previous = scene.digestDraft || scene.records;
     const readMore = recovered && scene.history.order.length >
       previous.reduce((count,entry)=>count+(entryAnchorRole(entry)==='user'?1:0)+(entry.answerRecords?.length||0),0);
-    if (!changed.length && !newMessage && scene.cachedOverview && !authoritative && !scene.history.complete && !readMore) return;
+    if (!changed.length && !newMessage && scene.cachedOverview && !authoritative && !scene.history.complete && !readMore) {
+      tdZoomAdvancePreparedHistory(scene);
+      return;
+    }
     const captured = tdZoomCapturedRecords(scene);
     const records = authoritative || (!scene.history.complete && (scene.history.gap || captured.length < indexed.length)) ? indexed : captured;
     const complete = authoritative || scene.history.complete;
     const identity = entry=>[tdZoomEntryId(entry),...(entry.answerRecords || []).map(answer=>answer.messageId || answer.nodeId)].join('/');
-    const revision = entry=>hashString([entry.rawQuestion || entry.text,
-      ...tdZoomChapters(entry).map(block=>block.label),
-      ...(entry.answerRecords || []).map(answer=>answer.rawText || answer.visibleRawText || '')].join('\n'));
     const sameOrder = records.length === previous.length && records.every((entry,index)=>
       identity(entry)===identity(previous[index]) &&
-      (scene.cachedOverview && !scene.digestDraft || revision(entry)===revision(previous[index])));
+      (scene.cachedOverview && !scene.digestDraft || tdZoomRecordRevision(entry)===tdZoomRecordRevision(previous[index])));
     if (!records.length || (scene.digestDraft || !changed.length && !newMessage) && sameOrder && complete === scene.complete) {
       void tdZoomLoadTopics(scene);
       return;
@@ -12645,7 +12736,10 @@ function tdNavScrollRoot(target) {
       tdZoomRefreshHistory(tdZoom.scene);
       return;
     }
-    if (root === tdZoom.root) { tdZoomRefreshHistory(tdZoom.scene); return; }
+    if (root === tdZoom.root) {
+      if (!tdZoom.scene) tdZoomPrepare();
+      return;
+    }
     tdZoomReset();
     tdZoom.root = root;
     if (root) {
@@ -12654,6 +12748,8 @@ function tdNavScrollRoot(target) {
       window.addEventListener('wheel',tdZoomWheel,gestureOptions);
       for (const type of ['touchstart','touchmove','touchend','touchcancel'])
         window.addEventListener(type,tdZoomTouch,gestureOptions);
+      window.addEventListener('focus',tdZoomPrepare,{signal:tdZoom.listener.signal});
+      tdZoomPrepare();
     }
   }
 
@@ -13756,8 +13852,8 @@ function tdNavScrollRoot(target) {
                 <span class="switch"><input type="checkbox" name="pinchTopics"><span class="switch-track"></span></span>
               </label>
               <label class="setting-row">
-                <span class="setting-copy"><span class="setting-name">概览自动摘要</span><span class="setting-description">打开概览时，用已配置的 OpenAI 连接总结已载入的问答与章节。相同内容直接读缓存。关闭后可浏览原文索引。</span></span>
-                <span class="switch"><input type="checkbox" name="autoTopicSummary"><span class="switch-track"></span></span>
+                <span class="setting-copy"><span class="setting-name">概览摘要</span><span class="setting-description">提前准备会在前台会话空闲时，将已载入的问答和章节发送到已配置的 OpenAI。相同内容复用缓存。</span></span>
+                <select name="topicSummaryMode"><option value="prepare">提前准备</option><option value="open">打开时生成</option><option value="off">只看原文与缓存</option></select>
               </label>
               <label class="setting-row">
                 <span class="setting-copy"><span class="setting-name">点击回答段落跳转</span><span class="setting-description">点击章节定位原文。关闭后仍可跳转到提问和任务。</span></span>
@@ -14288,7 +14384,7 @@ function tdNavScrollRoot(target) {
     setChecked('smoothScroll', merged.smoothScroll);
     setChecked('enableAnswerJump', merged.enableAnswerJump);
     setChecked('pinchTopics', merged.pinchTopics);
-    setChecked('autoTopicSummary', merged.autoTopicSummary);
+    setValue('topicSummaryMode', merged.autoTopicSummary ? merged.prepareTopicSummary ? 'prepare' : 'open' : 'off');
     setChecked('prefetchHistoryOnOutline', merged.prefetchHistoryOnOutline);
     setChecked('rememberPrompts', merged.rememberPrompts);
     setValue('minPrompts', merged.minPrompts);
@@ -14346,7 +14442,8 @@ function tdNavScrollRoot(target) {
       smoothScroll: checked('smoothScroll'),
       enableAnswerJump: checked('enableAnswerJump'),
       pinchTopics: checked('pinchTopics'),
-      autoTopicSummary: checked('autoTopicSummary'),
+      autoTopicSummary: value('topicSummaryMode') !== 'off',
+      prepareTopicSummary: value('topicSummaryMode') === 'prepare',
       prefetchHistoryOnOutline: checked('prefetchHistoryOnOutline'),
       rememberPrompts: checked('rememberPrompts'),
       minPrompts: value('minPrompts'),
@@ -15128,6 +15225,7 @@ function tdNavScrollRoot(target) {
     updateTheme();
     updateWorkflowVisibility();
     renderWorkflowPanel();
+    tdZoomPrepare();
     scheduleRefresh('settings', 0);
   }
 
@@ -15138,6 +15236,10 @@ function tdNavScrollRoot(target) {
       if(message.type==='THREAD_PILOT_CHAT_BACKOFF'){
         tdChatBackoff(message.until);
         return undefined;
+      }
+      if(message.type==='THREAD_PILOT_PREFERENCES'){
+        if(pilotActive)void reloadSettings();
+        return false;
       }
       if(message.type==='THREAD_PILOT_SWITCH'){
         if(!message.enabled){document.dispatchEvent(new Event('tab-cadence:history-stop'));tdInvalidate();pilotActive=false;settings.enabled=false;updateVisibility();updateWorkflowVisibility();}

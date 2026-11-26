@@ -164,7 +164,7 @@ export async function topicSnapshot(value, conversation, layout = {}) {
     offset = end;
   }
   const navigation = whole ? value.turns.map(topicNavigation) : [];
-  return {conversation, batches, batchLimit, detailed, whole, partial:whole && value.partial === true, count: turns.length,
+  return {conversation, batches, batchLimit, detailed, whole, partial:whole && value.partial === true, historyPending:whole && value.partial === true && value.preparing === true, historyProbed:value.historyProbed === true, count: turns.length,
     navigation: navigation.every(Boolean) ? navigation : []};
 }
 
@@ -288,6 +288,12 @@ function combine(batches, parts, detailed, synthesis) {
   return detailed ? {state:'ready', groups, summaries} : {state:'ready', groups};
 }
 
+const topicDigestKey = plan=>plan.batches.map(batch=>batch.digest).join('.');
+
+function pendingHistory(plan) {
+  return plan.historyPending ? {historyPending:true,historyKey:topicDigestKey(plan)} : {};
+}
+
 function topicCacheKey(conversation, partial) {
   return 'c:' + conversation + (partial ? ':partial' : '');
 }
@@ -312,8 +318,13 @@ export async function readTopics(storage, snapshot, connection) {
   const synthesis = await topicSynthesis(snapshot, parts);
   if (synthesis) readBatch(synthesis);
   const ready = snapshot.batches.every(batch=>parts[batch.digest]) && (!synthesis || parts[synthesis.digest]);
+  let history = snapshot;
+  if (ready && snapshot.partial && !snapshot.historyProbed) {
+    const prior = cache[topicCacheKey(snapshot.conversation,true)]?.overview;
+    if (prior && topicDigestKey(prior) === topicDigestKey(snapshot)) history = prior;
+  }
   const view = ready ? {...combine(snapshot.batches,parts,snapshot.detailed,synthesis),
-    ...(snapshot.partial && {partial:true})} : {state:saved.length ? 'stale' : 'empty'};
+    ...(snapshot.partial && {partial:true,...pendingHistory(history)})} : {state:saved.length ? 'stale' : 'empty'};
   return {view,parts};
 }
 
@@ -327,6 +338,7 @@ async function overviewPlan(snapshot, parts) {
     entries: snapshot.navigation,
     batches: snapshot.batches.map(({offset, digest}) => ({offset, digest, whole:true})),
     synthesis: synthesis?.digest || '',
+    ...(snapshot.historyPending && {historyPending:true}),
   };
 }
 
@@ -422,7 +434,7 @@ export async function readLatestTopicOverview(storage, conversation, evidence) {
         (plan.synthesis && !saved.parts[plan.synthesis])) continue;
     if (evidence.navigationOnly === true) return {state:'ready',entries:plan.entries};
     const view = combine(plan.batches,saved.parts,true,plan.synthesis ? {digest:plan.synthesis} : null);
-    return {...view,entries:plan.entries,...(partial && {partial:true})};
+    return {...view,entries:plan.entries,...(partial && {partial:true,...pendingHistory(plan)})};
   }
   return invalid || {state:'empty'};
 }
@@ -434,8 +446,27 @@ export async function rememberTopicOverview(storage, snapshot, connection, parts
   const cache = (await storage.get(cacheName))[cacheName] || {};
   const key = topicCacheKey(snapshot.conversation,snapshot.partial);
   const entry = cache[key];
-  if (entry?.model === connection.model && JSON.stringify(entry.overview) === JSON.stringify(plan)) return;
+  if (entry?.model === connection.model && entry.overview) {
+    const old = entry.overview;
+    if (snapshot.partial && !snapshot.historyProbed && topicDigestKey(old) === topicDigestKey(plan)) {
+      if (old.historyPending) plan.historyPending = true;
+      else delete plan.historyPending;
+    }
+    if (JSON.stringify(old) === JSON.stringify(plan)) return;
+  }
   await writeTopicCache(storage,cache,key,{version:2,model:connection.model,batchLimit:snapshot.batchLimit,parts,overview:plan});
+}
+
+export async function markTopicHistoryProbed(storage, conversation, proof) {
+  const { [cacheName]: cache = {} } = await storage.get(cacheName);
+  const key = topicCacheKey(conversation,true);
+  const overview = cache[key]?.overview;
+  if (!overview) return;
+  const history = pendingHistory(overview);
+  if (history.historyPending && history.historyKey === proof) {
+    delete overview.historyPending;
+    await storage.set({[cacheName]:cache});
+  }
 }
 
 async function writeTopicCache(storage, saved, key, entry) {

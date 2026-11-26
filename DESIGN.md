@@ -5,13 +5,13 @@
 设置沿用 ChatGPT 的中性画布、清晰文字和低强调分隔线。主操作用黑白反差，资料状态沿用各自的语义色。
 
 - System typography, 14px task titles and 12–13px supporting UI; a compact 20px page heading.
-- Main order: task summary, analysis/watch/organize actions, scope/filter/search, status-sorted rows. One filled primary action per view.
+- 管理事项依次呈现添加事项、范围与筛选、按状态排列的事项。自动收纳在 Chrome 原生标签栏发生；时间设置和按网站分组放在「设置 → 标签」。
 - Rows share one list surface. Full titles wrap, details expose the full URL, and metadata remains secondary.
 - Settings divide model connection, usage and native features. Native features remain independent of API configuration.
 - 侧栏明暗主题由 `extension/ui.css` 的语义变量控制。主操作用石墨色或反白，琥珀色用于关闭提醒，红色用于错误和破坏性操作。
 - 对话设置使用统一的页边距、独立的标题与说明行和安静的分隔线。窄窗口的长下拉项移到其说明下方。
 - 对话大纲的搜索区与标题共用 16px 横向留白，图标沿用同一组线条。索引未覆盖完整会话时，在大纲底部显示已载入范围。
-- 缩放概览保留 ChatGPT 页面主题。正文沿阅读位置收拢，问句仍在右侧，回答和章节仍在左侧。模型摘要覆盖对话目的、关键决定和未决事项。主题导航锚定原轮次，模型结果到达时保留正在阅读的问答。 手势与收尾动画按帧推进，概览稳定后继续补齐历史、应用主题。反向捏合恢复原阅读位置。
+- 缩放概览保留 ChatGPT 页面主题。正文沿阅读位置收拢，问句仍在右侧，回答和章节仍在左侧。模型摘要覆盖对话目的、关键决定和未决事项。主题导航锚定原轮次，模型结果到达时保留正在阅读的问答。 前台会话空闲时可提前生成摘要。首帧使用已准备的内容，概览打开后继续补齐必要的历史，并保留阅读位置。反向捏合恢复原阅读位置。
 - macOS 标签切换器使用系统 Liquid Glass，选中行用中性明暗和勾号提示。
 - 控件用原生语义与一致的可见焦点。按压和悬停反馈约 110 ms，侧栏设置切换与内容确认约 165 ms。捏合和窗口跟随直接响应输入，可反向中断。遵循系统减少动态效果。
 - 管理事项只列需要接手的页面。需要选择时，通过网页检查打开临时范围清单。跟踪、模型传输和关闭资格各按自己的条件判断。
