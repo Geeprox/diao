@@ -1,7 +1,0 @@
-.artifacts/
-dist/
-.DS_Store
-.env*
-*.dmg
-*.sha256
-*.zip
