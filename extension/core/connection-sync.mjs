@@ -81,7 +81,9 @@ function decodeRecord(record) {
   if (record.version === 1 && (typeof record.salt !== 'string' || record.salt.length !== 24 || decode(record.salt).length !== 16)) {
     throw Error('无法读取同步连接。');
   }
-  return {version: record.version, id: record.id, ...unlock, iv: record.iv, ciphertext: record.ciphertext,
+  const parentId = typeof record.parentId==='string' && /^(?:[0-9a-f-]{36})?$/i.test(record.parentId)
+    ? record.parentId : undefined;
+  return {version: record.version, id: record.id, parentId, ...unlock, iv: record.iv, ciphertext: record.ciphertext,
     settings: connectionSettings(record.settings)};
 }
 
@@ -104,7 +106,7 @@ export function createConnectionSync({storage, vault}) {
   async function info() {
     const record = await read();
     if (!record) return null;
-    return {id: record.id, settings: record.settings, ...(record.passkey ? {passkey: record.passkey} : {})};
+    return {id: record.id, parentId:record.parentId, settings: record.settings, ...(record.passkey ? {passkey: record.passkey} : {})};
   }
 
   async function load({id, passphrase, passkeyKey} = {}) {
@@ -132,17 +134,25 @@ export function createConnectionSync({storage, vault}) {
     return {id: record.id, settings: record.settings, apiKey};
   }
 
-  async function save(settings, apiKey, passphrase, expectedId, {passkey, passkeyKey, pairingCode} = {}) {
+  async function save(settings, apiKey, passphrase, expectedId, {passkey, passkeyKey, pairingCode, replace = false} = {}) {
     if (!storage) throw Error('当前 Chrome 不支持扩展同步。');
     if (!validKey(apiKey) || encoder.encode(apiKey).length > 512) throw Error('同步密钥格式有误。');
     settings = connectionSettings(settings);
     const previous = await read();
     if ((previous?.id || '') !== (expectedId || '')) throw Error('同步连接已变更。请确认当前连接后重试。');
 
+    if (previous && !replace) {
+      const currentKey = await vault.loadSyncKey(keyScope(previous));
+      const existing = currentKey && await decrypt(previous,currentKey).catch(()=>null);
+      if (existing !== apiKey) {
+        throw Object.assign(Error('Chrome 已有同步连接。可将新密钥保存在此设备，或替换共享连接。'),
+          {code:'sync_replace_required'});
+      }
+    }
     const newPasskey = passkey != null || passkeyKey != null;
     const newPairing = pairingCode != null;
     if (newPairing && (newPasskey || !pairingCodePattern.test(pairingCode))) throw Error('无法生成设备配对码。');
-    const record = {id: crypto.randomUUID(), iv: random(12), settings};
+    const record = {id: crypto.randomUUID(), parentId:previous?.id||'', iv: random(12), settings};
     if (!newPairing && (newPasskey || previous?.version === 2)) {
       record.version = 2;
       record.passkey = newPasskey ? normalizeSyncPasskey(passkey) : previous.passkey;

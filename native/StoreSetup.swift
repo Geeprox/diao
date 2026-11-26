@@ -5,9 +5,20 @@ import Security
 enum StoreSetup {
     static let hostName = "app.tabpilot.bridge"
     static let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
-    static let bundleIdentifier = "app.tabcadence.bridge"
+    static let bundleIdentifier = "app.diao.bridge"
+    static let legacyBundleIdentifier = "app.tabcadence.bridge"
     static let installedVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-    static var isInstalled: Bool { Bundle.main.bundleURL.deletingLastPathComponent().standardizedFileURL.path == applications.path }
+    static let legacy = applications.appendingPathComponent("Tab Cadence Bridge.app", isDirectory: true)
+    static let current = applications.appendingPathComponent("Diao Bridge.app", isDirectory: true)
+    static var isInstalled: Bool { Bundle.main.bundleURL.standardizedFileURL.path == current.standardizedFileURL.path }
+
+    static func registrationOrigins(_ entry: [String: Any], paths: Set<String>, origin: String) throws -> [String] {
+        guard entry["name"] as? String == hostName, entry["type"] as? String == "stdio",
+              let path = entry["path"] as? String, paths.contains(path),
+              let origins = entry["allowed_origins"] as? [String], origins.contains(origin)
+        else { throw Failure.connectionConflict }
+        return origins
+    }
 
     enum Failure: Error {
         case needsInstallation
@@ -30,13 +41,23 @@ enum StoreSetup {
             .appendingPathComponent("Google/Chrome/NativeMessagingHosts", isDirectory: true)
         try files.createDirectory(at: folder, withIntermediateDirectories: true)
         let target = folder.appendingPathComponent(hostName + ".json")
-        if files.fileExists(atPath: target.path) {
+        let oldPrograms: Set<String> = [
+            legacy.appendingPathComponent("Contents/MacOS/TabPilotBridge").path,
+            current.appendingPathComponent("Contents/MacOS/TabPilotBridge").path,
+        ]
+        let exists = files.fileExists(atPath: target.path)
+        var origins = [origin]
+        if exists {
             guard try target.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true,
-                  let entry = try? JSONSerialization.jsonObject(with: Data(contentsOf: target)) as? [String: Any],
-                  entry["name"] as? String == hostName, entry["type"] as? String == "stdio",
-                  entry["path"] as? String == program.path, entry["allowed_origins"] as? [String] == [origin]
+                  let entry = try? JSONSerialization.jsonObject(with: Data(contentsOf: target)) as? [String: Any]
             else { throw Failure.connectionConflict }
-            return
+            origins = try registrationOrigins(entry, paths: oldPrograms.union([program.path]), origin: origin)
+            if entry["path"] as? String == program.path { return }
+            _ = try checkedBundle(at: Bundle.main.bundleURL)
+            if files.fileExists(atPath: legacy.path) {
+                _ = try checkedBundle(at: legacy, migrating: true)
+                try verifySameSigningIdentity(from: legacy, to: Bundle.main.bundleURL)
+            }
         }
 
         let entry: [String: Any] = [
@@ -44,10 +65,10 @@ enum StoreSetup {
             "description": "Diao Mac companion",
             "type": "stdio",
             "path": program.path,
-            "allowed_origins": [origin],
+            "allowed_origins": origins,
         ]
         let payload = try JSONSerialization.data(withJSONObject: entry, options: [.prettyPrinted, .sortedKeys])
-        try payload.write(to: target, options: [.withoutOverwriting])
+        try payload.write(to: target, options: exists ? [.atomic] : [.withoutOverwriting])
         try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
     }
 
@@ -55,34 +76,39 @@ enum StoreSetup {
         guard CredentialVault.storeBuild, !isInstalled else { throw Failure.incompleteBundle }
         let source = Bundle.main.bundleURL
         let files = FileManager.default
-        let legacy = applications.appendingPathComponent("Tab Cadence Bridge.app", isDirectory: true)
-        let current = applications.appendingPathComponent("Diao Bridge.app", isDirectory: true)
-        // 已登记的旧版继续使用同一路径，Chrome 无需改动原生消息注册。
-        let destination = files.fileExists(atPath: legacy.path) ? legacy : current
+        // 新名称使用标准安装路径，旧应用保留到 Chrome 接续成功后再由用户清理。
+        let destination = current
         let existing = files.fileExists(atPath: destination.path)
-        if existing {
-            let old = try checkedBundle(at: destination)
+        if existing || files.fileExists(atPath: legacy.path) {
+            let prior = existing ? destination : legacy
+            let old = try checkedBundle(at: prior, migrating: true)
             let configured = Bundle.main.object(forInfoDictionaryKey: "DiaoReleaseVersion") as? String
-            if let configured, let version = old.object(forInfoDictionaryKey: "DiaoReleaseVersion") as? String,
-               configured.compare(version, options: .numeric) != .orderedDescending { return destination }
+            if old.bundleIdentifier == bundleIdentifier, let configured,
+               let version = old.object(forInfoDictionaryKey: "DiaoReleaseVersion") as? String {
+                let order = configured.compare(version, options: .numeric)
+                let oldBuild = old.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+                if order == .orderedAscending ||
+                   order == .orderedSame && installedVersion.compare(oldBuild, options: .numeric) != .orderedDescending { return prior }
+            }
             if old.object(forInfoDictionaryKey: "DiaoReleaseVersion") == nil {
                 let version = old.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-                guard installedVersion.compare(version, options: .numeric) != .orderedAscending else { return destination }
+                guard installedVersion.compare(version, options: .numeric) != .orderedAscending else { return prior }
             }
-            try verifySameSigningIdentity(from: destination, to: source)
+            try verifySameSigningIdentity(from: prior, to: source)
         }
         _ = try checkedBundle(at: source)
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).filter {
-            $0.bundleURL?.standardizedFileURL.path == destination.standardizedFileURL.path
-        }
+        let running = [bundleIdentifier, legacyBundleIdentifier]
+            .flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:))
+            .filter { $0.bundleURL?.standardizedFileURL.path == destination.standardizedFileURL.path }
         try replace(from: source, at: destination, hasExisting: existing)
         for application in running { application.terminate() }
         return destination
     }
 
-    private static func checkedBundle(at url: URL) throws -> Bundle {
+    private static func checkedBundle(at url: URL, migrating: Bool = false) throws -> Bundle {
         guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true,
-              let bundle = Bundle(url: url), bundle.bundleIdentifier == bundleIdentifier,
+              let bundle = Bundle(url: url), bundle.bundleIdentifier == bundleIdentifier ||
+                  migrating && bundle.bundleIdentifier == legacyBundleIdentifier,
               let origin = CredentialVault.extensionOrigin,
               let id = bundle.object(forInfoDictionaryKey: "TabCadenceStoreExtensionID") as? String,
               origin == "chrome-extension://"+id+"/" else { throw Failure.foreignBundle }
@@ -116,8 +142,36 @@ enum StoreSetup {
               SecCodeCopySigningInformation(before, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
               let values = info as? [String: Any] else { throw Failure.incompleteBundle }
         guard let team = values[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty else { return }
-        guard SecCodeCopyDesignatedRequirement(before, [], &requirement) == errSecSuccess,
-              SecStaticCodeCreateWithPath(next as CFURL, [], &after) == errSecSuccess, let after,
-              SecStaticCodeCheckValidity(after, [], requirement) == errSecSuccess else { throw Failure.foreignBundle }
+        guard SecStaticCodeCreateWithPath(next as CFURL, [], &after) == errSecSuccess, let after
+        else { throw Failure.foreignBundle }
+        if Bundle(url: old)?.bundleIdentifier == legacyBundleIdentifier,
+           Bundle(url: next)?.bundleIdentifier == bundleIdentifier {
+            // 改名换标识时，仍要求新旧签名来自同一发布团队。
+            guard SecCodeCopySigningInformation(after, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+                  let incoming = info as? [String: Any],
+                  incoming[kSecCodeInfoTeamIdentifier as String] as? String == team
+            else { throw Failure.foreignBundle }
+        } else {
+            guard SecCodeCopyDesignatedRequirement(before, [], &requirement) == errSecSuccess,
+                  SecStaticCodeCheckValidity(after, [], requirement) == errSecSuccess else { throw Failure.foreignBundle }
+        }
     }
+    static func migrationSelfTest() throws {
+        let origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+        let old = legacy.appendingPathComponent("Contents/MacOS/TabPilotBridge").path
+        let next = current.appendingPathComponent("Contents/MacOS/DiaoBridge").path
+        let origins = [origin, "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/"]
+        let entry: [String: Any] = ["name":hostName, "type":"stdio", "path":old, "allowed_origins":origins]
+        let preserved = try registrationOrigins(entry, paths:[old, next], origin:origin)
+        guard preserved == origins else { throw Failure.connectionConflict }
+        var foreign = entry
+        foreign["path"] = "/Applications/Unrelated.app/Contents/MacOS/App"
+        do {
+            _ = try registrationOrigins(foreign, paths:[old, next], origin:origin)
+        } catch Failure.connectionConflict {
+            return
+        }
+        throw Failure.connectionConflict
+    }
+
 }

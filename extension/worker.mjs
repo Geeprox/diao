@@ -1,12 +1,14 @@
+import './locale.js';
 import {createThreadWorkspace} from './core/thread-workspace.mjs';
 import {conversationAt, topicConnection, topicBatchLayout, topicSnapshot, readTopics, readLatestTopicOverview, rememberTopicOverview, markTopicHistoryProbed, requestTopics, saveTopicBatch, topicSynthesis} from './core/topics.mjs';
 import {BacklogQueue,backlogPlan,backlogExclusion,backlogWaiting,trackableTab,queueSummary} from './core/backlog.mjs';
 import {advanceCountdown,nativeVisibilityFresh} from './core/countdown.mjs';
-import {CredentialManager,credentialOrigin,credentialStorage} from './core/credentials.mjs';
+import {CredentialManager,credentialOrigin,credentialStorage,syncBackupOrigin} from './core/credentials.mjs';
 import {connectionSyncSlot} from './core/connection-sync.mjs';
 import {MRUController} from './core/mru-controller.mjs';
 import {createTidyTabs, tidyAlarm} from './core/tidy-tabs.mjs';
 import {createLinkGroups} from './core/link-groups.mjs';
+import {requestOrganization} from './core/smart-tabs.mjs';
 import {DEFAULTS,safeURL,privateURL,boundedEvidence,fingerprint,reserve,settle,mayReevaluate,pardon,mayClose,closeCandidate,visibilityLease,guard} from './core/policy.mjs';
 import {invoke,buildRequest} from './core/providers.mjs';
 import {duplicates,organizationPlan,identity,scheduledCandidate} from './core/workspace.mjs';
@@ -42,7 +44,7 @@ async function checkNative(refresh = false) {
   } catch {
     return {status:'unavailable'};
   }
-  return {...nativeConnection,updatesAvailable:nativeCapabilities.has('updates-v1')};
+  return {...nativeConnection,updatesAvailable:nativeCapabilities.has('updates-v1'),setupAvailable:nativeCapabilities.has('setup-v1')};
 }
 
 async function requireNativeAccessibility() {
@@ -52,7 +54,7 @@ async function requireNativeAccessibility() {
     info.status === 'unsupported' ? '此功能仅适用于支持的 Mac。' : '请先下载并连接 Mac 助手，再开启此功能。');
 }
 const configRun=fn=>{const task=configSerial.then(fn,fn);configSerial=task.catch(()=>{});return task;};
-let helperUpdate={phase:'idle'},helperReconnect;
+let helperUpdate={phase:'idle'},helperReconnect,nativeRecovery;
 let nativeCapabilities=new Set(),nativeHello=Promise.resolve(),finishNativeHello=()=>{},activeOverlay=null;
 const run=fn=>{const next=serial.then(fn,fn);serial=next.catch(()=>{});return next;};
 const cloudRun=fn=>{const next=cloudSerial.then(fn,fn);cloudSerial=next.catch(()=>{});return next;};
@@ -64,6 +66,142 @@ async function leaseFor(record){if(!record)return null;const {leases={}}=await s
 const emit=()=>chrome.runtime.sendMessage({type:'updated'}).catch(()=>{});
 const tidyTabs=createTidyTabs(chrome,async()=>(await load()).records,emit);
 const linkGroups=createLinkGroups(chrome);
+const smartTimers=new Map();
+const smartEnabled=async()=> (await chrome.storage.local.get('smartTabsEnabled')).smartTabsEnabled===true;
+const canOrganize=(tab,record,justOpened)=>((!tab.active&&!tab.highlighted)||tab.id===justOpened&&tab.active)&&
+  !tab.pinned&&!tab.audible&&!tab.discarded&&tab.groupId<0&&!record?.watching&&
+  !['waiting','resume','closing','paused'].includes(record?.state);
+
+function activityBand(minutes) {
+  if (minutes===null) return null;
+  return [0,1,15,60,240,1440,4320,10080].findLast(boundary=>minutes>=boundary) ?? 0;
+}
+
+async function armSmartTabs(enabled) {
+  if(!enabled){await chrome.alarms.clear(tidyAlarm);return;}
+  if(!await chrome.alarms.get(tidyAlarm))await chrome.alarms.create(tidyAlarm,{periodInMinutes:15});
+}
+
+function queueSmartTabs(windowId, tabId) {
+  if(!Number.isInteger(windowId))return;
+  clearTimeout(smartTimers.get(windowId));
+  const timer=setTimeout(()=>{
+    smartTimers.delete(windowId);
+    void organizeSmartTabs(windowId,tabId).catch(()=>{});
+  },1600);
+  timer.unref?.();
+  smartTimers.set(windowId,timer);
+}
+
+async function organizeSmartTabs(windowId, priority) {
+  if(!await smartEnabled())return;
+  return cloudRun(async()=>{
+    if(!await smartEnabled())return;
+    const window=await chrome.windows.get(windowId,{populate:true}).catch(()=>null);
+    if(window?.incognito||window?.type!=='normal')return;
+    const {settings,records}=await load();
+    const {smartTabHeld={},smartTabDecisions={}}=await chrome.storage.session.get(['smartTabHeld','smartTabDecisions']);
+    const tabs=(window.tabs||[]).filter(tab=>trackableTab(tab)&&!privateURL(tab.url)&&
+      !tab.incognito&&!tab.discarded&&tab.status==='complete'&&!tab.audible&&!tab.pinned);
+    if(!tabs.length)return;
+    const now=Date.now();
+    const newest=tabs.find(tab=>tab.id===priority);
+    if(Number.isInteger(priority)&&!newest)return;
+    const state=smartTabDecisions[windowId]||{};
+    const reviewed=state.reviewed||{};
+    const movable=tab=>canOrganize(tab,records[tab.id],priority)&&smartTabHeld[tab.id]!==tab.url;
+    const targets=tabs.filter(tab=>movable(tab)&&(!newest||tab.id===priority))
+      .sort((a,b)=>(reviewed[a.id]||0)-(reviewed[b.id]||0)).slice(0,6);
+    if(!targets.length)return;
+    const targetIds=new Set(targets.map(tab=>tab.id));
+    const openerIds=new Set(targets.map(tab=>tab.openerTabId));
+    const neighbors=tabs.filter(tab=>!targetIds.has(tab.id)).sort((a,b)=>
+      Number(openerIds.has(b.id))-Number(openerIds.has(a.id))||
+      (b.lastAccessed||0)-(a.lastAccessed||0));
+    const observed=new Map();
+    const evidence=[];
+    for(const tab of [...targets,...neighbors]){
+      if(evidence.length>=12)break;
+      const origin=new URL(tab.url).origin;
+      if(!await chrome.permissions.contains({origins:[origin+'/*']}))continue;
+      try{
+        const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js']});
+        const snapshot=await readSnapshot(tab.id,frame?.documentId);
+        if(snapshot.dirty||snapshot.editable||snapshot.media)continue;
+        const lastUsed=Math.max(snapshot.lastInteraction||0,tab.lastAccessed||0);
+        const page={...boundedEvidence(tab,snapshot),id:tab.id,opener:tab.openerTabId||null,
+          group:tab.groupId,index:tab.index,minutesAway:lastUsed?Math.max(0,Math.floor((now-lastUsed)/60000)):null,
+          canMove:targetIds.has(tab.id)};
+        evidence.push(page);observed.set(tab.id,tab);
+      }catch{}
+    }
+    if(!evidence.some(tab=>tab.canMove))return;
+    // 内容和任务结构相同的批次可复用，时间跨过新的闲置阶段时才重新判断。
+    evidence.sort((a,b)=>a.index-b.index);
+    const signature=await fingerprint([connectionKey(settings),settings.credentialRevision,
+      evidence.map(tab=>({...tab,minutesAway:activityBand(tab.minutesAway)}))]);
+    const recent=(state.recent||[]).filter(item=>item.until>now);
+    const remember=async until=>{
+      const touched=Object.fromEntries(tabs.filter(tab=>reviewed[tab.id]).map(tab=>[tab.id,reviewed[tab.id]]));
+      for(const tab of targets)touched[tab.id]=now;
+      const windows=(await chrome.storage.session.get('smartTabDecisions')).smartTabDecisions||{};
+      windows[windowId]={reviewed:touched,recent:until?[...recent.slice(-31),{signature,until}]:recent};
+      await chrome.storage.session.set({smartTabDecisions:windows});
+    };
+    if(recent.some(item=>item.signature===signature)){await remember();return;}
+    await restoreBeforeRequest();
+    const key=await credentials(settings);
+    const reservation=await run(async()=>{
+      const pending=reserve((await load()).ledger,settings,evidence);
+      await chrome.storage.local.set({ledger:pending.ledger});
+      return pending;
+    });
+    let result;
+    try{result=await requestOrganization(settings,key,evidence);}
+    catch(error){
+      await rememberModelCooldown(settings,error);
+      await remember(error.retryAt || now+120000);
+      emit();
+      return;
+    }
+    await remember(now+86400000);
+    await run(async()=>{
+      await settleTopicUsage({reservation,settings},result.usage);
+      const current=await load();
+      if(!await smartEnabled()||current.settings.credentialRevision!==settings.credentialRevision||
+        connectionKey(current.settings)!==connectionKey(settings))return;
+      const {smartTabHeld:held={}}=await chrome.storage.session.get('smartTabHeld');
+      const shelf=new Set();
+      const fresh=async id=>{
+        const expected=observed.get(id);
+        const tab=expected&&await chrome.tabs.get(id).catch(()=>null);
+        return tab?.url===expected?.url&&tab?.windowId===windowId&&tab?.lastAccessed===expected.lastAccessed ? tab : null;
+      };
+      for(const action of result.actions){
+        const tab=await fresh(action.id);
+        if(!tab||held[tab.id]===tab.url||!canOrganize(tab,current.records[tab.id],priority))continue;
+        if(action.choice==='shelve'){
+          if(!tab.active&&!tab.highlighted)shelf.add(tab.id);
+          continue;
+        }
+        const peer=await fresh(Number(action.choice.slice(4)));
+        if(!peer||peer.pinned||peer.audible||peer.discarded)continue;
+        try{
+          if(peer.groupId>=0){
+            const group=await chrome.tabGroups.get(peer.groupId);
+            if(!group.collapsed&&group.windowId===windowId)await chrome.tabs.group({groupId:group.id,tabIds:[tab.id]});
+          }else if(canOrganize(peer,current.records[peer.id],peer.id)&&held[peer.id]!==peer.url){
+            const groupId=await chrome.tabs.group({tabIds:[peer.id,tab.id],createProperties:{windowId}});
+            const label=peer.title?.split(/ [|—–] /u,1)[0]?.trim()||new URL(peer.url).hostname;
+            await chrome.tabGroups.update(groupId,{title:Array.from(label).slice(0,32).join(''),color:'purple'});
+          }
+        }catch{}
+      }
+      if(shelf.size)await tidyTabs.sweep(shelf);
+      emit();
+    });
+  });
+}
 const mru=new MRUController({chrome,getPort:()=>connectNative(),emit});
 const keychain=new CredentialManager({chrome,request:nativeCredential,settings:async()=>(await load()).settings,mutate:run,changed:()=>{emit();void resumeQueueAfterConnection().catch(()=>{});}});
 const connectionKey=settings=>JSON.stringify([settings.provider,settings.endpoint,settings.model]);
@@ -188,7 +326,6 @@ async function analyze(tabId,manual=false,autoReview,expectedHash,scope={}) {
       if(old?.watching&&old.observed==='done')Object.assign(records[tabId],{state:'resume',reason:watchReadyReason(old.watchAdapter)});
       await saveRecords(records);emit();return {skipped:'相同内容，已复用其他标签的判断。',cached:true};
     }
-    if(old?.attemptAt>Date.now()-settings.cooldownSeconds*1000)return {skipped:'调用间隔保护生效，稍后再试。'};
     const key=await credentials(settings);buildRequest(settings,evidence);
     const request=reserve(ledger,settings,evidence);
     const attempt={...old,tabId,url:tab.url,windowId:tab.windowId,title:tab.title,attemptAt:Date.now(),evidenceRevision:snapshot.revision,lastInteraction:Math.max(snapshot.lastInteraction||0,tab.lastAccessed||Date.now()),state:old?.state||'keep',autoReview:manual&&typeof autoReview==='boolean'?autoReview:old?.autoReview||false};
@@ -236,7 +373,7 @@ async function adoptSyncedConnection(id,{passphrase,passkeyKey,automatic=false}=
     const changed=connectionKey(settings)!==connectionKey(latest);
     const {connectionProfiles}=await chrome.storage.local.get('connectionProfiles');
     await chrome.storage.local.set({settings:{...settings,autoAnalyze:changed?false:settings.autoAnalyze},
-      connectionProfiles:copyProfiles(connectionProfiles,latest,settings),
+      syncPublication:null,connectionProfiles:copyProfiles(connectionProfiles,latest,settings),
       ...(changed?{records:clearAutoReview(records)}:{})});
     await chrome.storage.session.set({apiKey,apiKeyOrigin:origin,apiKeyRevision:remote.id,credentialPersistedOrigin:origin,
       credentialStatus:{phase:'ready',persisted:true,storage:'sync',reason:'已连接 · Chrome 同步'}});
@@ -254,6 +391,26 @@ async function refreshSyncedConnection() {
   if (current?.id===settings.credentialRevision) {
     void keychain.restore(settings);
     return;
+  }
+  const {syncPublication}=await chrome.storage.local.get('syncPublication');
+  if(current?.parentId!==undefined && current.parentId!==settings.credentialRevision &&
+     syncPublication===settings.credentialRevision){
+    const origin=credentialOrigin(settings.endpoint);
+    const own=await keychain.profile.load(syncBackupOrigin(origin)).catch(()=>null);
+    if(own?.found){
+      // 两台离线设备可能同时写同一个 Chrome 同步项。此设备继续使用自己保存的密钥。
+      await keychain.profile.save(origin,own.apiKey);
+      keychain.invalidate();
+      await run(async()=>{
+        const {settings:latest}=await load();
+        const revision=crypto.randomUUID();
+        await chrome.storage.local.set({settings:{...latest,credentialStorage:'profile',credentialRevision:revision},syncPublication:null});
+        await chrome.storage.session.set({apiKey:own.apiKey,apiKeyOrigin:origin,apiKeyRevision:revision,
+          credentialPersistedOrigin:origin,credentialStatus:{phase:'sync_conflict',reason:'此设备保留了自己的密钥。你也可以恢复 Chrome 同步中的连接。'}});
+      });
+      emit();
+      return;
+    }
   }
   keychain.invalidate();
   await chrome.storage.session.remove(['apiKey','apiKeyOrigin','apiKeyRevision','credentialPersistedOrigin','credentialStatus']);
@@ -319,6 +476,23 @@ function installedTarget(actual,target) {
   return true;
 }
 
+async function restoreNativeFeatures() {
+  if (helperUpdate.phase==='installing' || nativeRecovery) return;
+  const task = (async()=>{
+    const {settings,records}=await load();
+    if(!settings.nativeEnabled&&!settings.switcherEnabled)return;
+    const wasReady=nativeConnection.status==='ready';
+    const state=await checkNative(!wasReady);
+    if(state.status!=='ready'||wasReady)return;
+    if(settings.switcherEnabled)await mru.configure(true).catch(()=>{});
+    if(!settings.nativeEnabled)return;
+    const reminder=Object.values(records).find(record=>['closing','paused'].includes(record.state)&&record.closeSurface==='native');
+    if(reminder)await run(()=>nativeShow(reminder.tabId,'countdown')).catch(()=>{});
+  })();
+  nativeRecovery=task;
+  try{await task;}finally{if(nativeRecovery===task)nativeRecovery=null;}
+}
+
 async function reconnectUpdatedHelper(previous) {
   for(const delay of [2200,4000,8000,12000]){
     await new Promise(resolve=>setTimeout(resolve,delay));
@@ -351,6 +525,7 @@ async function connectNative(upgrade=false){
     const linkError = chrome.runtime.lastError?.message || '';
     for(const [id,pending] of nativePending)if(pending.port===port){clearTimeout(pending.timer);pending.reject(Error('辅助程序连接中断，密钥未保存或恢复。'));nativePending.delete(id);}
     if (native !== port) return;
+    const hadConnection = nativeConnection.status==='ready';
     native = null;
     activeOverlay = null;
     nativeCapabilities.clear();
@@ -359,6 +534,8 @@ async function connectNative(upgrade=false){
     mru.disconnected();
     if(helperUpdate.phase==='installing'&&!helperReconnect) {
       helperReconnect=reconnectUpdatedHelper(helperUpdate).finally(()=>{helperReconnect=null;});
+    } else if(hadConnection&&!/host (?:was )?not found|no such native application/i.test(linkError)) {
+      setTimeout(()=>void restoreNativeFeatures().catch(()=>{}),750).unref?.();
     }
     chrome.storage.session.set({nativeStatus:{status:nativeConnection.status,reason:'Mac 助手未连接。'}}).then(emit);
   });
@@ -727,12 +904,17 @@ async function onMessage(message,sender) {
       const {snapshots={}}=await session();snapshots[sender.tab.id]=m.snapshot;await chrome.storage.session.set({snapshots});
       const {records,settings}=await load(),record=records[sender.tab.id];
       if(record?.watching&&record.url===sender.tab.url&&(!record.watchDocumentId||sender.documentId===record.watchDocumentId)){
+        const replacement=m.snapshot.recovered;
+        const updatedRule=replacement?.kind && replacement.kind===record.watchAdapter?.kind &&
+          typeof replacement.target==='string' && replacement.target.length<=1024 &&
+          replacement.baseline===record.watchAdapter.baseline ? replacement : record.watchAdapter;
         if(m.snapshot.observed==='done'&&record.observed!=='done'){
           records[sender.tab.id]={...record,state:'resume',observed:'done',watchSuspended:null,reason:watchReadyReason(record.watchAdapter)};
           await saveRecords(records);emit();if(settings.nativeEnabled)await nativeShow(sender.tab.id).catch(()=>{});
-        }else if(record.observed!=='done'&&m.snapshot.observed!==record.observed){
+        }else if(record.observed!=='done'&&(m.snapshot.observed!==record.observed||updatedRule!==record.watchAdapter)){
           const waiting=m.snapshot.observed==='waiting';
-          records[sender.tab.id]={...record,observed:m.snapshot.observed,state:waiting?'waiting':'uncertain',reason:waiting?'正在本地监听，完成后提醒。':'暂未匹配到唯一状态，请返回页面检查或调整监听文案。'};
+          records[sender.tab.id]={...record,watchAdapter:updatedRule,observed:m.snapshot.observed,state:waiting?'waiting':'uncertain',
+            reason:waiting?'任务状态有变化时会提醒你。':'页面状态暂时无法识别，正在尝试恢复。'};
           await saveRecords(records);emit();
         }
       }
@@ -747,7 +929,7 @@ async function onMessage(message,sender) {
       keychain.sync.info().catch(()=>null),chrome.storage.local.get(['connectionCheck','connectionProfiles'])]);
     if(d.settings.rememberKey&&!currentKey(d.settings,s))void keychain.restore(d.settings);
     const liveRecords=Object.fromEntries(tabs.filter(t=>d.records[t.id]?.url===t.url&&d.records[t.id]?.windowId===t.windowId).map(t=>[t.id,d.records[t.id]]));
-    return {...d,helperUpdate,tabTidyHours:await tidyTabs.setting(),autoGroupLinks:await linkGroups.enabled(),analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:currentKey(d.settings,s),nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,syncConnection,connectionProfiles,connectionCheck:connectionCheck?.revision===d.settings.credentialRevision?connectionCheck:null,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
+    return {...d,helperUpdate,smartTabsEnabled:await smartEnabled(),autoGroupLinks:await linkGroups.enabled(),analysisQueue:queueSummary(await backlog.read()),credentialSaved:s.credentialPersistedOrigin===credentialOrigin(d.settings.endpoint),credentialStatus:extra.credentialStatus,keychainAvailable:nativeCapabilities.has('credentials-v1'),records:liveRecords,keyPresent:currentKey(d.settings,s),nativeStatus:extra.nativeStatus,switcherStatus:extra.switcherStatus,syncConnection,connectionProfiles,connectionCheck:connectionCheck?.revision===d.settings.credentialRevision?connectionCheck:null,canUndoOrganization:!!extra.organizationUndo,recentClosed:(extra.recentClosed||[]).filter(r=>Date.now()-r.at<1800000).map(({id,title,at})=>({id,title,at})),duplicates:duplicates(tabs),tabs};
   }
   if(m.type==='backlogPlan'){
     const {settings}=await load();let tabs=await chrome.tabs.query({});
@@ -783,7 +965,21 @@ async function onMessage(message,sender) {
   if(m.type==='backlogDismiss'){await backlog.dismiss();return {ok:true};}
   if(m.type==='backlogPause'){await backlog.pause();return {ok:true};}
   if(m.type==='backlogResume'){await backlog.resume();return {ok:true};}
-  if(m.type==='nativeCheck')return checkNative(m.refresh===true);
+  if(m.type==='nativeCheck'){
+    if(m.reconnect===true&&native&&nativePending.size===0&&nativeConnection.status!=='ready'){
+      const stale=native;
+      native=null;
+      stale.disconnect();
+      nativeCapabilities.clear();
+    }
+    return checkNative(m.refresh===true);
+  }
+  if(m.type==='nativeAccessibility'){
+    await checkNative();
+    if(!native||!nativeCapabilities.has('setup-v1'))return {opened:false};
+    native.postMessage({type:'setup.openAccessibility'});
+    return {opened:true};
+  }
   if(m.type==='helperCheckUpdate'){
     await checkNative();
     if(!native||!nativeCapabilities.has('updates-v1'))throw Error('当前助手需要安装一次新版。');
@@ -797,21 +993,21 @@ async function onMessage(message,sender) {
   }
   if(m.type==='saveSettings'){
     const {settings:previous}=await load();
-    const scopeFields=m.scope==='usage'?['cooldownSeconds','inputPrice','outputPrice','autoAnalyze']:m.scope==='connection'?['provider','endpoint','model','rememberKey','credentialStorage']:null;
+    const scopeFields=m.scope==='usage'?['autoAnalyze']:m.scope==='connection'?['provider','endpoint','model','rememberKey','credentialStorage']:null;
     if(m.scope==='usage'&&m.apiKey)throw Error('请在模型连接页保存密钥。');
     const requested=scopeFields?Object.fromEntries(scopeFields.filter(key=>key in (m.settings||{})).map(key=>[key,m.settings[key]])):m.settings;
     const s=cleanSettings({...previous,...requested});
     if (m.scope==='connection' && s.provider==='decisions') Object.assign(s,{endpoint:DEFAULTS.endpoint,model:DEFAULTS.model});
-    if(!['decisions','responses','chat'].includes(s.provider)||!s.model?.trim()||!Number.isFinite(s.cooldownSeconds)||s.cooldownSeconds<60||s.cooldownSeconds>3600||![s.inputPrice,s.outputPrice].every(x=>Number.isFinite(x)&&x>=0&&x<=1000))throw new Error('检查调用设置：单页间隔需为 60–3600 秒，费用单价需为有效非负数。');
+    if(!['decisions','responses','chat'].includes(s.provider)||!s.model?.trim())throw new Error('请选择有效的 API 协议和模型。');
     buildRequest(s,{});
-    if(m.scope==='usage'){await run(async()=>{const {settings:latest}=await load();await chrome.storage.local.set({settings:{...latest,cooldownSeconds:s.cooldownSeconds,inputPrice:s.inputPrice,outputPrice:s.outputPrice,autoAnalyze:s.autoAnalyze}});});emit();return {ok:true};}
+    if(m.scope==='usage'){await run(async()=>{const {settings:latest}=await load();await chrome.storage.local.set({settings:{...latest,autoAnalyze:s.autoAnalyze}});});emit();return {ok:true};}
     s.rememberKey = s.rememberKey === true;
     s.credentialStorage = credentialStorage(s);
     const persistsNewKey = s.rememberKey && (!!m.apiKey?.trim() || !previous.rememberKey ||
       credentialStorage(previous) !== s.credentialStorage || credentialOrigin(previous.endpoint) !== credentialOrigin(s.endpoint));
     if (persistsNewKey && m.rememberConsent !== true) throw Error('请选择密钥保存位置后再保存连接。');
     const oldSession = await session();
-    const prepared = await keychain.prepareSave(s,m.apiKey,previous,{passphrase:m.syncPassphrase,expectedId:m.syncId,passkey:m.passkey,passkeyKey:m.passkeyKey,pairingCode:m.pairingCode});
+    const prepared = await keychain.prepareSave(s,m.apiKey,previous,{passphrase:m.syncPassphrase,expectedId:m.syncId,passkey:m.passkey,passkeyKey:m.passkeyKey,pairingCode:m.pairingCode,replace:m.replaceSync===true});
     const sameCredential = connectionKey(s)===connectionKey(previous) && prepared.apiKey===oldSession.apiKey;
     if (s.credentialStorage!=='sync') s.credentialRevision = sameCredential && previous.credentialRevision || crypto.randomUUID();
     await run(async () => {
@@ -822,7 +1018,7 @@ async function onMessage(message,sender) {
       const verified=sameCredential&&connectionCheck?.ok&&connectionCheck.revision===previous.credentialRevision;
       const changed=connectionKey(s)!==connectionKey(latest);
       if(changed)s.autoAnalyze=false;
-      await chrome.storage.local.set({settings:s,connectionProfiles:copyProfiles(connectionProfiles,latest,s),
+      await chrome.storage.local.set({settings:s,syncPublication:s.credentialStorage==='sync'?s.credentialRevision:null,connectionProfiles:copyProfiles(connectionProfiles,latest,s),
         ...(changed?{records:clearAutoReview(records)}:{}),
         ...(verified?{connectionCheck:{...connectionCheck,revision:s.credentialRevision}}:{})});
       if (prepared.apiKey) {
@@ -860,6 +1056,10 @@ async function onMessage(message,sender) {
     const tab=await chrome.tabs.get(m.tabId);
     if(!trackableTab(tab)||tab.url!==m.url||backlogWaiting(tab))throw Error('等目标网页载入后再开始监听。');
     if(!await chrome.permissions.contains({origins:[new URL(tab.url).origin+'/*']}))throw Error('请允许读取此网站。');
+    if(m.resume===true){
+      const restored=await observeTabLifecycle(tab.id,{restored:true});
+      return {listening:restored?.watching===true&&!restored.watchSuspended};
+    }
     return openWatchPrompt(tab,{pick:m.pick===true,focus:true});
   }
   if(m.type==='watch')return beginWatch(m.tabId,m.adapter);
@@ -889,10 +1089,15 @@ async function onMessage(message,sender) {
     const tab=await chrome.tabs.update(m.tabId,{active:true});await chrome.windows.update(tab.windowId,{focused:true});return {ok:true};
   }
   if(m.type==='setAutoGroupLinks')return {enabled:await linkGroups.configure(m.enabled===true)};
-  if(m.type==='setTabTidyHours'){
-    const hours=await tidyTabs.configure(m.hours);
-    if(hours)void run(()=>tidyTabs.sweep()).catch(()=>{});
-    return {hours};
+  if(m.type==='setSmartTabs'){
+    const enabled=m.enabled===true;
+    await chrome.storage.local.set({smartTabsEnabled:enabled});
+    await armSmartTabs(enabled);
+    if(enabled){
+      const current=await chrome.windows.getLastFocused().catch(()=>null);
+      if(current?.type==='normal')queueSmartTabs(current.id);
+    }
+    return {enabled};
   }
   if(m.type==='organizationPlan')return organizationPlan(await chrome.tabs.query({windowId:m.windowId}),m.windowId);
   if(m.type==='organize')return applyOrganization(m.plan);
@@ -914,10 +1119,18 @@ chrome.runtime.onMessage.addListener((m,sender,reply)=>{
     return m.type==='testAPI'?testAPI():analyze(m.tabId,true,m.autoReview,m.expectedHash,
       {connection:m.expectedConnection});
   }):['saveSettings','forgetKey','restoreKey','unlockSync'].includes(m.type)?configRun(()=>onMessage(m,sender)):['backlogPlan','backlogStart','backlogPause','backlogResume','backlogDismiss','backlogStop'].includes(m.type)?onMessage(m,sender):run(()=>onMessage(m,sender));
-  operation.then(data=>reply({ok:true,data}),error=>reply({ok:false,error:error.message}));return true;
+  operation.then(data=>reply({ok:true,data}),error=>reply({ok:false,error:error.message,
+    ...(error.code==='sync_replace_required'&&{code:error.code})}));return true;
 });
 chrome.alarms.onAlarm.addListener(alarm=>{
-  if(alarm.name===tidyAlarm)return run(()=>tidyTabs.sweep()).catch(()=>{});
+  if(alarm.name===tidyAlarm){
+    void (async()=>{
+      if(!await smartEnabled())return;
+      const windows=await chrome.windows.getAll({windowTypes:['normal']});
+      for(const window of windows)if(!window.incognito)await organizeSmartTabs(window.id).catch(()=>{});
+    })().catch(()=>{});
+    return;
+  }
   if(alarm.name==='backlog'){void backlog.tick().catch(()=>{});return;}
   if(alarm.name==='review') {
     cloudRun(async()=>{
@@ -939,8 +1152,11 @@ chrome.alarms.onAlarm.addListener(alarm=>{
 });
 chrome.tabs.onActivated.addListener(({tabId})=>run(async()=>{
   await cancelClose(tabId);
-  await tidyTabs.touch(tabId);
   const {records}=await load(),record=records[tabId];
+  if(record?.watchSuspended){
+    const page=await chrome.tabs.get(tabId).catch(()=>null);
+    if(page?.status==='complete'&&!page.discarded)await observeTabLifecycle(tabId,{restored:true});
+  }
   if(record?.state==='resume'){
     records[tabId]={...record,state:'keep',watching:false,reason:'已接手。'};
     await saveRecords(records);
@@ -973,22 +1189,25 @@ async function observeTabLifecycle(tabId, change={}) {
       record.watchSuspended='sleeping';
       record.watchDocumentId=null;
       record.reason='唤醒这个标签后继续监听。';
-    }else if(change.status==='complete'||change.restored===true){
+    }else if(change.status==='complete'||change.restored===true||change.discarded===false&&tab.status==='complete'){
       try{
         const [frame]=await chrome.scripting.executeScript({target:{tabId},files:['sensor.js']});
         const current=await chrome.tabs.get(tabId);
         if(current.url!==record.url||current.incognito)return;
         const target=frame?.documentId?{documentId:frame.documentId}:{frameId:0};
+        const detected=await chrome.tabs.sendMessage(tabId,{type:'watchResume',adapter:record.watchAdapter},target).catch(()=>null);
+        record.watchAdapter=detected?.adapter||record.watchAdapter;
         await chrome.tabs.sendMessage(tabId,{type:'adapter',adapter:record.watchAdapter,
           wasWaiting:record.observed==='waiting'||record.state==='waiting'},target);
         record.watchDocumentId=frame?.documentId||null;
         record.watchSuspended=null;
         if(previous.watchSuspended){record.state='waiting';record.reason='正在监听，完成后提醒。';}
       }catch{
-        record.watchSuspended='unavailable';
+        const permitted=await chrome.permissions.contains({origins:[new URL(record.url).origin+'/*']}).catch(()=>false);
+        record.watchSuspended=permitted?'unavailable':'permission';
         record.watchDocumentId=null;
         record.state='uncertain';
-        record.reason='暂时无法读取此页。右键「开始监听」即可恢复。';
+        record.reason=permitted?'暂时读不到页面状态。打开标签后会重新连接。':'允许访问此网站后，会继续原有监听。';
       }
     }
   }
@@ -999,11 +1218,19 @@ async function observeTabLifecycle(tabId, change={}) {
     if(!tab.discarded)await nativeShow(tabId).catch(()=>{});
   }
   emit();
+  return record;
 }
 chrome.tabs.onUpdated.addListener((tabId,change,tab)=>{
   if ('url' in change || change.status==='complete') void run(()=>linkGroups.groupLink(tabId)).catch(()=>{});
   if (change.groupId === -1) void run(()=>linkGroups.membershipChanged(tab?.windowId)).catch(()=>{});
-  if (change.groupId === -1 || 'url' in change) void run(()=>tidyTabs.touch(tabId)).catch(()=>{});
+  if(change.groupId===-1&&tab?.url)void run(async()=>{
+    const {smartTabHeld={}}=await chrome.storage.session.get('smartTabHeld');
+    smartTabHeld[tabId]=tab.url;
+    await chrome.storage.session.set({smartTabHeld});
+  }).catch(()=>{});
+  if(change.status==='complete'&&tab?.windowId>=0&&trackableTab(tab)&&!privateURL(tab.url))void smartEnabled().then(enabled=>{
+    if(enabled)queueSmartTabs(tab.windowId,tabId);
+  }).catch(()=>{});
   if(change.status==='complete'||change.discarded===false||'url' in change)void backlog.wake(tabId).catch(()=>{});
   if(['url','status','audible','discarded','pinned','title'].some(key=>key in change))
     void run(()=>observeTabLifecycle(tabId,change)).catch(()=>{});
@@ -1026,10 +1253,35 @@ chrome.tabs.onReplaced?.addListener((added,removed)=>{
 }).catch(()=>{});});
 
 chrome.tabs.onRemoved.addListener((tabId,info)=>{linkGroups.removed(tabId);if(info&&!info.isWindowClosing)void run(()=>linkGroups.membershipChanged(info.windowId)).catch(()=>{});void backlog.wake(tabId).catch(()=>{});return run(async()=>{const {records}=await load();delete records[tabId];await saveRecords(records);const {snapshots={}}=await session();delete snapshots[tabId];await chrome.storage.session.set({snapshots});await chrome.storage.session.remove('watchPrompt:'+tabId);hideOverlay(tabId);emit();});});
-chrome.tabs.onCreated?.addListener(tab=>{void run(()=>linkGroups.created(tab)).catch(()=>{});emit();});
+chrome.tabs.onCreated?.addListener(tab=>{
+  void run(async()=>{
+    if(await smartEnabled()&&currentKey((await load()).settings,await session()))return;
+    await linkGroups.created(tab);
+  }).catch(()=>{});
+  emit();
+});
 chrome.tabGroups?.onUpdated?.addListener(group=>{void run(()=>linkGroups.prune(group.id)).catch(()=>{});});
 chrome.tabGroups?.onRemoved?.addListener(group=>{void run(()=>linkGroups.prune(group.id)).catch(()=>{});});
-chrome.runtime.onInstalled.addListener(()=>{chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true});void registerTabMenus().catch(()=>{});chrome.alarms.create('review',{periodInMinutes:5});});
+chrome.runtime.onInstalled.addListener(details=>{
+  chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
+  chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true});
+  void registerTabMenus().catch(()=>{});
+  chrome.alarms.create('review',{periodInMinutes:5});
+  if(details.reason!=='update')return;
+  // 扩展版本切换会替换旧内容脚本。已加载的原标签直接接续保存的规则。
+  return run(async()=>{
+    await threadWorkspace.reconcile({refreshExisting:true}).catch(()=>{});
+    const {records}=await load();
+    const tabs=await chrome.tabs.query({});
+    for(const tab of tabs){
+      const record=records[tab.id];
+      if(!tab.incognito&&record?.watching&&record.observed!=='done'&&record.url===tab.url&&
+         (tab.status==='complete'||tab.discarded)){
+        await observeTabLifecycle(tab.id,{restored:true});
+      }
+    }
+  }).catch(()=>{});
+});
 chrome.runtime.onStartup.addListener(()=>run(async()=>{
   const {records:prior}=await load();
   const tabs=(await chrome.tabs.query({})).filter(tab=>!tab.incognito);
@@ -1056,7 +1308,10 @@ chrome.runtime.onStartup.addListener(()=>run(async()=>{
   const queue=await backlog.read();if(queue){queue.autoReview=false;if(['running','waiting','blocked'].includes(queue.phase)){queue.phase='paused';queue.reason='浏览器已重启，可确认后继续本轮分析。';}await chrome.storage.local.set({analysisQueue:queue});}
   await saveRecords(records);
   for(const id of restored)await observeTabLifecycle(id,{restored:true});
-  await chrome.alarms.create('review',{periodInMinutes:5});await tidyTabs.schedule();emit();
+  await chrome.alarms.create('review',{periodInMinutes:5});await armSmartTabs(await smartEnabled());
+  const {settings}=await load();
+  if(settings.nativeEnabled||settings.switcherEnabled)void checkNative().catch(()=>{});
+  emit();
 }));
 mru.start().catch(()=>mru.report('unavailable','快捷切换未连接；在设置中重新保存后重试。'));
 
@@ -1066,10 +1321,20 @@ chrome.storage.onChanged?.addListener((changes,area)=>{
 
 Promise.all([chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}),chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'})]).then(async()=>{await configRun(refreshSyncedConnection);const {settings}=await load();if(settings.rememberKey)void keychain.restore(settings);if(settings.nativeEnabled)await connectNative();}).catch(()=>{});
 
-chrome.windows.onFocusChanged?.addListener(windowId=>run(async()=>{await chrome.storage.session.set({chromeFocusedWindow:windowId});const {records,settings}=await load();if(windowId>=0&&settings.rememberKey)void keychain.restore(settings);for(const [id,r]of Object.entries(records))if(['closing','paused'].includes(r.state))await updateCountdownVisibility(Number(id));}));
+chrome.windows.onFocusChanged?.addListener(windowId=>{
+  if(windowId>=0&&nativeConnection.status!=='ready')void restoreNativeFeatures().catch(()=>{});
+  return run(async()=>{
+    await chrome.storage.session.set({chromeFocusedWindow:windowId});
+    const {records,settings}=await load();
+    if(windowId>=0&&settings.rememberKey)void keychain.restore(settings);
+    for(const [id,record] of Object.entries(records)){
+      if(['closing','paused'].includes(record.state))await updateCountdownVisibility(Number(id));
+    }
+  });
+});
 
 void backlog.recover().catch(()=>{});
-void tidyTabs.schedule().catch(()=>{});
+void smartEnabled().then(armSmartTabs).catch(()=>{});
 
 void run(()=>threadWorkspace.reconcile()).catch(()=>{});
 chrome.permissions.onRemoved?.addListener(({origins=[]})=>{if(origins.includes('https://chatgpt.com/*'))void run(()=>threadWorkspace.revoke()).catch(()=>{});});
@@ -1127,6 +1392,7 @@ async function submitWatchFromPage(message,sender){
   await chrome.storage.session.remove(key);
   return result;
 }
+const tr=globalThis.DiaoLocale.text;
 function createMenu(properties){
   return new Promise((resolve,reject)=>chrome.contextMenus.create(properties,()=>{
     const error=chrome.runtime.lastError;
@@ -1137,17 +1403,17 @@ async function registerTabMenus(){
   if(!chrome.contextMenus)return;
   await new Promise(resolve=>chrome.contextMenus.removeAll(resolve));
   const web=['http://*/*','https://*/*'];
-  const watch={id:'watch-page',title:'开始监听',documentUrlPatterns:web};
+  const watch={id:'watch-page',title:tr('开始监听'),documentUrlPatterns:web};
   try{
     await createMenu({...watch,contexts:['tab','page','selection']});
-    await createMenu({id:'close-reminder',title:'30 秒后关闭，可保留',contexts:['tab'],documentUrlPatterns:web});
+    await createMenu({id:'close-reminder',title:tr('30 秒后关闭，可保留'),contexts:['tab'],documentUrlPatterns:web});
   }catch{
     // 较早 Chrome 没有标签条扩展菜单，网页与文字选区入口仍可使用。
     try{await createMenu({...watch,contexts:['page','selection']});}catch{}
   }
 }
 async function openWatchPrompt(tab,{pick=false,focus=false}={}){
-  const [{documentId}]=await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js','watch-prompt.js']});
+  const [{documentId}]=await chrome.scripting.executeScript({target:{tabId:tab.id},files:['locale.js','sensor.js','watch-prompt.js']});
   const current=await chrome.tabs.get(tab.id);
   if(current.url!==tab.url)throw Error('网页已变化。请重新开始监听。');
   const url=new URL(current.url),{adapters}=await load(),scope=url.origin+url.pathname;
@@ -1172,7 +1438,7 @@ async function showMenuError(tab,error){
   await chrome.action.setBadgeText({tabId:tab.id,text:'!'}).catch(()=>{});
   await chrome.action.setTitle({tabId:tab.id,title:String(error.message||'请重新打开网页后重试。')}).catch(()=>{});
   try{
-    await chrome.scripting.executeScript({target:{tabId:tab.id},files:['watch-prompt.js']});
+    await chrome.scripting.executeScript({target:{tabId:tab.id},files:['locale.js','watch-prompt.js']});
     await chrome.tabs.sendMessage(tab.id,{type:'showWatchNotice',text:error.message},{frameId:0});
   }catch{}
 }

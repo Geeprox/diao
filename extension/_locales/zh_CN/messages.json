@@ -1,0 +1,1031 @@
+{
+  "extensionName": {
+    "message": "Diao"
+  },
+  "extensionDescription": {
+    "message": "自动分组 Chrome 标签页，监听网页任务，在 ChatGPT 使用对话大纲、批注和提问队列。"
+  },
+  "openExtension": {
+    "message": "打开 Diao"
+  },
+  "skipToMain": {
+    "message": "跳到主要内容"
+  },
+  "openSettings": {
+    "message": "打开设置"
+  },
+  "previewNote": {
+    "message": "界面预览 · 合成页面 · 不调用 API"
+  },
+  "tasks": {
+    "message": "管理事项"
+  },
+  "taskCount": {
+    "message": "事项数量"
+  },
+  "addTask": {
+    "message": "添加事项"
+  },
+  "analyzingPages": {
+    "message": "正在逐页分析"
+  },
+  "analysisProgress": {
+    "message": "存量标签分析进度"
+  },
+  "pause": {
+    "message": "暂停"
+  },
+  "resumeAnalysis": {
+    "message": "继续分析"
+  },
+  "restoreConnection": {
+    "message": "恢复模型连接"
+  },
+  "viewSuggestions": {
+    "message": "查看清理建议"
+  },
+  "endRun": {
+    "message": "结束本轮"
+  },
+  "done": {
+    "message": "完成"
+  },
+  "filterTasks": {
+    "message": "筛选事项"
+  },
+  "allTasks": {
+    "message": "全部事项"
+  },
+  "ready": {
+    "message": "待接手"
+  },
+  "watching": {
+    "message": "监听中"
+  },
+  "cleanup": {
+    "message": "建议清理"
+  },
+  "searchTasks": {
+    "message": "查找事项"
+  },
+  "helperFeatures": {
+    "message": "标签旁提醒与 Control + Tab"
+  },
+  "installHelper": {
+    "message": "安装 Mac 助手"
+  },
+  "recentlyClosed": {
+    "message": "刚刚关闭的页面"
+  },
+  "restoreAddress": {
+    "message": "可重新打开网址，未提交内容无法恢复。"
+  },
+  "settings": {
+    "message": "设置"
+  },
+  "backToTasks": {
+    "message": "返回管理"
+  },
+  "settingsTabs": {
+    "message": "设置分类"
+  },
+  "modelConnection": {
+    "message": "模型连接"
+  },
+  "usage": {
+    "message": "调用用量"
+  },
+  "tabs": {
+    "message": "标签"
+  },
+  "savedConnectionFound": {
+    "message": "发现已保存的连接"
+  },
+  "pairOrPassword": {
+    "message": "配对码或原同步口令"
+  },
+  "unlockDevice": {
+    "message": "解锁此设备"
+  },
+  "service": {
+    "message": "服务"
+  },
+  "compatibleApi": {
+    "message": "兼容 API"
+  },
+  "protocol": {
+    "message": "调用方式"
+  },
+  "compatibleResponses": {
+    "message": "兼容 Responses"
+  },
+  "apiEndpoint": {
+    "message": "API 地址"
+  },
+  "model": {
+    "message": "模型"
+  },
+  "modelName": {
+    "message": "模型名称"
+  },
+  "manualKey": {
+    "message": "手动填写 API Key"
+  },
+  "pasteKey": {
+    "message": "粘贴 API Key"
+  },
+  "importEnv": {
+    "message": "导入 .env"
+  },
+  "importEnvFile": {
+    "message": "导入 .env 文件"
+  },
+  "unlockAndRestore": {
+    "message": "解锁并恢复连接"
+  },
+  "saveTo": {
+    "message": "保存到"
+  },
+  "thisDevice": {
+    "message": "此设备"
+  },
+  "chromeSync": {
+    "message": "Chrome 同步"
+  },
+  "keychain": {
+    "message": "钥匙串"
+  },
+  "sessionOnly": {
+    "message": "仅此会话"
+  },
+  "saveWithCode": {
+    "message": "用配对码保存"
+  },
+  "switchToPasskey": {
+    "message": "改用通行密钥"
+  },
+  "connectHelper": {
+    "message": "连接 Mac 助手"
+  },
+  "onlySaveHere": {
+    "message": "仅保存到此设备"
+  },
+  "replaceShared": {
+    "message": "替换共享连接"
+  },
+  "saveConnection": {
+    "message": "保存连接"
+  },
+  "removeKey": {
+    "message": "移除密钥"
+  },
+  "todayUsage": {
+    "message": "今日调用"
+  },
+  "chatTools": {
+    "message": "对话工具"
+  },
+  "chatIntroduction": {
+    "message": "在对话里批注、跳到章节，或在回答期间排队下一条消息。"
+  },
+  "checkingPermission": {
+    "message": "检查授权中"
+  },
+  "prepareChatSummary": {
+    "message": "提前准备对话摘要"
+  },
+  "prepareChatHelp": {
+    "message": "会话空闲时将问答发送给你配置的 OpenAI，缩放时直接打开摘要。有新内容才更新。"
+  },
+  "groupFromSource": {
+    "message": "将链接与来源页分组"
+  },
+  "groupFromSourceHelp": {
+    "message": "在后台打开链接时，Chrome 会把它与来源页放在一起。右键标签可取消分组。"
+  },
+  "smartTabs": {
+    "message": "智能分组与收纳"
+  },
+  "smartTabsHelp": {
+    "message": "将已授权网页的标题、短正文和近期使用情况发送给模型。相关页面归为一组，已完成的闲置页面收进「闲置标签」。"
+  },
+  "groupBySite": {
+    "message": "按网站分组"
+  },
+  "downloadHelper": {
+    "message": "下载 Mac 助手"
+  },
+  "openAccess": {
+    "message": "打开辅助功能设置"
+  },
+  "reconnect": {
+    "message": "重新连接"
+  },
+  "helperRequirements": {
+    "message": "适用 Apple 芯片和 macOS 27.2 起。"
+  },
+  "helperReleases": {
+    "message": "版本与校验文件"
+  },
+  "connectedHelper": {
+    "message": "Mac 助手已连接"
+  },
+  "checkUpdates": {
+    "message": "检查更新"
+  },
+  "viewReleases": {
+    "message": "查看发布版本"
+  },
+  "macFeatures": {
+    "message": "Mac 功能"
+  },
+  "recentSwitcher": {
+    "message": "按最近使用切换"
+  },
+  "switchShortcut": {
+    "message": "切换，"
+  },
+  "reverseShortcut": {
+    "message": "反向，"
+  },
+  "cancelShortcut": {
+    "message": "取消。"
+  },
+  "tabAlerts": {
+    "message": "标签旁提醒"
+  },
+  "hideAlert": {
+    "message": "隐藏当前提醒"
+  },
+  "today": {
+    "message": "今日"
+  },
+  "calls": {
+    "message": "次调用"
+  },
+  "closeChecking": {
+    "message": "关闭网页检查"
+  },
+  "scope": {
+    "message": "范围"
+  },
+  "allWindows": {
+    "message": "所有窗口"
+  },
+  "currentWindow": {
+    "message": "当前窗口"
+  },
+  "watchTask": {
+    "message": "监听网页任务"
+  },
+  "watchInstructions": {
+    "message": "状态变化时提醒，数据留在本机。"
+  },
+  "choosePage": {
+    "message": "选网页"
+  },
+  "findCleanup": {
+    "message": "找出清理建议"
+  },
+  "analysisDisclosure": {
+    "message": "将所选网站的页面标题、网址路径和短正文发送至"
+  },
+  "connectModel": {
+    "message": "连接模型"
+  },
+  "sitesToCheck": {
+    "message": "要检查的网站"
+  },
+  "reviewUpdates": {
+    "message": "内容变化后自动复查"
+  },
+  "startAnalysis": {
+    "message": "开始分析"
+  },
+  "searchOpenPages": {
+    "message": "搜索打开的网页"
+  },
+  "searchTitleOrSite": {
+    "message": "搜索标题或网站"
+  },
+  "noMatchingPages": {
+    "message": "没有符合条件的网页。"
+  },
+  "watchablePages": {
+    "message": "可以监听的网页"
+  },
+  "backToInspection": {
+    "message": "返回网页检查"
+  },
+  "beforeAnalysis": {
+    "message": "分析前，确认发送内容"
+  },
+  "closePreview": {
+    "message": "关闭发送预览"
+  },
+  "sendTo": {
+    "message": "发送到"
+  },
+  "pathAndLength": {
+    "message": "。网址仅保留路径，正文最多 1600 字符。"
+  },
+  "recheckThisPage": {
+    "message": "此页有新内容时，允许自动复查"
+  },
+  "recheckHelp": {
+    "message": "启用后，仅在此页闲置至少 10 分钟时复查。相同内容复用判断，可随时停止。"
+  },
+  "dataScope": {
+    "message": "不读取表单值。存在编辑器时不发送正文，请检查标题和网址是否含私人信息。"
+  },
+  "sendAndAnalyze": {
+    "message": "发送并分析"
+  },
+  "cancel": {
+    "message": "取消"
+  },
+  "organizeWindow": {
+    "message": "整理当前窗口"
+  },
+  "closeOrganizePreview": {
+    "message": "关闭整理预览"
+  },
+  "groupBySiteHelp": {
+    "message": "将同一网站的标签归为一组，新增分组排在末尾并按网站名称排序。已固定和已有分组的标签保留原样。"
+  },
+  "groupBySiteUndo": {
+    "message": "只在本机处理，不调用 API。应用后可撤销；再次手动调整标签结构后，撤销会停止以保留你的操作。"
+  },
+  "applyGroups": {
+    "message": "应用分组"
+  },
+  "pairingCode": {
+    "message": "设备配对码"
+  },
+  "copy": {
+    "message": "复制"
+  },
+  "newCode": {
+    "message": "生成新码"
+  },
+  "watch": {
+    "message": "开始监听"
+  },
+  "stopWatching": {
+    "message": "停止监听"
+  },
+  "changeWatch": {
+    "message": "更改监听内容"
+  },
+  "chooseStatus": {
+    "message": "点选进度文字"
+  },
+  "selectPageState": {
+    "message": "选择网页状态"
+  },
+  "selectTaskState": {
+    "message": "点选网页上的任务状态"
+  },
+  "reuseTaskState": {
+    "message": "点选状态文字。下次在此页可直接监听。"
+  },
+  "watchStarted": {
+    "message": "已开始监听。"
+  },
+  "closeInThirty": {
+    "message": "30 秒后关闭，可保留"
+  },
+  "tabAsleep": {
+    "message": "标签已休眠"
+  },
+  "watchAccessRequired": {
+    "message": "需要网页访问"
+  },
+  "watchAccessRecovery": {
+    "message": "允许访问此网站后，会继续原有监听。"
+  },
+  "resumeWatching": {
+    "message": "继续监听"
+  },
+  "openToWatch": {
+    "message": "打开标签继续监听"
+  },
+  "watchWillResume": {
+    "message": "打开标签后会自动继续监听。"
+  },
+  "linkLost": {
+    "message": "连接中断"
+  },
+  "openTabRestore": {
+    "message": "打开标签以恢复监听。"
+  },
+  "progressUnavailable": {
+    "message": "暂未读到进度"
+  },
+  "watchRecoverHelp": {
+    "message": "页面变化时会自动重新识别。也可以点选进度文字。"
+  },
+  "waitingForChat": {
+    "message": "等待 ChatGPT 完成当前回复。"
+  },
+  "waitingForText": {
+    "message": "等待页面上的「{0}」发生变化。"
+  },
+  "waitingForFinishText": {
+    "message": "等待页面显示「{0}」。"
+  },
+  "watchNotification": {
+    "message": "任务完成后会提醒你。"
+  },
+  "taskInProgress": {
+    "message": "任务进行中"
+  },
+  "keep": {
+    "message": "保留"
+  },
+  "closing": {
+    "message": "即将关闭"
+  },
+  "paused": {
+    "message": "已暂停"
+  },
+  "needsReview": {
+    "message": "待确认"
+  },
+  "inUse": {
+    "message": "正在使用"
+  },
+  "unnamedPage": {
+    "message": "无标题页面"
+  },
+  "backToWork": {
+    "message": "返回接手"
+  },
+  "moreActions": {
+    "message": "更多操作"
+  },
+  "analyzePage": {
+    "message": "分析页面"
+  },
+  "noTasks": {
+    "message": "暂无待处理事项"
+  },
+  "noReadyTasks": {
+    "message": "暂无待接手事项"
+  },
+  "noWatchTasks": {
+    "message": "暂无监听中的事项"
+  },
+  "noCleanupSuggestions": {
+    "message": "暂无清理建议"
+  },
+  "noMatches": {
+    "message": "未找到匹配的事项"
+  },
+  "allTasksAction": {
+    "message": "查看全部事项"
+  },
+  "quickStartWatch": {
+    "message": "在网页上右键选择「开始监听」。有进展时，会提醒你回来。"
+  },
+  "callTotals": {
+    "message": "今日已调用 {0} 次，累计约 {1} token。"
+  },
+  "profileSaveHelp": {
+    "message": "重启 Chrome 后自动恢复。"
+  },
+  "syncSaveHelp": {
+    "message": "同一 Chrome 账号共用一份连接。新设备验证一次即可恢复。"
+  },
+  "keychainSaveHelp": {
+    "message": "保存在 macOS 钥匙串。"
+  },
+  "sessionSaveHelp": {
+    "message": "仅在当前 Chrome 会话可用。"
+  },
+  "savedReplace": {
+    "message": "已保存 · 可替换"
+  },
+  "synced": {
+    "message": "已连接 · Chrome 同步"
+  },
+  "profileSaved": {
+    "message": "已保存在当前 Chrome 配置。"
+  },
+  "savedToKeychain": {
+    "message": "已保存至钥匙串。"
+  },
+  "sessionConnected": {
+    "message": "此会话已连接。"
+  },
+  "removeFromSync": {
+    "message": "从同步中移除"
+  },
+  "verifyAndRestore": {
+    "message": "验证并恢复"
+  },
+  "restoring": {
+    "message": "正在恢复…"
+  },
+  "checkConnection": {
+    "message": "正在验证连接…"
+  },
+  "connectionVerified": {
+    "message": "连接验证通过"
+  },
+  "editSharedConnection": {
+    "message": "Chrome 已有同步连接。可将新密钥保存在此设备，或替换共享连接。"
+  },
+  "existingSharedConnection": {
+    "message": "其他设备已保存共享连接。你可以只在此设备使用新密钥，也可以替换共享连接。"
+  },
+  "yourKeyKept": {
+    "message": "此设备保留了自己的密钥。你也可以恢复 Chrome 同步中的连接。"
+  },
+  "otherDeviceCode": {
+    "message": "在另一台设备使用"
+  },
+  "pastePairingCode": {
+    "message": "在另一台电脑的 Diao → 模型连接里粘贴此码一次，就能恢复共享连接。"
+  },
+  "purposePairingCode": {
+    "message": "配对码用来在另一台电脑恢复已保存的 Key。生成后，新设备用这组码验证。"
+  },
+  "connecting": {
+    "message": "正在连接…"
+  },
+  "saving": {
+    "message": "正在保存…"
+  },
+  "allowAccessibility": {
+    "message": "允许辅助功能访问"
+  },
+  "allowAccessibilityHelp": {
+    "message": "在系统设置中启用 Diao Bridge，然后回到这里。"
+  },
+  "openInstalledHelper": {
+    "message": "从「应用程序」打开 Diao Bridge，再试一次。"
+  },
+  "downloadHelperHelp": {
+    "message": "下载后打开助手，按提示安装。"
+  },
+  "helperUnsupported": {
+    "message": "此设备不支持 Mac 功能"
+  },
+  "finishHelper": {
+    "message": "完成 Mac 助手设置"
+  },
+  "idleTabs": {
+    "message": "闲置标签"
+  },
+  "enableChat": {
+    "message": "授权并启用"
+  },
+  "disableChat": {
+    "message": "停用对话工具"
+  },
+  "chatActive": {
+    "message": "已启用。回到 ChatGPT 使用。"
+  },
+  "chatAccessScope": {
+    "message": "仅在授权的 ChatGPT 页面启用。"
+  },
+  "connectForSmart": {
+    "message": "保存模型连接后即可开启智能整理。"
+  },
+  "allowSmartTabs": {
+    "message": "允许访问网页后即可开启智能整理。"
+  },
+  "outline": {
+    "message": "对话大纲"
+  },
+  "overview": {
+    "message": "对话概览"
+  },
+  "outlineSearch": {
+    "message": "搜索问答与章节"
+  },
+  "overviewButton": {
+    "message": "概览"
+  },
+  "openOverview": {
+    "message": "打开概览"
+  },
+  "overviewPreparing": {
+    "message": "正在整理对话摘要…"
+  },
+  "overviewHistory": {
+    "message": "正在补齐对话历史…"
+  },
+  "overviewReading": {
+    "message": "正在读取可用的问答。"
+  },
+  "overviewConnection": {
+    "message": "连接 OpenAI 后即可生成摘要。"
+  },
+  "originalTurns": {
+    "message": "原始问答"
+  },
+  "sections": {
+    "message": "章节"
+  },
+  "originalReply": {
+    "message": "定位原回复"
+  },
+  "originalPrompt": {
+    "message": "定位原问题"
+  },
+  "completeConversation": {
+    "message": "完整会话"
+  },
+  "readTurns": {
+    "message": "已读问答"
+  },
+  "coverageRounds": {
+    "message": "{0} · {1} 轮"
+  },
+  "summaryRetry": {
+    "message": "重试"
+  },
+  "summaryUpdate": {
+    "message": "回复完成后更新摘要"
+  },
+  "summaryGenerating": {
+    "message": "正在生成摘要…"
+  },
+  "summaryUpdating": {
+    "message": "正在更新摘要…"
+  },
+  "summaryReading": {
+    "message": "正在读取摘要…"
+  },
+  "summaryPartial": {
+    "message": "正在概括已读取的问答…"
+  },
+  "summaryFailure": {
+    "message": "摘要暂未生成。"
+  },
+  "annotate": {
+    "message": "批注"
+  },
+  "addAnnotation": {
+    "message": "添加批注"
+  },
+  "queue": {
+    "message": "队列"
+  },
+  "queuedPrompts": {
+    "message": "发送队列"
+  },
+  "interject": {
+    "message": "插话"
+  },
+  "delete": {
+    "message": "删除"
+  },
+  "more": {
+    "message": "更多"
+  },
+  "prepareAhead": {
+    "message": "提前准备"
+  },
+  "generateOnOpen": {
+    "message": "打开时生成"
+  },
+  "onlyOriginal": {
+    "message": "只看原文与缓存"
+  },
+  "overviewOpenModel": {
+    "message": "打开概览并使用已配置的 OpenAI 连接生成摘要"
+  },
+  "overviewNoSummary": {
+    "message": "暂无可用的摘要。"
+  },
+  "overviewNoEarlier": {
+    "message": "网页暂未提供更早的消息。"
+  },
+  "overviewEmpty": {
+    "message": "找到的问答与章节会显示在这里。"
+  },
+  "overviewClose": {
+    "message": "返回对话"
+  },
+  "summaryLoadMore": {
+    "message": "继续补齐"
+  },
+  "summaryWaitAnswer": {
+    "message": "等待网页载入回答"
+  },
+  "summaryEmptyHistory": {
+    "message": "对话空闲后可继续补齐历史"
+  },
+  "summaryFocusHistory": {
+    "message": "回到此标签页后可继续补齐"
+  },
+  "summaryOutlineOnly": {
+    "message": "原文索引"
+  },
+  "summaryTopics": {
+    "message": "跳转到主题"
+  },
+  "summaryServiceBackoff": {
+    "message": "OpenAI 请求受限，请稍后再试。"
+  },
+  "summaryConnectionRecover": {
+    "message": "连接未就绪，可在模型连接中恢复。"
+  },
+  "outlineClear": {
+    "message": "清除搜索"
+  },
+  "outlineHistory": {
+    "message": "补齐更早消息"
+  },
+  "outlineHistoryLoading": {
+    "message": "正在补齐更早消息…"
+  },
+  "outlineHistoryLoaded": {
+    "message": "已载入的消息"
+  },
+  "outlineNoMatch": {
+    "message": "没有匹配内容"
+  },
+  "outlineTimeline": {
+    "message": "会话时间线"
+  },
+  "outlineOpening": {
+    "message": "打开大纲"
+  },
+  "outlinePin": {
+    "message": "固定大纲"
+  },
+  "outlineUnpin": {
+    "message": "取消固定大纲"
+  },
+  "outlineNoMessages": {
+    "message": "暂无可定位的消息"
+  },
+  "outlineUnavailable": {
+    "message": "暂未取得会话目录"
+  },
+  "outlineRefresh": {
+    "message": "刷新大纲"
+  },
+  "outlineQuestion": {
+    "message": "问题 {0}"
+  },
+  "outlineAnswerSection": {
+    "message": "回答章节 {0}"
+  },
+  "chatReply": {
+    "message": "回答批注"
+  },
+  "chatQueueMenu": {
+    "message": "队列操作"
+  },
+  "chatSettings": {
+    "message": "对话设置"
+  },
+  "chatSettingsClose": {
+    "message": "关闭设置"
+  },
+  "chatSettingsSave": {
+    "message": "保存设置"
+  },
+  "chatRestoreDefaults": {
+    "message": "恢复默认"
+  },
+  "chatOutlineSidebar": {
+    "message": "右侧对话大纲"
+  },
+  "chatEnableTools": {
+    "message": "启用对话工具"
+  },
+  "chatEnableToolsHelp": {
+    "message": "管理导航、批注和自动发送。关闭后保留数据。"
+  },
+  "chatAnswerOutline": {
+    "message": "回答提纲"
+  },
+  "chatAnswerOutlineHelp": {
+    "message": "保留回答的标题层级与编号。没有标题时，使用一级列表。"
+  },
+  "chatOnlyEvents": {
+    "message": "关闭，只显示会话事件"
+  },
+  "chatCompleteOutline": {
+    "message": "完整章节目录（推荐）"
+  },
+  "chatHideNative": {
+    "message": "隐藏 ChatGPT 原生导航"
+  },
+  "chatHideNativeHelp": {
+    "message": "显示 Diao 大纲时，收起 ChatGPT 自带的右侧导航。"
+  },
+  "chatAnnotationsQueue": {
+    "message": "批注与提问队列"
+  },
+  "chatSelectAnnotate": {
+    "message": "选中文字后添加批注"
+  },
+  "chatSelectAnnotateHelp": {
+    "message": "在选区工具条添加批注，随下一轮问题一起发送。"
+  },
+  "chatPromptQueue": {
+    "message": "启用安全提问队列"
+  },
+  "chatPromptQueueHelp": {
+    "message": "Enter 空闲时发送，忙碌时排队。Option 或 Shift + Enter 换行，Command 或 Ctrl + Enter 立即发送或调整方向。"
+  },
+  "chatShowQueue": {
+    "message": "输入框上方显示排队条"
+  },
+  "chatShowQueueHelp": {
+    "message": "在输入框上方编辑、删除或拖动待发送的问题。"
+  },
+  "chatSendNext": {
+    "message": "空闲后自动发送下一条"
+  },
+  "chatSendNextHelp": {
+    "message": "每轮结束后发送队首。关闭时改为手动发送。"
+  },
+  "chatNavigationData": {
+    "message": "跳转与本地数据"
+  },
+  "chatPinch": {
+    "message": "对话区双指缩放"
+  },
+  "chatPinchHelp": {
+    "message": "捏合看概览，张开返回。也可以从大纲打开「概览」。"
+  },
+  "chatSummary": {
+    "message": "概览摘要"
+  },
+  "chatSummaryHelp": {
+    "message": "提前准备会在前台会话空闲时，将已载入的问答和章节发送到已配置的 OpenAI。相同内容复用缓存。"
+  },
+  "chatJumpAnswer": {
+    "message": "点击回答段落跳转"
+  },
+  "chatJumpAnswerHelp": {
+    "message": "点击章节定位原文。关闭后仍可跳转到提问和任务。"
+  },
+  "chatSmooth": {
+    "message": "附近内容使用平滑滚动"
+  },
+  "chatSmoothHelp": {
+    "message": "附近章节平滑滚动，远距离直接定位。"
+  },
+  "chatRemember": {
+    "message": "记住已经读取的大纲"
+  },
+  "chatRememberHelp": {
+    "message": "在浏览器本地保留已读取的提问、任务和章节。"
+  },
+  "chatPlacement": {
+    "message": "显示条件与位置"
+  },
+  "chatMinTurns": {
+    "message": "会话事件达到多少条时显示导航"
+  },
+  "chatMinTurnsHelp": {
+    "message": "每次提问或任务运行计为一条。设为 1 时始终显示。"
+  },
+  "chatRightOffset": {
+    "message": "距窗口右侧的距离"
+  },
+  "chatRightOffsetHelp": {
+    "message": "单位为像素。数值越大，导航越靠左。"
+  },
+  "chatMinWidth": {
+    "message": "窗口窄于多少像素时隐藏导航"
+  },
+  "chatMinWidthHelp": {
+    "message": "仅影响右侧导航。设为 0 时始终显示。"
+  },
+  "chatScope": {
+    "message": "运行范围"
+  },
+  "chatScopeHelp": {
+    "message": "对话工具在 ChatGPT 会话页启用。"
+  },
+  "setupUpdateChecking": {
+    "message": "正在检查更新…"
+  },
+  "setupUpdateStaged": {
+    "message": "更新已就绪，空闲时安装。"
+  },
+  "setupUpdateInstalling": {
+    "message": "正在更新并重新连接…"
+  },
+  "setupUpdateCurrent": {
+    "message": "已是最新版。"
+  },
+  "setupUpdateInstalled": {
+    "message": "更新完成。"
+  },
+  "setupUpdateFailed": {
+    "message": "更新未完成，可以重试。"
+  },
+  "setupAutoUpdate": {
+    "message": "自动更新已开启。"
+  },
+  "setupHelperLabel": {
+    "message": "Mac 助手"
+  },
+  "setupHelperVersion": {
+    "message": "Mac 助手 · {0}"
+  },
+  "setupHelperMissingUpdate": {
+    "message": "当前助手需要安装一次新版。"
+  },
+  "setupHelperA11y": {
+    "message": "请在 Mac 助手中打开辅助功能设置，授权后再开启。"
+  },
+  "setupHelperConfirm": {
+    "message": "请先下载并连接 Mac 助手，再开启此功能。"
+  },
+  "syncReauthorize": {
+    "message": "同步连接的 API 地址已改变，请在此设备重新授权。"
+  },
+  "syncAuthorize": {
+    "message": "请先授权同步连接的 API 地址。"
+  },
+  "syncSwitch": {
+    "message": "验证后切换到同步连接。"
+  },
+  "syncVerifyThis": {
+    "message": "验证这台设备即可恢复。"
+  },
+  "syncEnterCode": {
+    "message": "在此设备输入配对码或原同步口令。"
+  },
+  "syncChanged": {
+    "message": "共享连接刚刚更新，请重新确认。"
+  },
+  "syncKeyNeeded": {
+    "message": "先填写或导入 API Key。"
+  },
+  "syncCopied": {
+    "message": "已复制"
+  },
+  "modelServiceKey": {
+    "message": "服务 API Key"
+  },
+  "modelUnlockKeychain": {
+    "message": "解锁钥匙串"
+  },
+  "modelImported": {
+    "message": "密钥已导入，保存后连接。"
+  },
+  "modelEndpointInvalid": {
+    "message": "请填写完整的 HTTPS API 地址。"
+  },
+  "modelAllowEndpoint": {
+    "message": "请授权此 API 地址。"
+  },
+  "modelConnectionNeeded": {
+    "message": "请先保存模型连接。"
+  },
+  "panelNoAddress": {
+    "message": "地址暂不可用"
+  },
+  "panelNoTasksPage": {
+    "message": "请在网页载入后开始监听。"
+  },
+  "panelTasksLoading": {
+    "message": "正在分析网页"
+  },
+  "panelWaitingPages": {
+    "message": "等待网页载入"
+  },
+  "panelCheckDone": {
+    "message": "网页检查完成"
+  },
+  "panelRestoreToContinue": {
+    "message": "恢复模型连接后继续"
+  },
+  "panelStopped": {
+    "message": "分析已暂停"
+  },
+  "panelSiteGroupNone": {
+    "message": "当前窗口没有需要合并的同站标签。"
+  },
+  "panelUndoGroups": {
+    "message": "撤销网站分组"
+  },
+  "panelUndidGroups": {
+    "message": "已撤销网站分组。"
+  },
+  "panelGroupCount": {
+    "message": "{0} 个标签"
+  },
+  "panelPagesCount": {
+    "message": "{0} 页"
+  },
+  "panelContinue": {
+    "message": "保留本次"
+  },
+  "panelNoResponse": {
+    "message": "扩展未响应。请重新打开侧栏。"
+  }
+}

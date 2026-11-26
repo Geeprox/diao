@@ -24,7 +24,7 @@
     <p id="backlog-current" class="hint"></p><p id="backlog-note" class="hint" role="status"></p>
     <div class="row-actions"><button id="backlog-pause" class="secondary" type="button">暂停</button><button id="backlog-resume" class="secondary" type="button" hidden>继续分析</button><button id="backlog-connect" class="secondary" type="button" hidden>恢复模型连接</button><button id="backlog-results" class="text-button" type="button" hidden>查看清理建议</button><button id="backlog-stop" class="text-button" type="button" hidden>结束本轮</button><button id="backlog-dismiss" class="text-button" type="button" hidden>完成</button></div>
   </section>
-  <div class="filters" aria-label="筛选事项"><button data-filter="all" aria-pressed="true">全部事项</button><button data-filter="resume" aria-pressed="false">待接手 <span id="waiting-count">0</span></button><button data-filter="waiting" aria-pressed="false">等待中 <span id="watching-count">0</span></button><button data-filter="suggested" aria-pressed="false">建议清理 <span id="suggested-count">0</span></button></div>
+  <div class="filters" aria-label="筛选事项"><button data-filter="all" aria-pressed="true">全部事项</button><button data-filter="resume" aria-pressed="false">待接手 <span id="waiting-count">0</span></button><button data-filter="waiting" aria-pressed="false">监听中 <span id="watching-count">0</span></button><button data-filter="suggested" aria-pressed="false">建议清理 <span id="suggested-count">0</span></button></div>
   <div id="item-search" class="search" hidden><label class="sr-only" for="tab-search">查找事项</label><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="tab-search" name="tabSearch" type="search" autocomplete="off" placeholder="查找事项"></div>
   <div id="tabs" class="tabs" aria-busy="false"></div>
   <div id="helper-discovery" class="helper-discovery" hidden><span>标签旁提醒与 Control + Tab</span><button id="helper-discovery-link" class="text-button" type="button">安装 Mac 助手</button></div>
@@ -97,12 +97,13 @@
         <button id="keychain-helper" class="text-button" type="button" hidden>连接 Mac 助手</button>
       </fieldset>
     </fieldset>
-    <fieldset data-settings-section="usage" hidden><legend>调用用量</legend><p id="usage-summary" class="muted"></p>
-      <label class="check"><input id="auto-analyze" type="checkbox" name="autoAnalyze"><span>允许逐页授权的自动复查</span></label><p class="hint">仍需在每页发送预览中单独开启。页面闲置至少 10 分钟后才复查；地址改变或浏览器重启会停用。</p>
-      <label for="cooldown">单页最短间隔（秒）</label><input id="cooldown" name="cooldownSeconds" type="number" min="60" max="3600" required>
-      <p class="hint">相同内容 24 小时内复用判断。失败不自动重试。调用用量按北京时间每日记录，不设扩展侧的每日上限。</p>
-      <section class="usage-prices"><h2>费用估算</h2><p class="hint">美元 / 百万 token</p><div class="form-grid"><div><label for="input-price">输入单价</label><input id="input-price" name="inputPrice" type="number" min="0" max="1000" step="0.001"></div><div><label for="output-price">输出单价</label><input id="output-price" name="outputPrice" type="number" min="0" max="1000" step="0.001"></div></div></section>
-    </fieldset>
+    <div id="sync-replace" class="sync-recovery" hidden>
+      <p id="sync-replace-message" class="muted"></p>
+      <div class="row-actions">
+        <button id="keep-device-key" class="secondary" type="button">仅保存到此设备</button>
+        <button id="replace-sync-key" class="text-button" type="button">替换共享连接</button>
+      </div>
+    </div>
     <p id="settings-error" class="error" role="alert"></p>
     <div class="settings-footer">
       <button class="primary" type="submit" id="save-settings">保存连接</button>
@@ -110,12 +111,21 @@
     </div>
     <p id="api-receipt" class="hint" role="status" data-settings-section="connection"></p>
   </form>
+  <section data-settings-section="usage" hidden class="chat-settings" aria-labelledby="usage-title">
+    <h2 id="usage-title">今日调用</h2>
+    <p id="usage-summary" class="muted"></p>
+  </section>
   <section data-settings-section="chat" hidden class="chat-settings" aria-labelledby="chat-workspace-title">
     <h2 id="chat-workspace-title">对话工具</h2>
     <p class="muted">在对话里批注、跳到章节，或在回答期间排队下一条消息。</p>
-    <p class="hint">AI 概览将会话内容发送到已配置的 OpenAI。可在对话设置选择生成时机。</p>
+
     <button id="chat-enable" class="primary" type="button" disabled>检查授权中</button>
     <p id="chat-status" class="hint" role="status" aria-live="polite"></p>
+    <div class="tab-setting" id="chat-summary-settings" hidden>
+      <label class="check"><input id="chat-prepare" type="checkbox" aria-describedby="chat-prepare-help"><span>提前准备对话摘要</span></label>
+      <p id="chat-prepare-help" class="hint">会话空闲时将问答发送给你配置的 OpenAI，缩放时直接打开摘要。有新内容才更新。</p>
+      <p id="chat-summary-status" class="hint" role="status"></p>
+    </div>
   </section>
   <section data-settings-section="tabs" hidden class="chat-settings" aria-labelledby="tab-settings-title">
     <h2 id="tab-settings-title">标签</h2>
@@ -124,13 +134,9 @@
       <p id="auto-group-help" class="hint">在后台打开链接时，Chrome 会把它与来源页放在一起。右键标签可取消分组。</p>
     </div>
     <div class="tab-setting">
-    <label for="tab-tidy-hours">自动收纳间隔</label>
-    <select id="tab-tidy-hours" aria-describedby="tab-tidy-help">
-      <option value="0">关闭</option><option value="12">12 小时</option><option value="24">24 小时</option>
-      <option value="72">3 天</option><option value="168">7 天</option>
-    </select>
-    <p id="tab-tidy-help" class="hint">闲置页面会集中到标签栏的「闲置标签」。点击分组即可找回，右键可以取消分组。</p>
-    <p id="tab-tidy-result" class="hint" role="status" hidden></p>
+      <label class="check"><input id="smart-tabs" type="checkbox" aria-describedby="smart-tabs-help"><span>智能分组与收纳</span></label>
+      <p id="smart-tabs-help" class="hint">将已授权网页的标题、短正文和近期使用情况发送给模型。相关页面归为一组，已完成的闲置页面收进「闲置标签」。</p>
+      <p id="tab-tidy-result" class="hint" role="status"></p>
     </div>
     <div class="row-actions tidy-tools">
       <button id="organize" class="secondary" type="button">按网站分组</button>
@@ -142,8 +148,10 @@
       <p id="helper-instructions" class="hint"></p>
       <div class="row-actions helper-actions">
         <a id="helper-download" class="primary" href="https://github.com/Geeprox/tab-cadence/releases/latest" target="_blank" rel="noopener noreferrer">下载 Mac 助手</a>
+        <button id="helper-accessibility" class="primary" type="button" hidden>打开辅助功能设置</button>
         <button id="helper-check" class="secondary" type="button">重新连接</button>
       </div>
+      <p id="helper-recovery-note" class="hint" role="status"></p>
       <p id="helper-release" class="hint">适用 Apple 芯片和 macOS 27.2 起。<a href="https://github.com/Geeprox/tab-cadence/releases/latest" target="_blank" rel="noopener noreferrer">版本与校验文件</a></p>
     </section>
     <div class="helper-health" id="helper-health" hidden>

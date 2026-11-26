@@ -1,3 +1,4 @@
+import './locale.js';
 import {backlogPlan,backlogWaiting,trackableTab} from './core/backlog.mjs';
 import {DEFAULTS,dayKey,safeURL,privateURL,fingerprint} from './core/policy.mjs';
 import {credentialOrigin,credentialStorage} from './core/credentials.mjs';
@@ -6,8 +7,11 @@ import {generatePairingCode} from './core/connection-sync.mjs';
 import {duplicates,attentionOrder,organizationPlan} from './core/workspace.mjs';
 
 const $=s=>document.querySelector(s),preview=!globalThis.chrome?.runtime?.id;
-let chatEnabled=false,chatReady=false,chatRequest=0;
-let helperStatus='unknown',helperVersion='',helperChecking=false,helperUpdates=false;
+const {text:tr,apply:localize}=globalThis.DiaoLocale;
+document.documentElement.lang=globalThis.chrome?.i18n?.getUILanguage?.()||'zh-CN';
+localize(document);
+let chatEnabled=false,chatReady=false,chatRequest=0,chatPrepare=false;
+let helperStatus='unknown',helperVersion='',helperChecking=false,helperUpdates=false,helperSetup=false;
 const helperNeedsInstall = () => helperStatus==='missing';
 let importedKey='',switcherDirty=false,data,filter='all',targetId,targetEvidence,view='workspace',preferences='connection',currentWindowId=1,organization,backlogPreview,targetConnection;
 let backlogView='check',backlogVersion=0,startingBacklog=false,workspaceScroll=0,viewMotion;
@@ -17,11 +21,15 @@ const demo={
  settings:{...DEFAULTS},
  records:{1:{state:'resume',reason:'你设定的“构建成功”已出现，可以返回检查。',watching:true},2:{state:'waiting',reason:'正在本地监听，完成后提醒。',watching:true},4:{state:'suggested',reason:'相同网址已在另一个标签中打开。',decision:{state:'close',confidence:.98}},6:{state:'uncertain',reason:'状态文案同时出现，返回页面检查或调整监听。',watching:true}},
  tabs:[{id:1,index:0,title:'生产构建 · 页面响应速度优化',url:'https://example.com/build/583',windowId:1,groupId:-1},{id:2,index:1,title:'月度报表 · 数据导出',url:'https://example.com/exports',windowId:1,groupId:-1},{id:3,index:2,title:'Chrome 扩展开发文档',url:'https://developer.chrome.com/docs/extensions',active:true,windowId:1,groupId:-1},{id:4,index:3,title:'CSS Grid Layout · MDN',url:'https://developer.mozilla.org/zh-CN/docs/Web/CSS/CSS_grid_layout',windowId:1,groupId:-1},{id:5,index:4,title:'CSS Grid Layout · MDN',url:'https://developer.mozilla.org/zh-CN/docs/Web/CSS/CSS_grid_layout',windowId:1,groupId:-1},{id:6,index:5,title:'部署检查 · 等待状态确认',url:'https://example.org/deploy/42',windowId:1,groupId:-1}],
- ledger:{date:dayKey(),requests:2,tokens:1340,cost:.00013},keyPresent:false,recentClosed:[]
+ ledger:{date:dayKey(),requests:2,tokens:1340},keyPresent:false,recentClosed:[]
 };
 async function rpc(type,args={}) {
  if(preview){
-  if(type==='threadWorkspace'){if(args.action==='setEnabled')chatEnabled=args.value;return {enabled:chatEnabled,refreshNeeded:0};}
+  if(type==='threadWorkspace'){
+   if(args.action==='setEnabled')chatEnabled=args.value;
+   if(args.action==='prepareTopics')chatPrepare=args.value;
+   return {enabled:chatEnabled,prepareTopics:chatPrepare,refreshNeeded:0};
+  }
   if(type==='state')return {...structuredClone(demo),duplicates:duplicates(demo.tabs)};
   if(type==='backlogPlan'){const plan=backlogPlan(demo.tabs,args.windowId??null);return {id:'synthetic-plan',count:plan.targets.length,excluded:plan.skipped.length,sites:plan.sites,waiting:plan.waiting,local:plan.local,unavailable:plan.unavailable,endpointOrigin:'https://api.openai.com'};}
   if(type==='backlogStart'){demo.analysisQueue={phase:'running',total:3,completed:0,analyzed:0,cached:0,skipped:0,failed:0,currentTitle:'Chrome 扩展开发文档'};return {ok:true};}
@@ -41,7 +49,7 @@ async function rpc(type,args={}) {
   if(type==='watchPage'){demo.records[args.tabId]={state:'waiting',watching:true,reason:'正在监听状态变化。'};return {listening:true};}
   if(type==='stopWatch')delete demo.records[args.tabId];
   if(type==='setAutoGroupLinks'){demo.autoGroupLinks=args.enabled;return {enabled:args.enabled};}
-  if(type==='setTabTidyHours'){demo.tabTidyHours=args.hours;return {hours:args.hours};}
+  if(type==='setSmartTabs'){demo.smartTabsEnabled=args.enabled;return {enabled:args.enabled};}
   if(type==='organizationPlan')return organizationPlan(demo.tabs,args.windowId);
   if(type==='organize'){demo.canUndoOrganization=true;return {groups:args.plan.groups.length};}
   if(type==='undoOrganization')demo.canUndoOrganization=false;
@@ -50,31 +58,49 @@ async function rpc(type,args={}) {
   return {ok:true};
  }
  const result=await chrome.runtime.sendMessage({type,...args});
- if(!result?.ok)throw Error(result?.error||'扩展未响应；重新打开侧栏后重试。');
+ if(!result?.ok)throw Object.assign(Error(result?.error||'扩展未响应。请重新打开侧栏。'),{code:result?.code});
  return result.data;
 }
-function status(text,error=false){$(error?'#error':'#status').textContent=text;$(error?'#status':'#error').textContent='';}
-async function task(fn){try{await fn();}catch(error){status(error.message,true);}}
+function status(text,error=false){$(error?'#error':'#status').textContent=tr(text);$(error?'#status':'#error').textContent='';}
+async function task(fn){
+ const startsIn=view;
+ try{await fn();}catch(error){if(view===startsIn)status(error.message,true);}
+}
 function button(label,action,style='secondary',key) {
- const b=document.createElement('button');b.type='button';b.textContent=label;b.className=style;if(key)b.dataset.action=key;
+ const b=document.createElement('button');b.type='button';b.textContent=tr(label);b.className=style;if(key)b.dataset.action=key;
  b.addEventListener('click',()=>{b.disabled=true;task(()=>action(b)).finally(()=>{if(b.isConnected)b.disabled=false;});});return b;
 }
-const labels={resume:'待接手',waiting:'等待中',keep:'保留',closing:'即将关闭',paused:'已暂停',suggested:'建议清理',uncertain:'待确认'};
+const labels={resume:'待接手',waiting:'任务进行中',keep:'保留',closing:'即将关闭',paused:'已暂停',suggested:'建议清理',uncertain:'待确认'};
 function scopedTabs(){return data.tabs.filter(t=>!t.incognito);}
 function checkScope(){return $('#scope').value==='all'?null:currentWindowId;}
-function say(node,value){if(node.textContent!==value)node.textContent=value;}
+function say(node,value){const copy=tr(value);if(node.textContent!==copy)node.textContent=copy;}
 function tabState(t){return data.records[t.id]?.state||'keep';}
-function matchesFilter(t){const s=tabState(t);return filter==='all'||(filter==='suggested'?['suggested','closing','paused'].includes(s):s===filter);}
+function matchesFilter(t){const s=tabState(t);return filter==='all'||(filter==='suggested'?['suggested','closing','paused'].includes(s):
+  filter==='waiting'?(s==='waiting'||s==='uncertain'&&data.records[t.id]?.watching):s===filter);}
+function watchStatus(record){
+ if(!record.watching||record.state==='resume')return null;
+ if(record.watchSuspended==='sleeping')return ['标签已休眠','打开标签后会自动继续监听。'];
+ if(record.watchSuspended==='permission')return ['需要网页访问','允许访问此网站后，会继续原有监听。'];
+ if(record.watchSuspended)return ['连接中断','打开标签以恢复监听。'];
+ if(record.state==='uncertain')return ['暂未读到进度','页面变化时会自动重新识别。也可以点选进度文字。'];
+ const rule=record.watchAdapter;
+ const detail=rule?.kind==='chat'?'等待 ChatGPT 完成当前回复。':
+  rule?.kind==='region'?tr('等待页面上的「{0}」发生变化。',rule.baseline?.slice(0,40)||''):
+  rule?.done?tr('等待页面显示「{0}」。',rule.done.slice(0,40)):'任务完成后会提醒你。';
+ return ['监听中',detail];
+}
 function makeRow(t) {
  if(!['closing','paused'].includes(data.records[t.id]?.state)){hovered.delete(t.id);focused.delete(t.id);}
  const r=data.records[t.id]||{state:'keep'},row=document.createElement('article');row.className='tab-row';row.dataset.state=r.state;row.dataset.tabId=t.id;
  const meta=document.createElement('div');meta.className='row-meta';const site=document.createElement('bdi');site.className='site';
  try{site.textContent=new URL(t.url).hostname||'浏览器页面';}catch{site.textContent='浏览器页面';}
- const badge=document.createElement('span');badge.className='badge';badge.textContent=t.active&&r.state==='keep'?'正在使用':labels[r.state]||'保留';meta.append(site,badge);
+ const watched=watchStatus(r);
+ const badge=document.createElement('span');badge.className='badge';badge.textContent=tr(watched?.[0]||
+  (t.active&&r.state==='keep'?'正在使用':labels[r.state]||'保留'));meta.append(site,badge);
  const title=document.createElement('h2');title.className='tab-title';title.append(button(t.title||'无标题页面',()=>rpc('activate',{tabId:t.id}),'title-button','activate'));
  const reason=document.createElement('p');reason.className='reason';
  const duplicate=data.duplicates?.[t.id];
- reason.textContent=analyzingTabs.has(t.id)?'正在分析页面…':(r.reason?(r.reason+(r.apiIssue?' '+r.apiIssue:'')):r.apiIssue)||(duplicate?.extra?'此网址已在另一个标签中打开，分析后可检查是否适合清理。':safeURL(t.url)?'未开始监听或分析。':'浏览器页面，可切换，支持的网页才能监听或分析。');
+ reason.textContent=tr(analyzingTabs.has(t.id)?'正在分析页面…':watched?.[1]||(r.reason?(r.reason+(r.apiIssue?' '+r.apiIssue:'')):r.apiIssue)||(duplicate?.extra?'此网址已在另一个标签中打开，分析后可检查是否适合清理。':safeURL(t.url)?'未开始监听或分析。':'浏览器页面，可切换，支持的网页才能监听或分析。'));
  const actions=document.createElement('div');actions.className='row-actions';
  if(r.state==='resume')actions.append(button('返回接手',async()=>{await rpc('activate',{tabId:t.id});await refresh();},'secondary','resume'));
  if(['closing','paused'].includes(r.state)){
@@ -92,22 +118,29 @@ function makeRow(t) {
  }else if(r.state==='suggested'){
   actions.append(button('开始 30 秒关闭提醒',async()=>{await heartbeat();await rpc('armClose',{tabId:t.id});await refresh();status('关闭提醒已开始。看不见提醒时暂停，选择「保留」可取消。');},'danger','arm'));
   actions.append(button('保留',async()=>{await rpc('pardon',{tabId:t.id});await refresh();},'secondary','pardon'));
- }else if(r.state!=='resume'&&safeURL(t.url))actions.append(button(r.watching?'重选状态':'开始监听',()=>openWatch(t),'secondary','watch'));
- const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='页面操作与详情';summary.dataset.action='details';
+ }else if(r.watchSuspended==='permission'){
+  actions.append(button('继续监听',()=>openWatch(t,{resume:true}),'secondary','resume-watch'));
+ }else if(r.watchSuspended){
+  actions.append(button('打开标签继续监听',()=>rpc('activate',{tabId:t.id}),'secondary','activate-watch'));
+ }else if(r.watching&&r.state==='uncertain'){
+  actions.append(button('点选进度文字',()=>openWatch(t,{pick:true}),'secondary','watch'));
+ }
+ const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=tr('更多操作');summary.dataset.action='details';
  const more=document.createElement('div');more.className='row-actions';
  if(safeURL(t.url)){
   const analyzeButton=button(analyzingTabs.has(t.id)?'正在分析…':'分析页面',()=>openAnalysis(t),'secondary','analyze');analyzeButton.disabled=analyzingTabs.has(t.id);more.append(analyzeButton);
-  if(r.state==='suggested'||r.state==='resume')more.append(button(r.watching?'重选状态':'开始监听',()=>openWatch(t),'secondary','watch-more'));
+  if(!r.watching||r.state!=='uncertain')more.append(button(r.watching?'更改监听内容':'开始监听',
+    ()=>openWatch(t,{pick:r.watching===true}),'secondary','watch-more'));
  }
  if(r.watching)more.append(button('停止监听',async()=>{await rpc('stopWatch',{tabId:t.id});await refresh();status('已停止此页的本地监听。');},'secondary','stop-watch'));
  if(r.autoReview)more.append(button('停止自动复查',async()=>{await rpc('autoReview',{tabId:t.id});await refresh();status('已停止此页的自动复查。');},'secondary','stop-review'));
  if(data.settings.nativeEnabled&&['resume','closing','paused'].includes(r.state))more.append(button('显示标签提醒',async()=>{await rpc('nativeShow',{tabId:t.id});status('已请求显示提醒；定位状态可在 macOS 设置中查看。');},'secondary','native'));
- const address=document.createElement('p');address.className='full-url';address.dir='auto';address.textContent=t.url||'地址暂不可用';
+ const address=document.createElement('p');address.className='full-url';address.dir='auto';address.textContent=t.url||tr('地址暂不可用');
  details.append(summary,more,address);row.append(meta,title,reason);if(actions.childNodes.length)row.append(actions);row.append(details);return row;
 }
 function render() {
  const scoped=scopedTabs().filter(tab=>['resume','waiting','suggested','uncertain','closing','paused'].includes(tabState(tab))||analyzingTabs.has(tab.id)),records=scoped.map(t=>data.records[t.id]).filter(Boolean),today=data.ledger?.date===dayKey()?data.ledger:null;
- const resume=records.filter(r=>r.state==='resume').length,waiting=records.filter(r=>r.state==='waiting').length,suggested=records.filter(r=>['suggested','closing','paused'].includes(r.state)).length;
+ const resume=records.filter(r=>r.state==='resume').length,waiting=records.filter(r=>r.state==='waiting'||r.state==='uncertain'&&r.watching).length,suggested=records.filter(r=>['suggested','closing','paused'].includes(r.state)).length;
  for(const [id,count] of [['#waiting-count',resume],['#watching-count',waiting],['#suggested-count',suggested]]){
   const element=$(id);
   element.hidden=!count;
@@ -115,7 +148,7 @@ function render() {
  }
  $('#request-count').textContent=String(today?.requests||0);
  $('#usage-link').hidden=!today?.requests;
- $('#usage-summary').textContent='今日已调用 '+(today?.requests||0)+' 次，累计约 '+new Intl.NumberFormat('zh-CN').format(today?.tokens||0)+' token。';
+ $('#usage-summary').textContent=tr('今日已调用 {0} 次，累计约 {1} token。',today?.requests||0,new Intl.NumberFormat().format(today?.tokens||0));
  $('.filters').hidden=scoped.length===0;
  $('#item-search').hidden=scoped.length<6&&!$('#tab-search').value.trim();
  const query=$('#tab-search').value.trim().toLocaleLowerCase(),tabs=attentionOrder(scoped,data.records).filter(t=>matchesFilter(t)&&((t.title||'')+' '+(t.url||'')).toLocaleLowerCase().includes(query));
@@ -132,13 +165,13 @@ function render() {
  }
  if(!tabs.length){
   const title=query?'未找到匹配的事项':filter==='all'?'暂无待处理事项':
-   filter==='resume'?'暂无待接手事项':filter==='waiting'?'暂无等待中的任务':'暂无清理建议';
+   filter==='resume'?'暂无待接手事项':filter==='waiting'?'暂无监听中的事项':'暂无清理建议';
   if(container.firstElementChild?.dataset.empty!==title){
    const empty=document.createElement('div');empty.className='empty';empty.dataset.empty=title;
-   const h=document.createElement('h2');h.textContent=title;empty.append(h);
+   const h=document.createElement('h2');h.textContent=tr(title);empty.append(h);
    if(!query&&filter==='all'){
     const p=document.createElement('p');
-    p.textContent='在网页上右键选择「开始监听」。有进展时，会提醒你回来。';
+    p.textContent=tr('在网页上右键选择「开始监听」。有进展时，会提醒你回来。');
     empty.append(p);
    }else empty.append(button('查看全部事项',()=>{filter='all';$('#tab-search').value='';updateFilters();render();},'text-button'));
    container.replaceChildren(empty);
@@ -148,7 +181,7 @@ function render() {
   for(const [index,tab] of tabs.entries()){
    const record=data.records[tab.id],closing=['closing','paused'].includes(record?.state);
    const key=JSON.stringify([tab.title,tab.url,tab.active,closing?'close':record?.state,
-    closing?'':record?.reason,record?.watching,record?.autoReview,record?.apiIssue,
+    closing?'':record?.reason,record?.watching,record?.watchSuspended,watchStatus(record||{}),record?.autoReview,record?.apiIssue,
     data.settings.nativeEnabled,data.duplicates?.[tab.id]?.extra,analyzingTabs.has(tab.id)]);
    let entry=renderedRows.get(tab.id);
    if(entry?.key!==key){
@@ -221,7 +254,7 @@ function renderWatchList(){
    }catch(error){$('#backlog-error').textContent=error.message;}
   },'watch-tab');
   const site=document.createElement('bdi');
-  site.textContent=[new URL(tab.url).hostname,waiting?'打开网页':watching?'重选状态':''].filter(Boolean).join(' · ');
+  site.textContent=[new URL(tab.url).hostname,waiting?'打开网页':watching?'已在监听':''].filter(Boolean).join(' · ');
   itemButton.append(site);item.append(itemButton);items.append(item);
  }
  list.replaceChildren(items);
@@ -254,7 +287,7 @@ async function readBacklogPlan(){
   input.dataset.count=site.count;input.dataset.waiting=site.waiting||0;
   input.addEventListener('change',updateBacklogSelection);
   const host=document.createElement('bdi');host.textContent=new URL(site.origin).host;
-  const count=document.createElement('span');count.textContent=site.count+' 页';
+  const count=document.createElement('span');count.textContent=tr('{0} 页',site.count);
   label.append(input,host,count);$('#backlog-sites').append(label);
  }
  updateBacklogSelection();
@@ -326,26 +359,27 @@ function updateFilters(){document.querySelectorAll('[data-filter]').forEach(b=>b
 function paintHelperSetup() {
  const install=helperNeedsInstall(),authorization=helperStatus==='accessibility_required';
  const unavailable=['disconnected','unavailable'].includes(helperStatus);
- $('#helper-discovery').hidden=!(install||authorization);
- $('#helper-discovery-link').textContent=install?'安装 Mac 助手':'完成 Mac 助手设置';
+ $('#helper-discovery').hidden=!(install||authorization||unavailable);
+ $('#helper-discovery-link').textContent=tr(install?'安装 Mac 助手':'完成 Mac 助手设置');
  $('#helper-setup').hidden=['ready','unknown','updating'].includes(helperStatus);
- $('#helper-title').textContent=install?'安装 Mac 助手':
-  authorization?'需要辅助功能权限':helperStatus==='unsupported'?'此设备不支持 Mac 功能':'连接 Mac 助手';
- $('#helper-instructions').textContent=install?
+ say($('#helper-title'), install?'安装 Mac 助手':
+  authorization?'允许辅助功能访问':helperStatus==='unsupported'?'此设备不支持 Mac 功能':'连接 Mac 助手');
+ say($('#helper-instructions'),install?
   '下载后打开助手，按提示安装。':
-  authorization?'打开 Diao Bridge，在系统设置中允许辅助功能访问。':
-  unavailable?'打开已安装的 Diao Bridge，按提示完成连接。':'';
- $('#helper-download').hidden=!install;
- $('#helper-release').hidden=!install;
- $('#helper-check').hidden=!unavailable;
+  authorization?'在系统设置中启用 Diao Bridge，然后回到这里。':
+  unavailable?'从「应用程序」打开 Diao Bridge，再试一次。':'');
+ $('#helper-download').hidden=!(install||unavailable);
+ $('#helper-release').hidden=!(install||unavailable);
+ $('#helper-accessibility').hidden=!authorization||!helperSetup;
+ $('#helper-check').hidden=!(unavailable||authorization||install);
  $('#helper-check').disabled=helperChecking;
- $('#helper-check').textContent=helperChecking?'正在连接…':'重新连接';
+ $('#helper-check').textContent=tr(helperChecking?'正在连接…':'重新连接');
  const phase=data?.helperUpdate?.phase||'idle';
  const updating=['checking','staged','installing'].includes(phase);
  const labels={checking:'正在检查更新…',staged:'更新已就绪，空闲时安装。',installing:'正在更新并重新连接…',current:'已是最新版。',installed:'更新完成。',failed:'更新未完成，可以重试。'};
  $('#helper-health').hidden=helperStatus!=='ready'&&!updating;
- $('#helper-connected').textContent=helperVersion?'Mac 助手 · '+helperVersion:'Mac 助手';
- $('#helper-update-status').textContent=labels[phase]||(helperUpdates?'自动更新已开启。':'');
+ $('#helper-connected').textContent=helperVersion?tr('Mac 助手 · {0}',helperVersion):tr('Mac 助手');
+ $('#helper-update-status').textContent=tr(labels[phase]||(helperUpdates?'自动更新已开启。':''));
  $('#helper-check-update').hidden=!helperUpdates;
  $('#helper-check-update').disabled=updating;
  $('#helper-update').hidden=helperUpdates||helperStatus!=='ready';
@@ -354,12 +388,12 @@ function paintHelperSetup() {
  $('#keychain-option').hidden=selectedStorage()!=='keychain'&&!data?.keychainAvailable;
  $('#keychain-helper').hidden=selectedStorage()!=='keychain'||helperStatus==='ready';
 }
-async function checkHelper(refresh=false) {
+async function checkHelper(refresh=false,reconnect=false) {
  if(helperChecking)return;
  helperChecking=true;paintHelperSetup();
  try{
-  const state=await rpc('nativeCheck',{refresh});
-  helperStatus=state.status;helperVersion=state.release||state.version||'';helperUpdates=state.updatesAvailable===true;
+  const state=await rpc('nativeCheck',{refresh,reconnect});
+  helperStatus=state.status;helperVersion=state.release||state.version||'';helperUpdates=state.updatesAvailable===true;helperSetup=state.setupAvailable===true;
  }catch{helperStatus='unavailable';helperVersion='';}
  finally{helperChecking=false;paintHelperSetup();}
 }
@@ -367,7 +401,11 @@ function openHelperSettings() {
  preferences='native';openView('settings');if(!$('#helper-setup').hidden)$('#helper-title').focus({preventScroll:true});
 }
 for(const id of ['#helper-discovery-link','#keychain-helper'])$(id).addEventListener('click',openHelperSettings);
-$('#helper-check').addEventListener('click',()=>void checkHelper(true));
+$('#helper-check').addEventListener('click',()=>void checkHelper(true,true));
+$('#helper-accessibility').addEventListener('click',()=>void task(async()=>{
+ const result=await rpc('nativeAccessibility');
+ say($('#helper-recovery-note'),result.opened?'':'在「系统设置 → 隐私与安全性 → 辅助功能」开启 Diao Bridge。');
+}));
 $('#helper-check-update').addEventListener('click',()=>void task(async()=>{await rpc('helperCheckUpdate');}));
 
 async function refresh(){
@@ -384,7 +422,7 @@ async function refresh(){
  }
  if(!switcherDirty)$('#switcher-enabled').checked=data.settings.switcherEnabled;
  if(!$('#auto-group-links').disabled)$('#auto-group-links').checked=data.autoGroupLinks!==false;
- if(!$('#tab-tidy-hours').disabled)$('#tab-tidy-hours').value=String(data.tabTidyHours||0);
+ if(!$('#smart-tabs').disabled)$('#smart-tabs').checked=data.smartTabsEnabled===true;
  if($('#backlog-dialog').open)updateBacklogSelection();
  paintHelperSetup();
 }
@@ -394,10 +432,10 @@ async function prepare(tab){
  if(!await chrome.permissions.request({origins:[new URL(tab.url).origin+'/*']}))throw Error('尚未授权读取页面；再次选择监听或分析以授权。');
  await chrome.scripting.executeScript({target:{tabId:tab.id},files:['sensor.js']});
 }
-async function openWatch(tab,{pick=data.records[tab.id]?.watching===true}={}){
+async function openWatch(tab,{pick=data.records[tab.id]?.watching===true,resume=false}={}){
  if(!trackableTab(tab)||backlogWaiting(tab))throw Error('请在网页载入后开始监听。');
  if(!preview&&!await chrome.permissions.request({origins:[new URL(tab.url).origin+'/*']}))throw Error('未允许读取此网站。');
- const result=await rpc('watchPage',{tabId:tab.id,url:tab.url,pick});
+ const result=await rpc('watchPage',{tabId:tab.id,url:tab.url,pick,resume});
  await refresh();
  if(result.listening)status('已开始监听「'+(tab.title||'这张网页')+'」。');
 }
@@ -420,9 +458,10 @@ function openView(next){
  if(view===next){if(next==='settings')openPreferences(preferences);return;}
  if(view==='workspace')workspaceScroll=window.scrollY;
  view=next;
+ status('');
  const isSettings=next==='settings',surface=isSettings?$('#settings'):$('#workspace');
  $('#workspace').hidden=isSettings;$('#settings').hidden=!isSettings;$('#settings-toggle').hidden=isSettings;
- document.title=isSettings?'Diao · 设置':'Diao · 管理';
+ document.title='Diao · '+tr(isSettings?'设置':'管理事项');
  if(isSettings){fillSettings();openPreferences(preferences,{motion:false});}
  (isSettings?$('#settings-title'):$('#settings-toggle')).focus({preventScroll:true});
  window.scrollTo(0,isSettings?0:workspaceScroll);
@@ -431,17 +470,17 @@ function openView(next){
 function openPreferences(next,{motion=true}={}){
  const changed=preferences!==next;
  preferences=next;
+ if(changed)status('');
  document.querySelectorAll('[data-preferences]').forEach(n=>n.setAttribute('aria-pressed',String(n.dataset.preferences===next)));
  document.querySelectorAll('[data-settings-section]').forEach(n=>n.hidden=n.dataset.settingsSection!==next);
  const form=$('#settings-form');
- form.hidden=['native','chat','tabs'].includes(next);
+ form.hidden=next!=='connection';
  updateSaveLabel();
  if(next==='connection')updateCredentialUI();
  if(next==='chat')void refreshChatSettings();
  if(next==='native')void checkHelper(true);
  if(motion&&changed)settleView(form.hidden?document.querySelector('[data-settings-section='+next+']'):form);
 }
-const usageFields={cooldownSeconds:'cooldown',inputPrice:'input-price',outputPrice:'output-price'};
 const checked=name=>$('input[name='+name+']:checked').value;
 const selectedStorage=()=>checked('credentialStorage');
 const service=()=>checked('apiService');
@@ -464,10 +503,8 @@ function clearKeyDraft(){importedKey='';$('#api-key').value='';}
 function fillSettings(){
  switcherDirty=false;
  connectionDirty=false;
- for(const [key,id] of Object.entries(usageFields))$('#'+id).value=data.settings[key];
  $('#native-enabled').checked=data.settings.nativeEnabled;
  $('#switcher-enabled').checked=data.settings.switcherEnabled;
- $('#auto-analyze').checked=data.settings.autoAnalyze;
  activeProvider=data.settings.provider;
  activeService=activeProvider==='chat'||originOf(data.settings.endpoint)!==originOf(DEFAULTS.endpoint)?'compatible':'openai';
  checkOption('apiService',activeService);
@@ -485,13 +522,13 @@ function fillSettings(){
 function updateSaveLabel(){
  const mode=selectedStorage(),hints={
   profile:'重启 Chrome 后自动恢复。',
-  sync:'新设备登录同一 Chrome 账号后，验证一次即可恢复。',
+  sync:'同一 Chrome 账号共用一份连接。新设备验证一次即可恢复。',
   keychain:'保存在 macOS 钥匙串。',
   session:'仅在当前 Chrome 会话可用。',
  };
  say($('#credential-storage-hint'),hints[mode]);
  if(data)paintHelperSetup();
- if(!savingConnection)$('#save-settings').textContent=preferences==='connection'?'保存连接':'保存调用设置';
+ if(!savingConnection)$('#save-settings').textContent=tr('保存连接');
 }
 function updateCredentialUI(){
  if(preferences!=='connection'||!data)return;
@@ -499,36 +536,36 @@ function updateCredentialUI(){
  const showingSaved=savedForDraft();
  const remoteMatches=remote&&originOf(remote.settings.endpoint)===originOf(currentEndpoint());
  const showRecovery=remote&&(remoteMatches||!data.settings.credentialRevision)&&
-  (!showingSaved||remote.id!==data.settings.credentialRevision);
+  (!showingSaved||phase==='sync_conflict'||selectedStorage()==='sync'&&remote.id!==data.settings.credentialRevision);
  $('#sync-recovery').hidden=!showRecovery;
  $('#sync-unlock').hidden=Boolean(remote?.passkey);
  $('#unlock-sync').disabled=unlockingSync;
- if(!unlockingSync)$('#unlock-sync').textContent=remote?.passkey?'验证并恢复':'解锁此设备';
+ if(!unlockingSync)$('#unlock-sync').textContent=tr(remote?.passkey?'验证并恢复':'解锁此设备');
  say($('#sync-origin'),showRecovery?
   new URL(remote.settings.endpoint).host+' · '+(remote.passkey
-   ? (showingSaved?'验证后切换到同步连接。':'验证这台设备即可恢复。')
-   :'在此设备输入配对码或原同步口令。'):'');
+   ? tr(showingSaved?'验证后切换到同步连接。':'验证这台设备即可恢复。')
+   :tr('在此设备输入配对码或原同步口令。')):'');
  const activeSync=remoteMatches&&showingSaved&&mode==='sync'&&remote.id===data.settings.credentialRevision;
  $('#sync-setup').hidden=selectedStorage()!=='sync'||Boolean(remote&&!activeSync);
  const pair=$('#sync-pair');
  pair.disabled=savingConnection;
- pair.textContent=activeSync?'生成新配对码':'用配对码保存';
+ pair.textContent=tr(activeSync?'在另一台设备使用':'用配对码保存');
  $('#sync-upgrade').hidden=!activeSync||Boolean(remote?.passkey);
  $('#sync-upgrade').disabled=savingConnection;
  const restore=$('#restore-key');
  restore.hidden=mode!=='keychain'||showingSaved||phase==='missing'||originOf(currentEndpoint())!==originOf(data.settings.endpoint);
  restore.disabled=phase==='restoring';
- restore.textContent=phase==='restoring'?'正在恢复…':'解锁钥匙串';
+ restore.textContent=tr(phase==='restoring'?'正在恢复…':'解锁钥匙串');
  $('#connection-recovery').hidden=restore.hidden;
- $('#api-key').placeholder=showingSaved?'已保存 · 可替换':'粘贴 API Key';
- if(!importedKey)say($('#key-state'),showingSaved
+ $('#api-key').placeholder=tr(showingSaved?'已保存 · 可替换':'粘贴 API Key');
+ if(!importedKey)say($('#key-state'),phase==='sync_conflict'?data.credentialStatus.reason:showingSaved
   ? {profile:'已保存在当前 Chrome 配置。',sync:'已连接 · Chrome 同步',keychain:'已保存至钥匙串。',session:'此会话已连接。'}[mode]
   : !showRecovery&&originOf(currentEndpoint())===originOf(data.settings.endpoint)&&['unavailable','unlock_required'].includes(phase)
    ? data.credentialStatus.reason : '');
  $('#key-state').dataset.phase=phase||'';
  $('#forget-key').hidden=originOf(currentEndpoint())!==originOf(data.settings.endpoint)||
   !data.keyPresent&&(!data.settings.rememberKey||phase==='missing');
- $('#forget-key').textContent=mode==='sync'?'从同步中移除':'移除密钥';
+ $('#forget-key').textContent=tr(mode==='sync'?'从同步中移除':'移除密钥');
  const sameSettings=selectedProvider()===data.settings.provider&&
   currentEndpoint()===data.settings.endpoint&&$('#model').value.trim()===data.settings.model;
  const receipt=$('#api-receipt'),check=showingSaved&&sameSettings?data.connectionCheck:null;
@@ -544,7 +581,7 @@ function showProviderFields(){
  const draft=providerDrafts.get(draftKey(activeService,activeProvider));
  $('#openai-protocols').hidden=!official;
  $('#compatible-protocols').hidden=official;
- $('#credential-label').textContent=official?'OpenAI API Key':'服务 API Key';
+ $('#credential-label').textContent=official?'OpenAI API Key':tr('服务 API Key');
  $('#provider-fields').hidden=decision;
  $('#endpoint-field').hidden=official;
  $('#endpoint').disabled=official;
@@ -585,18 +622,24 @@ $('#auto-group-links').addEventListener('change',event=>task(async()=>{
   throw error;
  } finally {control.disabled=false;}
 }));
-$('#tab-tidy-hours').addEventListener('change',event=>{
- const control=event.currentTarget, result=$('#tab-tidy-result');
- control.disabled=true;result.hidden=false;say(result,'正在保存…');
+$('#smart-tabs').addEventListener('change',event=>{
+ const control=event.currentTarget, result=$('#tab-tidy-result'), enabled=control.checked;
+ control.disabled=true;
+ say(result,'');
  void (async()=>{
   try{
-   const saved=await rpc('setTabTidyHours',{hours:Number(control.value)});
-   control.value=String(saved.hours);
-   say(result,saved.hours?'已开启自动收纳':'已关闭自动收纳');
-  }catch(error){
-   control.value=String(data.tabTidyHours||0);
-   say(result,error.message);
-  }finally{control.disabled=false;await refresh();}
+   if(enabled&&!data.keyPresent&&!preview){
+    openPreferences('connection');
+    $('#settings-error').textContent=tr('保存模型连接后即可开启智能整理。');
+    return;
+   }
+   if(enabled&&!preview&&!await chrome.permissions.request({origins:['http://*/*','https://*/*']})){
+    say(result,'允许访问网页后即可开启智能整理。');
+    return;
+   }
+   await rpc('setSmartTabs',{enabled});
+  }catch(error){say(result,error.message);}
+  finally{control.disabled=false;await refresh();}
  })().catch(error=>say(result,error.message));
 });
 $('#settings-toggle').addEventListener('click',()=>openView(view==='settings'?'workspace':'settings'));
@@ -615,9 +658,9 @@ const pairingCopy=$('#sync-pairing-copy');
 function showPairingCode(code=''){
  const ready=Boolean(code);
  pairingValue.value=code;
- pairingCopy.textContent='复制';
+ pairingCopy.textContent=tr('复制');
  $('#sync-pairing-code').hidden=!ready;
- $('#sync-pairing-help').textContent=ready?'保存配对码。每台新设备首次恢复连接时输入一次。':'更换验证方式后，其他设备需用新码恢复连接。';
+ $('#sync-pairing-help').textContent=tr(ready?'在另一台电脑的 Diao → 模型连接里粘贴此码一次，就能恢复共享连接。':'配对码用来在另一台电脑恢复已保存的 Key。生成后，新设备用这组码验证。');
  $('#sync-pairing-error').textContent='';
  pairingConfirm.hidden=ready;
  pairingClose.textContent=ready?'完成':'取消';
@@ -630,27 +673,32 @@ $('#sync-pair').addEventListener('click',()=>{
 });
 pairingConfirm.addEventListener('click',()=>void saveConnection({pair:true}));
 pairingCopy.addEventListener('click',async()=>{
- try{await navigator.clipboard.writeText(pairingValue.value);pairingCopy.textContent='已复制';}
+ try{await navigator.clipboard.writeText(pairingValue.value);pairingCopy.textContent=tr('已复制');}
  catch{pairingValue.focus();pairingValue.select();}
 });
 pairingDialog.addEventListener('cancel',event=>{if(savingConnection)event.preventDefault();});
 pairingDialog.addEventListener('close',()=>{pairingValue.value='';});
-async function saveConnection({upgrade=false,pair=false}={}){
+let replaceSyncId='';
+const replacePanel=$('#sync-replace');
+const resetSyncChoice=()=>{replaceSyncId='';replacePanel.hidden=true;};
+$('#keep-device-key').addEventListener('click',()=>{
+ checkOption('credentialStorage','profile');
+ resetSyncChoice();
+ void saveConnection();
+});
+$('#replace-sync-key').addEventListener('click',()=>void saveConnection({replace:replaceSyncId}));
+async function saveConnection({upgrade=false,pair=false,replace=''}={}){
  if(savingConnection)return;
- const scope=preferences==='usage'?'usage':'connection',settings={...data.settings},remote=data.syncConnection;
- if(scope==='connection'){
-  settings.provider=selectedProvider();
-  settings.endpoint=currentEndpoint();
-  settings.model=$('#model').value.trim();
-  settings.credentialStorage=selectedStorage();
-  settings.rememberKey=settings.credentialStorage!=='session';
- }else{
-  for(const [key,id] of Object.entries(usageFields))settings[key]=Number($('#'+id).value);
-  settings.autoAnalyze=$('#auto-analyze').checked;
- }
+ const settings={...data.settings},remote=data.syncConnection;
+ const scope='connection';
+ settings.provider=selectedProvider();
+ settings.endpoint=currentEndpoint();
+ settings.model=$('#model').value.trim();
+ settings.credentialStorage=selectedStorage();
+ settings.rememberKey=settings.credentialStorage!=='session';
  const error=$(pairingDialog.open?'#sync-pairing-error':'#settings-error'),save=$('#save-settings');
  error.textContent='';
- save.disabled=true;savingConnection=true;save.textContent='正在保存…';
+ save.disabled=true;savingConnection=true;save.textContent=tr('正在保存…');
  pairingConfirm.disabled=pairingClose.disabled=true;
  try{
   let passkeyOptions,pairingCode;
@@ -658,28 +706,34 @@ async function saveConnection({upgrade=false,pair=false}={}){
   if(scope==='connection'){
    if(!settings.model||!originOf(settings.endpoint))throw Error('填写有效的 HTTPS API 地址和模型。');
    const sync=settings.credentialStorage==='sync';
-   if(sync&&remote&&apiKey&&remote.id!==data.settings.credentialRevision){
-    throw Error('恢复已同步的连接后再更新。');
-   }
-   if(sync&&remote&&originOf(remote.settings.endpoint)!==originOf(settings.endpoint)){
-    throw Error('这份同步连接属于另一个 API 地址。这个地址可先保存在此设备。');
+   if(replace&&replace!==remote?.id)throw Error('共享连接刚刚更新，请重新确认。');
+   if(sync&&remote&&!replace&&(apiKey&&remote.id!==data.settings.credentialRevision||
+      originOf(remote.settings.endpoint)!==originOf(settings.endpoint))){
+    throw Object.assign(Error('其他设备已保存共享连接。你可以只在此设备使用新密钥，也可以替换共享连接。'),
+     {code:'sync_replace_required'});
    }
    if(sync&&!remote&&!apiKey&&!savedForDraft())throw Error('先填写或导入 API Key。');
    await authorizeEndpoint(settings.endpoint);
    if(sync&&pair)pairingCode=generatePairingCode();
-   else if(sync&&(!remote||upgrade)){
+   else if(sync&&(!remote||upgrade||replace&&remote.id!==data.settings.credentialRevision)){
     if(preview)throw Error('请在 Chrome 中验证通行密钥。');
     passkeyOptions=await createSyncPasskey();
    }
   }
   await rpc('saveSettings',{scope,settings,rememberConsent:scope==='connection'&&settings.rememberKey,
-   verify:true,apiKey,syncId:remote?.id,...passkeyOptions,...(pairingCode&&{pairingCode})});
+   verify:true,apiKey,syncId:remote?.id,replaceSync:Boolean(replace),...passkeyOptions,...(pairingCode&&{pairingCode})});
   if(pairingCode)showPairingCode(pairingCode);
-  if(scope==='connection'){clearKeyDraft();connectionDirty=false;}
+  resetSyncChoice();
+  clearKeyDraft();connectionDirty=false;
   await refresh();
-  if(scope==='connection')fillSettings();
-  else status('调用设置已保存。');
- }catch(cause){error.textContent=cause.message;}
+  fillSettings();
+ }catch(cause){
+  if(cause.code==='sync_replace_required'&&remote){
+   replaceSyncId=remote.id;
+   say($('#sync-replace-message'),cause.message);
+   replacePanel.hidden=false;
+  }else error.textContent=tr(cause.message);
+ }
  finally{
   savingConnection=false;save.disabled=false;
   pairingConfirm.disabled=pairingClose.disabled=false;
@@ -693,7 +747,7 @@ $('#unlock-sync').addEventListener('click',async()=>{
  const remote=data.syncConnection,input=$('#sync-unlock'),control=$('#unlock-sync');
  if(!remote||unlockingSync)return;
  if(!remote.passkey&&!input.value){input.focus();return;}
- unlockingSync=true;control.disabled=true;control.textContent='正在恢复…';$('#sync-error').textContent='';
+ unlockingSync=true;control.disabled=true;control.textContent=tr('正在恢复…');$('#sync-error').textContent='';
  try{
   await authorizeEndpoint(remote.settings.endpoint);
   const passkeyKey=remote.passkey?await recoverSyncPasskey(remote.passkey):undefined;
@@ -703,7 +757,7 @@ $('#unlock-sync').addEventListener('click',async()=>{
  }catch(error){$('#sync-error').textContent=error.message;}
  finally{unlockingSync=false;updateCredentialUI();}
 });
-$('#api-key').addEventListener('input',()=>{importedKey='';connectionDirty=true;updateCredentialUI();});
+$('#api-key').addEventListener('input',()=>{importedKey='';connectionDirty=true;resetSyncChoice();updateCredentialUI();});
 let editedOrigin='';
 $('#endpoint').addEventListener('focus',()=>{editedOrigin=originOf(currentEndpoint());});
 $('#endpoint').addEventListener('input',()=>{
@@ -725,7 +779,7 @@ $('#key-file').addEventListener('change',()=>task(async()=>{
   if(file.size>32768)throw Error('请选择小于 32 KB 的配置文件。');
   const text=await file.text(),match=text.match(/^\s*(?:export\s+)?OPENAI_API_KEY\s*=\s*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^#\s\r\n]+))\s*(?:#.*)?$/m),key=match?.[1]||match?.[2]||match?.[3];
   if(!key||key.length>512)throw Error('文件中找不到有效的 OPENAI_API_KEY。');
-  importedKey=key;$('#api-key').value='';$('#key-state').textContent='密钥已导入，保存后连接。';
+  importedKey=key;$('#api-key').value='';say($('#key-state'),'密钥已导入，保存后连接。');
   connectionDirty=true;
  }finally{input.value='';}
 }));
@@ -744,8 +798,8 @@ $('#analyze-dialog').addEventListener('close',()=>{
 });
 $('#organize').addEventListener('click',()=>task(async()=>{
  organization=await rpc('organizationPlan',{windowId:currentWindowId});$('#organization-plan').replaceChildren();
- if(!organization.groups.length){const p=document.createElement('p');p.className='hint';p.textContent='当前窗口没有需要合并的同站标签。';$('#organization-plan').append(p);}
- for(const group of organization.groups){const row=document.createElement('div');row.className='plan-row';const name=document.createElement('bdi');name.textContent=group.title;const count=document.createElement('span');count.textContent=group.tabIds.length+' 个标签';row.append(name,count);$('#organization-plan').append(row);}
+ if(!organization.groups.length){const p=document.createElement('p');p.className='hint';p.textContent=tr('当前窗口没有需要合并的同站标签。');$('#organization-plan').append(p);}
+ for(const group of organization.groups){const row=document.createElement('div');row.className='plan-row';const name=document.createElement('bdi');name.textContent=group.title;const count=document.createElement('span');count.textContent=tr('{0} 个标签',group.tabIds.length);row.append(name,count);$('#organization-plan').append(row);}
  $('#apply-organization').disabled=!organization.groups.length;$('#organize-dialog').returnValue='';$('#organize-dialog').showModal();
 }));
 $('#organize-dialog').addEventListener('close',()=>{if($('#organize-dialog').returnValue==='apply')task(async()=>{const result=await rpc('organize',{plan:organization});await refresh();status('已整理为 '+result.groups+' 个网站分组。');});});
@@ -798,15 +852,17 @@ function paintChatSettings(message){
  const control=$('#chat-enable');
  control.disabled=!chatReady;
  control.className=chatEnabled?'secondary':'primary';
- control.textContent=chatEnabled?'停用对话工具':'授权并启用';
- $('#chat-status').textContent=message??(chatEnabled?'已启用。回到 ChatGPT 使用。':'仅在授权的 ChatGPT 页面启用。');
+ control.textContent=tr(chatEnabled?'停用对话工具':'授权并启用');
+ $('#chat-status').textContent=tr(message??(chatEnabled?'已启用。回到 ChatGPT 使用。':'仅在授权的 ChatGPT 页面启用。'));
+ $('#chat-summary-settings').hidden=!chatEnabled;
+ $('#chat-prepare').checked=chatPrepare;
 }
 async function refreshChatSettings(){
  const request=++chatRequest;
  try{
   const state=await rpc('threadWorkspace',{action:'status'});
   if(request!==chatRequest)return;
-  chatEnabled=state.enabled;chatReady=true;paintChatSettings();
+  chatEnabled=state.enabled;chatPrepare=state.prepareTopics===true;chatReady=true;paintChatSettings();
  }catch(error){if(request===chatRequest)$('#chat-status').textContent=error.message;}
 }
 $('#chat-enable').addEventListener('click',()=>{
@@ -818,4 +874,13 @@ $('#chat-enable').addEventListener('click',()=>{
   chatEnabled=result.enabled;
   return result.refreshNeeded?'已保存。刷新未生效的 ChatGPT 页面。':undefined;
  })().then(message=>{chatReady=true;paintChatSettings(message);},error=>{chatReady=true;paintChatSettings(error.message);});
+});
+
+$('#chat-prepare').addEventListener('change',async event=>{
+ const control=event.currentTarget;
+ control.disabled=true;
+ say($('#chat-summary-status'),'');
+ try{const result=await rpc('threadWorkspace',{action:'prepareTopics',value:control.checked});chatPrepare=result.prepareTopics;}
+ catch(error){say($('#chat-summary-status'),error.message);}
+ finally{control.disabled=false;paintChatSettings();}
 });

@@ -48,7 +48,7 @@ func restoreStoredCredential(current:KeychainCredentialStore,legacy:KeychainCred
     return(saved,true)
 }
 final class CredentialVault {
-    static let storeBuild = Bundle.main.bundleIdentifier == "app.tabcadence.bridge"
+    static let storeBuild = Bundle.main.bundleIdentifier == StoreSetup.bundleIdentifier
     static let service = storeBuild ? "app.tabcadence.api-key.v2" : "app.tabpilot.api-key.v2"
     static let legacyService = storeBuild ? "app.tabcadence.api-key" : "app.tabpilot.api-key"
     static let extensionOrigin: String? = {

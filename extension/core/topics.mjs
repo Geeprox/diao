@@ -51,9 +51,15 @@ export async function topicBatchLayout(storage, conversation, connection) {
   const cache = (await storage.get(cacheName))[cacheName] || {};
   const saved = [false,true].map(partial=>cache[topicCacheKey(conversation,partial)])
     .filter(entry=>entry?.version === 2 && entry.model === connection.model);
+  const complete = cache[topicCacheKey(conversation,false)];
+  const plan = complete?.overview;
+  const comparable = complete?.model === connection.model && plan?.version === overviewSchema &&
+    plan.batches.length && plan.batches.every(({digest})=>complete.parts?.[digest]) &&
+    (!plan.synthesis || complete.parts?.[plan.synthesis]);
   // 沿用已有会话的分段上限，并保留还可复用的范围。
   return {limit:saved.length && saved[0].batchLimit !== BATCH_TURNS ? LEGACY_BATCH_TURNS : BATCH_TURNS,
-    overviews:saved.map(entry=>entry.overview).filter(plan=>plan?.version === overviewSchema)};
+    overviews:saved.map(entry=>entry.overview).filter(plan=>plan?.version === overviewSchema),
+    complete:comparable ? {plan,view:combine(plan.batches,complete.parts,true,plan.synthesis ? {digest:plan.synthesis} : null)} : null};
 }
 
 function topicAnchor(value) {
@@ -91,6 +97,18 @@ function topicNavigation(turn) {
   return {id: turn.id, nodeId: topicAnchor(source.nodeId), role: source.role, answers, ...(revision && {revision})};
 }
 
+function matchesTopicPrefix(previous, latest) {
+  const compatible = (left, right) => right &&
+    matchesAnchor(left,right.id,right.nodeId) &&
+    (!left.revision || !right.revision || left.revision===right.revision);
+  return previous.length<=latest.length && previous.every((entry,index)=>{
+    const current=latest[index];
+    return compatible(entry,current) && entry.role===current.role &&
+      entry.answers.length===current.answers.length &&
+      entry.answers.every((answer,i)=>compatible(answer,current.answers[i]));
+  });
+}
+
 export async function topicSnapshot(value, conversation, layout = {}) {
   const batchLimit = layout.limit || BATCH_TURNS;
   if (!conversation || value?.conversation !== conversation ||
@@ -124,7 +142,24 @@ export async function topicSnapshot(value, conversation, layout = {}) {
     return {id: turn.id, question, answer: bounded(turn.answer, 2200),
       sections: turn.sections.map(section => bounded(section, 100)).filter(Boolean)};
   });
-  const partDigest = part=>fingerprint({format:whole ? 3 : detailed ? 2 : 1,turns:part});
+  const parsed = whole ? value.turns.map(topicNavigation) : [];
+  const navigation = parsed.every(Boolean) ? parsed : [];
+  const {plan:previous,view:priorView} = layout.complete || {};
+  const matches = previous?.entries.length && matchesTopicPrefix(previous.entries,navigation);
+  const appended = matches && navigation.length>previous.entries.length &&
+    turns.slice(previous.entries.length).every(turn=>turn.answer);
+  const retained = appended ? {
+    summary:priorView.summary,
+    answers:priorView.summaries.flatMap(({turn,answer})=>answer?[[previous.entries[turn-1].id,answer]]:[]),
+  } : matches && navigation.length===previous.entries.length ? previous.retained : null;
+  if (retained) {
+    const known = new Map(retained.answers);
+    // 已验证的历史消息可能被虚拟列表卸载。只在正文缺失时复用同一身份的已生成摘要。
+    for (const turn of turns) if (!turn.answer && known.has(turn.id)) turn.answer=known.get(turn.id);
+  }
+  const historyContext = offset=>offset===0 ? retained?.summary || '' : '';
+  const partDigest = (part,offset)=>fingerprint({format:whole ? 3 : detailed ? 2 : 1,turns:part,
+    ...(historyContext(offset) && {earlierOverview:historyContext(offset)})});
   const reusable = new Map();
   if (whole && (turns.length > batchLimit || totalLength > SUMMARY_BATCH_CHARS) && layout.overviews?.length) {
     const positions = new Map(turns.map((turn,index)=>[turn.id,index]));
@@ -134,7 +169,7 @@ export async function topicSnapshot(value, conversation, layout = {}) {
         const size = (batches[index+1]?.offset ?? entries.length) - offset;
         if (start === undefined || size <= 0 || size > batchLimit || start+size > turns.length ||
             [...reusable].some(([from,to])=>start<to && from<start+size)) continue;
-        if (await partDigest(turns.slice(start,start+size)) === digest) reusable.set(start,start+size);
+        if (await partDigest(turns.slice(start,start+size),start) === digest) reusable.set(start,start+size);
       }
     }
   }
@@ -160,12 +195,15 @@ export async function topicSnapshot(value, conversation, layout = {}) {
     const part = turns.slice(offset, end);
     // 只向模型发送批内顺序和文本。会话及消息身份只用于本机缓存。
     const evidence = part.map(({id, ...fields}, index) => ({turn: index + 1, ...fields}));
-    batches.push({offset, evidence, whole, digest: await partDigest(part)});
+    const earlierOverview = historyContext(offset);
+    if (earlierOverview) evidence[0].earlierOverview=earlierOverview;
+    batches.push({offset,evidence,whole,digest:await partDigest(part,offset)});
     offset = end;
   }
-  const navigation = whole ? value.turns.map(topicNavigation) : [];
-  return {conversation, batches, batchLimit, detailed, whole, partial:whole && value.partial === true, historyPending:whole && value.partial === true && value.preparing === true, historyProbed:value.historyProbed === true, count: turns.length,
-    navigation: navigation.every(Boolean) ? navigation : []};
+  const partial=whole && value.partial===true && !retained;
+  return {conversation,batches,batchLimit,detailed,whole,partial,
+    historyPending:partial && value.preparing===true,historyProbed:value.historyProbed===true,
+    count:turns.length,navigation,retained};
 }
 
 function bounded(value, limit) {
@@ -222,13 +260,15 @@ export async function requestTopics(connection, key, batch, detailed, fetcher) {
   const overview = ' Give an overall summary in two to four complete sentences. Convey the objective, decisive outcomes, key conditions and unresolved work. Topic summaries say what was concluded. When supplied several batches, reconcile theme changes and continuations across their boundary, using the absolute numbered ranges. Cover every turn. Write each field on one line.';
   const semanticBoundaries = ' Group neighboring turns about the same goal. Set merge to true only for adjacent turns that refine or resolve the same concrete question and can be understood from one combined answer. In a merged topic, make the title name that question and the topic summary directly answer it, preserving the final decision, numbers and exceptions. Set merge to false for independent questions, even when they share a broad topic. Keep the per-turn digests so each source can still be read.';
   const crossBatchGrouping = ' Rebuild topic boundaries using all supplied evidence. Batch boundaries carry no meaning. Treat the supplied draft topic summaries as evidence for these decisions.';
+  const continuity = ' Carry forward the still-valid decisions in earlierOverview, including concrete quantities, deadlines and acceptance thresholds, unless a later answer explicitly revises them. Give each consequential threshold with its number and unit.';
   const answerFirst = ' For each answer, lead with what the assistant actually found, recommended, decided or delivered. State the reasons, conditions or uncertainty that change how to use that conclusion. Read all supplied material, which may cover only part of a conversation. Do not fill any gaps from assumptions or use navigation labels in place of a digest.';
   const request = {
     url: endpoint + '/responses',
     body: {
       model,
       ...(model === 'gpt-6-luna' ? {reasoning: {effort: 'none'}} : {}),
-      instructions: grouping + (batch.synthesis ? overview + semanticBoundaries + crossBatchGrouping : detailed ? summarizing + (batch.whole ? guidance + answerFirst + overview + semanticBoundaries : '') : ''),
+      instructions: grouping + (batch.synthesis ? overview + semanticBoundaries + crossBatchGrouping : detailed ? summarizing + (batch.whole ? guidance + answerFirst + overview + semanticBoundaries : '') : '') +
+        (batch.whole ? continuity : ''),
       input: JSON.stringify(batch.evidence),
       store: false,
       max_output_tokens: detailed ? 5400 : 2000,
@@ -261,6 +301,7 @@ export async function topicSynthesis(snapshot, parts) {
       ...(group.merge && {merge:true}),
     })),
   }));
+  if (snapshot.retained) evidence[0].earlierOverview=snapshot.retained.summary;
   const digest = await fingerprint({format:'conversation-synthesis-v4',batches:snapshot.batches.map(batch => batch.digest)});
   return {digest, evidence, count:snapshot.count, whole:true,synthesis:true};
 }
@@ -338,6 +379,7 @@ async function overviewPlan(snapshot, parts) {
     entries: snapshot.navigation,
     batches: snapshot.batches.map(({offset, digest}) => ({offset, digest, whole:true})),
     synthesis: synthesis?.digest || '',
+    ...(snapshot.retained && {retained:snapshot.retained}),
     ...(snapshot.historyPending && {historyPending:true}),
   };
 }
@@ -424,7 +466,7 @@ export async function readLatestTopicOverview(storage, conversation, evidence) {
   for (const partial of scopes) {
     const saved = cache[topicCacheKey(conversation,partial)];
     const plan = saved?.overview;
-    if (plan?.version !== overviewSchema || !Array.isArray(plan.entries) || !Array.isArray(plan.batches) || !saved.parts) continue;
+    if (plan?.version !== overviewSchema || plan.superseded || !Array.isArray(plan.entries) || !Array.isArray(plan.batches) || !saved.parts) continue;
     const mismatch = mounted ? checkMountedTopics(plan.entries,observations) : checkTopicTurns(plan.entries,observations,evidence);
     if (mismatch) {
       if (!invalid || mismatch.changed?.length) invalid = mismatch;
@@ -476,7 +518,10 @@ async function writeTopicCache(storage, saved, key, entry) {
     // 如果后来读到的消息已推翻完整范围，只保留它的正文指纹缓存。
     // 其他仍未挂载修订消息的标签页不能再把旧结论当作完整摘要。
     if (whole?.overview?.entries && checkMountedTopics(whole.overview.entries,topicTimeline(entry.overview.entries))) {
-      saved[wholeKey] = {...whole,overview:undefined};
+      const before=whole.overview.entries,now=entry.overview.entries;
+      const append=before.length<now.length && matchesTopicPrefix(before,now);
+      // 旧概览不能冒充最新内容。仅保留有连续性证明的旧范围供增量总结使用。
+      saved[wholeKey] = {...whole,overview:append ? {...whole.overview,superseded:true} : undefined};
     }
   }
   const remaining = Object.entries(saved).filter(([id]) => id !== key).slice(-62);

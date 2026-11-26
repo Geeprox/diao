@@ -8,8 +8,16 @@
 
   if (window.top !== window.self) return;
   if (window.__THREADDECK_LOADED__ || window.__PROMPT_RAIL_LOADED__) return;
-  if (document.documentElement?.hasAttribute('data-threaddeck-instance')) return;
-  document.documentElement?.setAttribute('data-threaddeck-instance','1.11.0');
+  const runtimeId = chrome.runtime?.id;
+  if (!runtimeId) return;
+  const documentRoot = document.documentElement;
+  const retireEvent = 'diao:retire:' + runtimeId;
+  if (documentRoot?.hasAttribute('data-threaddeck-instance')) {
+    if (documentRoot.getAttribute('data-threaddeck-owner') !== runtimeId) return;
+    document.dispatchEvent(new Event(retireEvent));
+  }
+  documentRoot?.setAttribute('data-threaddeck-instance','1.13.0');
+  documentRoot?.setAttribute('data-threaddeck-owner',runtimeId);
   window.__THREADDECK_LOADED__ = true;
   // Backward-compatible guard: prevents a hot-updated v0.5 tab from loading both products.
   window.__PROMPT_RAIL_LOADED__ = true;
@@ -223,6 +231,7 @@
   let navigatorEl = null;
   let railEl = null;
   let listEl = null;
+  const tr = globalThis.DiaoLocale?.text || (text=>text);
   let toastEl = null;
   let toastTimer = null;
   let settingsLayerEl = null;
@@ -233,7 +242,6 @@
   let nativeSelectionFallbackTimer = null;
   let nativeSelectionSearchTimer = null;
   let nativeSelectionObserver = null;
-  let nativeSelectionGestureStartedAt = 0;
   let nativeSelectionSuppressionObserver = null;
   let nativeSelectionSuppressionRaf = null;
   let suppressedNativeSelectionToolbarEls = new Set();
@@ -2005,7 +2013,7 @@
       tdSelection.serial++;tdSelection.down=true;tdSelection.pointerId=event.pointerId;tdSelection.sample=null;tdSelection.frozen=null;tdSelection.recoveryReason='';tdSelection.lastError='';
       tdSelection.lastAnalyzed=null;tdSelection.moved=false;tdSelection.x=event.clientX;tdSelection.y=event.clientY;
       clearTimeout(tdSelection.timer);tdSelection.timer=null;
-      tdPauseSelectionIntegration();nativeSelectionGestureStartedAt=Date.now();
+      tdPauseSelectionIntegration();
       tdInteraction.skipped=0;tdInteraction.fullMutationPasses=0;
     },{capture:true,passive:true});
     window.addEventListener('pointermove',event=>{
@@ -2539,7 +2547,7 @@ const TDAnswerOutline = (() => {
     if (!shadowRoot || shadowRoot.querySelector('.td-search')) return;
     const panel = shadowRoot.querySelector('.preview-panel');
     const search = document.createElement('input'); search.className = 'td-search'; search.type = 'search';
-    search.placeholder = '搜索问答与章节'; search.setAttribute('aria-label',search.placeholder);
+    search.placeholder = tr('搜索问答与章节'); search.setAttribute('aria-label',search.placeholder);
     const searchBox = document.createElement('div');
     searchBox.className = 'outline-search';
     const searchIcon = document.createElement('span');
@@ -5564,8 +5572,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     for(let i=0;i<scannedEntries.length;i++){
       const row=scannedEntries[i];if(matched.has(row))continue;
       const next=scannedEntries.slice(i+1).map(r=>matched.get(r)||find(r)).find(Boolean);
-      const prev=[...scannedEntries.slice(0,i)].reverse().map(r=>matched.get(r)||find(r)).find(Boolean);
-      const at=next?sequence.indexOf(next):prev?sequence.indexOf(prev)+1:sequence.length;
+      const at=next?sequence.indexOf(next):sequence.length;
       sequence.splice(Math.max(0,at),0,row);matched.set(row,row);
     }
     for(const row of sequence){
@@ -5980,7 +5987,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     const style = document.createElement('style'); style.textContent = '.td-history-status{font-size:11px;line-height:17px;color:var(--apr-faint);padding:6px 12px;border-top:1px solid var(--apr-panel-border);pointer-events:none}.preview-list{overflow-anchor:none}';
     shadowRoot.appendChild(style);
     const row = document.createElement('label'); row.className = 'setting-row';
-    row.innerHTML = '<span class="setting-copy"><span class="setting-name">回溯大纲时显示定位状态</span><span class="setting-description">只检查本地目录，不在后台加载历史。点击未挂载目标时，最多尝试一段网页原生历史加载。</span></span><span class="switch"><input type="checkbox" name="prefetchHistoryOnOutline"><span class="switch-track"></span></span>';
+    row.innerHTML = '<span class="setting-copy"><span class="setting-name">回溯大纲时显示定位状态</span><span class="setting-description">点击大纲中的目标时自动加载原文。</span></span><span class="switch"><input type="checkbox" name="prefetchHistoryOnOutline"><span class="switch-track"></span></span>';
     settingsFormEl.querySelector('[name="enableAnswerJump"]')?.closest('.setting-row')?.after(row);
     listEl.addEventListener('wheel', event => {
       if (event.ctrlKey || event.deltaY >= 0) return;
@@ -6029,40 +6036,77 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     if(now-Number(tdHistory.lastExplicitLoad||0)<2000){req.method='history-load-budget';return null;}
     const index = req.overviewRecords || entries;
     const positionById = new Map();
-    for (const [position,entry] of index.entries()) {
-      for (const id of tdNavRecordIds(entry)) positionById.set(entryAnchorRole(entry)+':'+id,position);
-      for (const answer of entry.answerRecords || []) {
-        for (const id of tdNavRecordIds(answer)) positionById.set('assistant:'+id,position);
+    let sequence = 0;
+    for (const entry of index) {
+      for (const message of tdHistoryEntryRecords(entry)) {
+        const role = message === entry ? entryAnchorRole(entry) : 'assistant';
+        for (const id of tdNavRecordIds(message)) positionById.set(role+':'+id,sequence);
+        sequence++;
       }
     }
-    const positions=[];
-    for(const role of ['user','assistant'])for(const node of tdDomRoleRoots(role)) {
-      for(const id of tdMessageAddress(node,role).identityTokens){const i=positionById.get(`${role}:${id}`);if(i!==undefined)positions.push(i);}
+    const role = req.block ? 'assistant' : entryAnchorRole(record);
+    const wanted = tdNavRecordIds(record).map(id=>positionById.get(role+':'+id)).find(Number.isInteger);
+    if (wanted === undefined) return null;
+    const viewportRoot = tdZoom.scene?.viewportRoot;
+    const root = viewportRoot?.isConnected ? viewportRoot : findScrollRoot();
+    const view = tdNavClientBox(root);
+    const middle = (view.top + view.bottom) / 2;
+    let nearby = null;
+    // 以阅读视口附近的已确认消息判断方向。离屏保留的同轮提问不代表该回答已挂载。
+    for (const author of ['user','assistant']) {
+      for (const node of tdDomRoleRoots(author)) {
+        if (!tdNavVisibleTarget(node)) continue;
+        const position = tdMessageAddress(node,author).identityTokens.map(id=>positionById.get(author+':'+id)).find(Number.isInteger);
+        if (position === undefined || position === wanted) continue;
+        const box = tdDomRect(node);
+        const distance = Math.abs((box.top+box.bottom)/2-middle);
+        if (!nearby || distance < nearby.distance) nearby = {position,distance};
+      }
     }
-    const wanted=index.findIndex(e=>e.key===req.entryKey);
-    if(wanted<0||!positions.length)return null;
-    const direction=wanted<Math.min(...positions)?'up':wanted>Math.max(...positions)?'down':'';
-    if(!direction)return null;
-    tdHistory.lastExplicitLoad=now;
-    const root=currentScrollRoot||findScrollRoot();tdNavLockRoot(req,root);
-    req.method='one-native-history-step';
+    if (!nearby) return null;
+    const direction = wanted < nearby.position ? 'up' : 'down';
+    tdHistory.lastExplicitLoad = now;
+    tdNavLockRoot(req,root);
+    req.method = 'native-history-windows';
     req.paging = direction;
-    showToast('正在加载目标原文…',2600);
-    const info = tdNavScrollInfo(root), boundary = direction==='up' ? info.min : info.max;
-    tdSignalHostReadingScroll(root,boundary-info.top);
-    tdNavWriteScroll(req,root,boundary);
-    let corrections = 0;
-    const result=await tdNavWait(req,()=>{
-      const target = tdNavResolve(req);
-      if (!target && corrections < 2 && Math.abs(tdNavScrollInfo(root).top-boundary)>8) {
-        corrections++;
-        tdNavWriteScroll(req,root,boundary);
+    showToast('正在加载目标原文…',6800);
+    const initial = tdNavScrollInfo(root).top;
+    const deadline = performance.now() + 6500;
+    const thread = tdZoom.scene?.root || tdNavConversationRoot();
+    let closest = Infinity, rebounds = 0, stableSince = 0, observedRange = -1, signaled = false;
+    let result = null;
+    try {
+      while (tdNavAlive(req) && root.isConnected && !document.hidden && performance.now() < deadline) {
+        const info = tdNavScrollInfo(root);
+        const boundary = direction === 'up' ? info.min : info.max;
+        const remaining = boundary - info.top;
+        const distance = Math.abs(remaining);
+        if (distance > 3) {
+          stableSince = 0;
+          if (distance < closest - 4) { closest = distance; rebounds = 0; }
+          else rebounds++;
+          const recovered = rebounds >= 2;
+          if (!signaled || recovered) {
+            tdSignalHostReadingScroll(root,remaining);
+            signaled = true;
+          }
+          if (recovered) { closest = Infinity; rebounds = 0; }
+          const stride = Math.max(80,info.height * .74);
+          // 保留与当前阅读窗口的重叠，逐段触发 ChatGPT 自己的虚拟列表挂载。
+          tdNavWriteScroll(req,root,recovered ? boundary : info.top + Math.sign(remaining)*Math.min(distance,stride));
+        } else {
+          const busy = direction === 'up' && tdZoomEarlierMessagesPending(thread);
+          if (!stableSince || busy || observedRange !== info.range) stableSince = performance.now();
+          observedRange = info.range;
+          if (!busy && performance.now() - stableSince > 1100) break;
+        }
+        result = await tdNavWait(req,()=>tdNavResolve(req),210);
+        if (result) return result;
       }
-      return target;
-    },2500);
-    if(!tdNavAlive(req))return null;
-    if(!result)await refreshNow('explicit-history-step');
-    return result||tdNavResolve(req);
+      return null;
+    } finally {
+      if (!result && tdNavAlive(req) && root.isConnected && !document.hidden) tdNavWriteScroll(req,root,initial);
+    }
   }
 
 
@@ -6109,7 +6153,6 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     for (const patch of tdLive.patches.values()) if (patch.entryKey === oldKey) patch.entryKey = newKey;
     for (const item of tdLive.extra.values()) {
       if (item.beforeKey === oldKey) item.beforeKey = newKey;
-      if (item.afterKey === oldKey) item.afterKey = newKey;
     }
   }
   function tdLiveReconcileApi(records) {
@@ -6146,8 +6189,7 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
     for (const value of tdLive.extra.values()) {
       if (records.some(record => tdLiveSame(record, value))) continue;
       const next = value.beforeKey ? records.findIndex(record => record.key === value.beforeKey) : -1;
-      const prior = value.afterKey ? records.findIndex(record => record.key === value.afterKey) : -1;
-      records.splice(next >= 0 ? next : prior >= 0 ? prior + 1 : records.length, 0, value);
+      records.splice(next >= 0 ? next : records.length, 0, value);
     }
     let additions = 0;
     for (let i = 0; i < visible.length; i++) {
@@ -6165,13 +6207,12 @@ async function ensureChatGptConversationData({force=false,reason='manual',allowN
         Object.assign(remapped, identity, { text: mounted.text });
         continue;
       }
-      const previous = [...visible.slice(0, i)].reverse().map(row => records.find(e => tdLiveSame(e, row))).find(Boolean);
+      // 虚拟列表中前一条可见提问与新提问之间可能还有未挂载的轮次。
       const following = visible.slice(i + 1).map(row => records.find(e => tdLiveSame(e, row))).find(Boolean);
       const record = { ...own, key: `live:${identity.messageId || identity.nodeId}`, kind: 'prompt', anchorRole: 'user',
-        source: 'live-dom', answerBlocks: [], answerRecords: [], afterKey: previous?.key || '', beforeKey: following?.key || '',
+        source: 'live-dom', answerBlocks: [], answerRecords: [], beforeKey: following?.key || '',
         observedAt: Date.now(), liveRevision: ++tdLive.revision };
-      const next = following ? records.indexOf(following) : -1, prior = previous ? records.indexOf(previous) : -1;
-      records.splice(next >= 0 ? next : prior >= 0 ? prior + 1 : records.length, 0, record);
+      records.splice(following ? records.indexOf(following) : records.length, 0, record);
       tdLive.extra.set(record.key, record); additions++;
     }
     if (additions) {
@@ -6899,7 +6940,8 @@ function tdNavScrollRoot(target) {
     return null;
   }
   function tdSignalHostReadingScroll(root, delta) {
-    if (Math.abs(delta)<4 || !root?.querySelector('[data-thread-find-target="conversation"] [data-virtualized-turn]')) return;
+    if (Math.abs(delta)<4 || !root || !(root.matches('[data-mcp-app-scroll-host][data-app-action-timeline-scroll]') ||
+        root.querySelector('[data-thread-find-target="conversation"] [data-virtualized-turn]'))) return;
     // 先让宿主退出自动跟随末尾，再由浏览器滚到已知的阅读位置。
     root.dispatchEvent(new WheelEvent('wheel',{deltaY:delta,bubbles:true,cancelable:true}));
   }
@@ -8194,7 +8236,7 @@ function tdNavScrollRoot(target) {
         remove.dataset.action = 'remove-comment';
         remove.dataset.commentId = comment.id;
         remove.setAttribute('aria-label', `删除批注 ${index + 1}`);
-        remove.title = '删除';
+        remove.title = tr('删除');
         remove.innerHTML = threadDeckIcon('trash');
         card.append(quote, note, remove);
         list.appendChild(card);
@@ -8483,14 +8525,6 @@ function tdNavScrollRoot(target) {
     return /(?:ask\s*chatgpt|ask\s+about\s+(?:this|selection)|询问\s*chatgpt|詢問\s*chatgpt|问问\s*chatgpt|問問\s*chatgpt|向\s*chatgpt\s*(?:提问|提問|询问|詢問)|add\s+to\s+(?:chat|conversation)|添加到(?:聊天|对话|對話)|加入(?:聊天|对话|對話)|引用到(?:聊天|对话|對話))/.test(text);
   }
 
-  function hasSelectionToolbarSemantics(element) {
-    const text = elementActionText(element);
-    if (!text) return false;
-    const primary = /(?:ask\s*chatgpt|询问\s*chatgpt|詢問\s*chatgpt|问问\s*chatgpt|問問\s*chatgpt|add\s+to\s+(?:chat|conversation)|添加到(?:聊天|对话|對話)|加入(?:聊天|对话|對話))/.test(text);
-    const supporting = /(?:copy|复制|複製|quote|引用|selection|选区|選區)/.test(text);
-    return primary || (supporting && /(?:selection|选区|選區|popover|floating)/.test(text));
-  }
-
   function getComposerBoundary() {
     const composer = getChatGptComposer();
     if (!(composer instanceof HTMLElement)) return null;
@@ -8530,7 +8564,7 @@ function tdNavScrollRoot(target) {
   }
 
   function isNativeSelectionToolbarDecoy(element) {
-    if (!(element instanceof HTMLElement) || !element.isConnected) return true;
+    if (!(element instanceof HTMLElement) || !element.isConnected || element.getRootNode() !== document) return true;
     if (element === navHost || element.closest('#prompt-rail-host, #threaddeck-host')) return true;
     if (element.closest('nav, aside, [role="navigation"]')) return true;
     // A few ChatGPT rollouts mount the transient selection portal inside the
@@ -8618,109 +8652,22 @@ function tdNavScrollRoot(target) {
     return score;
   }
 
-  function nativeToolbarCandidateScore(element, selectionRect, semanticAnchor = null) {
-    if (!(element instanceof HTMLElement) || !isElementVisible(element)) return Number.NEGATIVE_INFINITY;
-    if (isNativeSelectionToolbarDecoy(element) || !isCompactFloatingOverlay(element)) return Number.NEGATIVE_INFINITY;
-
-    const buttons = safeQueryAll(element, 'button, [role="button"]').filter((button) => (
-      isElementVisible(button) && !button.matches('[data-threaddeck-selection-comment="true"]')
-    ));
-    if (!buttons.length || buttons.length > 10) return Number.NEGATIVE_INFINITY;
-
-    let score = nativeToolbarGeometryScore(element, selectionRect);
-    if (!Number.isFinite(score)) return score;
-    const role = (element.getAttribute('role') || '').toLowerCase();
-    if (role === 'toolbar') score += 6;
-    else if (role === 'menu') score += 3;
-    if (element.matches('[popover]:popover-open, [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-state="open"][data-side], [data-slot*="popover" i], [data-testid*="selection" i]')) score += 5;
-    if (semanticAnchor instanceof HTMLElement && element.contains(semanticAnchor)) {
-      score += 18;
-    } else if (hasSelectionToolbarSemantics(element)) {
-      score += 8;
-    } else {
-      // Locale and icon-only rollouts may expose no readable “Ask ChatGPT” label.
-      // Accept only an explicit/recent compact overlay created around the active
-      // selection gesture; persistent composer and answer controls are rejected above.
-      const explicitStructuralToolbar = Boolean(
-        role === 'toolbar' || role === 'menu' ||
-        element.matches('[popover]:popover-open, [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-headlessui-portal], [data-state="open"][data-side], [data-slot*="popover" i], [data-testid*="selection" i]')
-      );
-      const now = Date.now();
-      const recentGesture = nativeSelectionGestureStartedAt > 0 && now - nativeSelectionGestureStartedAt <= 3200;
-      if (!explicitStructuralToolbar || !recentGesture || buttons.length < 1 || buttons.length > 8) {
-        return Number.NEGATIVE_INFINITY;
-      }
-      score += 3;
-    }
-    return score;
-  }
-
-  function collectNativeToolbarCandidates(selectionRect) {
-    const candidates = new Set();
-    const addCompactRoots = (element) => {
-      if (!(element instanceof HTMLElement) || !isElementVisible(element)) return;
-      const root = findCompactFloatingRoot(element);
-      if (root) candidates.add(root);
-      if (isCompactFloatingOverlay(element) && !isNativeSelectionToolbarDecoy(element)) candidates.add(element);
-    };
-
-    // First anchor on the native selection action itself. Unlike generic Copy
-    // buttons, “Ask ChatGPT / 询问 ChatGPT” only belongs to the selection popover.
-    const labeledActions = 'button[aria-label*="chatgpt" i],[role="button"][aria-label*="chatgpt" i],'+
-      'button[data-testid*="ask-chatgpt" i],button[title*="chatgpt" i],[role="toolbar"] button,'+
-      '[popover]:popover-open button,[data-testid*="selection" i] button,[data-floating-ui-portal] button';
-    for (const control of tdDomQueryAll(document,labeledActions)) {
-      if (!isNativeSelectionPrimaryAction(control) || isNativeSelectionToolbarDecoy(control) ||
-          !isElementVisible(control)) continue;
-      const root = findCompactFloatingRoot(control);
-      if (!root) continue;
-      const score = nativeToolbarCandidateScore(root, selectionRect, control);
-      if (Number.isFinite(score)) candidates.add({ root, anchor: control, score });
-    }
-
-    const semanticMatches = Array.from(candidates).filter((candidate) => candidate && candidate.root);
-    if (semanticMatches.length) return semanticMatches;
-    candidates.clear();
-
-    // Strict structural fallback for locale/A-B variants where the primary action
-    // is icon-only. It only considers detached compact overlays near the selection;
-    // composer controls and per-answer action rows are categorically excluded.
-    const selectors = [
-      '[popover]:popover-open',
-      '[role="toolbar"]',
-      '[role="menu"]',
-      '[data-radix-popper-content-wrapper]',
-      '[data-radix-menu-content]',
-      '[data-floating-ui-portal]',
-      '[data-headlessui-portal]',
-      '[data-state="open"][data-side]',
-      '[data-slot*="popover" i]',
-      '[data-testid*="selection" i]',
-      '[class*="selection" i][class*="tool" i]',
-    ];
-    for (const selector of selectors) safeQueryAll(document, selector).forEach(addCompactRoots);
-
-    const points = [
-      [selectionRect.left + selectionRect.width / 2, Math.max(1, selectionRect.top - 42)],
-      [selectionRect.left + selectionRect.width / 2, Math.min(window.innerHeight - 1, selectionRect.bottom + 42)],
-      [Math.max(1, selectionRect.left - 42), selectionRect.top + selectionRect.height / 2],
-      [Math.min(window.innerWidth - 1, selectionRect.right + 42), selectionRect.top + selectionRect.height / 2],
-    ];
-    for (const [x, y] of points) {
-      for (const element of document.elementsFromPoint(x, y)) addCompactRoots(element);
-    }
-    return Array.from(candidates).map((root) => ({
-      root,
-      anchor: safeQueryAll(root, 'button, [role="button"]').find(isNativeSelectionPrimaryAction) || null,
-      score: nativeToolbarCandidateScore(root, selectionRect),
-    })).filter((candidate) => Number.isFinite(candidate.score));
-  }
-
   function findNativeSelectionToolbar(selectionRect) {
-    const candidates = collectNativeToolbarCandidates(selectionRect);
-    if (!candidates.length) return null;
-    candidates.sort((left, right) => right.score - left.score);
-    return candidates[0].score >= 8 ? candidates[0] : null;
+    const selector = '[role="presentation"] button,button[data-testid*="ask-chatgpt" i]';
+    let best = null;
+    // ChatGPT 的选区气泡位于页面自身的浮层。通用工具条及扩展的影子根不参与匹配。
+    for (const anchor of safeQueryAll(document,selector)) {
+      if (!isElementVisible(anchor) || !isNativeSelectionPrimaryAction(anchor) || isNativeSelectionToolbarDecoy(anchor)) continue;
+      const row = anchor.closest('[role="presentation"]');
+      const nativeTheme = row?.classList.contains('bg-surface-elevated-secondary') &&
+        anchor.classList.contains('cursor-interaction');
+      if (!nativeTheme && !anchor.matches('[data-testid*="ask-chatgpt" i]')) continue;
+      const root = findCompactFloatingRoot(anchor);
+      if (!root) continue;
+      const score = nativeToolbarGeometryScore(root,selectionRect);
+      if (Number.isFinite(score) && (!best || score > best.score)) best = {root,anchor,score};
+    }
+    return best;
   }
 
   function findNativeToolbarButtonContainer(toolbar, anchorButton = null) {
@@ -8774,12 +8721,13 @@ function tdNavScrollRoot(target) {
       style.id = 'threaddeck-selection-style';
       style.textContent = [
         '[data-threaddeck-selection-comment="true"]{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:5px;',
-        'margin:0;min-block-size:var(--td-selection-height,30px);padding:0 9px;border:0;border-radius:var(--td-selection-radius,8px);',
-        'font:inherit;font-size:var(--td-selection-size,13px);font-weight:550;line-height:1;',
+        'margin:0;min-block-size:var(--td-selection-height,28px);padding-block:0;padding-inline:var(--td-selection-padding,8px);',
+        'border:0;border-radius:var(--td-selection-radius,0px);font:inherit;font-size:var(--td-selection-size,14px);',
+        'font-weight:var(--td-selection-weight,400);line-height:var(--td-selection-line,1.3);letter-spacing:var(--td-selection-tracking,normal);',
         'white-space:nowrap;cursor:pointer;flex:none;color:var(--td-selection-ink,currentColor);',
-        'opacity:1;background:transparent;transition:background-color 120ms cubic-bezier(.2,.7,.3,1)}',
+        'opacity:1;background:var(--td-selection-surface,Canvas);transition:background-color 120ms cubic-bezier(.2,.7,.3,1)}',
         '[data-threaddeck-selection-comment="true"]:hover,[data-threaddeck-selection-comment="true"]:active{',
-        'background:color-mix(in srgb,var(--td-selection-ink,currentColor) 10%,transparent)}',
+        'background:color-mix(in srgb,var(--td-selection-surface,Canvas) 91%,var(--td-selection-ink,currentColor))}',
         '[data-threaddeck-selection-comment="true"]:focus-visible{outline:2px solid currentColor;outline-offset:-2px}',
         '[data-threaddeck-selection-comment="true"] svg{width:16px;height:16px;flex:none}',
         '@media(prefers-reduced-motion:reduce){[data-threaddeck-selection-comment="true"]{transition:none}}',
@@ -8790,14 +8738,24 @@ function tdNavScrollRoot(target) {
     button.type = 'button';
     button.dataset.threaddeckSelectionComment = 'true';
     tdDomState.selection = 'native-button-created';
-    button.setAttribute('aria-label', '添加批注');
-    button.innerHTML = threadDeckIcon('annotation') + '<span>批注</span>';
+    button.setAttribute('aria-label', tr('添加批注'));
+    button.innerHTML = threadDeckIcon('annotation');
+    const label = document.createElement('span');
+    label.textContent = tr('批注');
+    button.append(label);
     const sibling = template || toolbar;
     const inherited = getComputedStyle(sibling);
-    button.style.setProperty('--td-selection-height', Math.max(28,Math.min(40,sibling.getBoundingClientRect().height))+'px');
-    button.style.setProperty('--td-selection-radius', inherited.borderTopLeftRadius === '0px' ? '8px' : inherited.borderTopLeftRadius);
+    const surface = tdZoomBackground(sibling.parentElement, document.documentElement);
+    button.style.fontFamily = inherited.fontFamily;
+    button.style.setProperty('--td-selection-height', Math.max(28,Math.min(44,sibling.getBoundingClientRect().height))+'px');
+    button.style.setProperty('--td-selection-radius', inherited.borderRadius);
+    button.style.setProperty('--td-selection-padding', inherited.paddingInline || '8px');
     button.style.setProperty('--td-selection-size', inherited.fontSize);
+    button.style.setProperty('--td-selection-weight', inherited.fontWeight);
+    button.style.setProperty('--td-selection-line', inherited.lineHeight);
+    button.style.setProperty('--td-selection-tracking', inherited.letterSpacing);
     button.style.setProperty('--td-selection-ink', inherited.color);
+    if(surface)button.style.setProperty('--td-selection-surface',surface);
 
     const preserveSelection = (event) => {
       event.preventDefault();
@@ -8815,32 +8773,24 @@ function tdNavScrollRoot(target) {
 
   function attachNativeSelectionAction(match) {
     const toolbar = match?.root;
-    const anchorButton = match?.anchor instanceof HTMLElement ? match.anchor : null;
+    const anchor = match?.anchor;
     if (!(toolbar instanceof HTMLElement) || !toolbar.isConnected || isNativeSelectionToolbarDecoy(toolbar)) return false;
-    const existing = toolbar.querySelector('[data-threaddeck-selection-comment="true"]');
-    if (existing instanceof HTMLButtonElement) {
-      nativeSelectionButtonEl = existing;
-      nativeSelectionToolbarEl = toolbar;
-      const visible = tdDomActionVisible(nativeSelectionButtonEl);
-      if (visible && selectionActionEl) selectionActionEl.hidden = true;
-      return visible;
+    let button = toolbar.querySelector('[data-threaddeck-selection-comment="true"]');
+    if (!(button instanceof HTMLButtonElement)) {
+      const container = findNativeToolbarButtonContainer(toolbar,anchor);
+      if (!(container instanceof HTMLElement) || isNativeSelectionToolbarDecoy(container)) return false;
+      if (nativeSelectionButtonEl?.isConnected) nativeSelectionButtonEl.remove();
+      button = createNativeSelectionButton(toolbar,anchor);
+      container.appendChild(button);
     }
-    if (nativeSelectionButtonEl?.isConnected && nativeSelectionToolbarEl === toolbar) {
-      const visible = tdDomActionVisible(nativeSelectionButtonEl);
-      if (visible && selectionActionEl) selectionActionEl.hidden = true;
-      return visible;
-    }
-    if (nativeSelectionButtonEl?.isConnected) nativeSelectionButtonEl.remove();
-    const container = findNativeToolbarButtonContainer(toolbar, anchorButton);
-    if (!(container instanceof HTMLElement) || isNativeSelectionToolbarDecoy(container)) return false;
-    const button = createNativeSelectionButton(toolbar, anchorButton);
-    // Always append to the action row so ThreadDeck is the right-most native action.
-    container.appendChild(button);
     nativeSelectionButtonEl = button;
     nativeSelectionToolbarEl = toolbar;
+    // 先移开我们自己的备用入口，再检查组合按钮能否点到。
+    const showFallback = selectionActionEl && !selectionActionEl.hidden;
+    if (showFallback) selectionActionEl.hidden = true;
     const visible = tdDomActionVisible(button);
-    if (visible && selectionActionEl) selectionActionEl.hidden = true;
-    return visible && toolbar.contains(button);
+    if (showFallback && !visible) selectionActionEl.hidden = false;
+    return visible;
   }
 
   function scheduleNativeSelectionIntegration(selectionRect) {
@@ -10875,8 +10825,8 @@ function tdNavScrollRoot(target) {
         const controls=document.createElement('div');controls.className='queue-dock-controls';
         const interject=document.createElement('button');interject.type='button';interject.className='queue-dock-direction';
         interject.dataset.action='queue-dock-interject';interject.dataset.queueId=item.id;interject.innerHTML=threadDeckIcon('redirect')+'<span>插话</span>';
-        const remove=document.createElement('button');remove.type='button';remove.className='queue-dock-icon';remove.dataset.action='queue-dock-remove';remove.dataset.queueId=item.id;remove.title='删除';remove.innerHTML=threadDeckIcon('trash');
-        const more=document.createElement('button');more.type='button';more.className='queue-dock-icon';more.dataset.action='queue-dock-more';more.dataset.queueId=item.id;more.setAttribute('aria-label','更多队列操作');more.title='更多';more.innerHTML=threadDeckIcon('more');
+        const remove=document.createElement('button');remove.type='button';remove.className='queue-dock-icon';remove.dataset.action='queue-dock-remove';remove.dataset.queueId=item.id;remove.title=tr('删除');remove.innerHTML=threadDeckIcon('trash');
+        const more=document.createElement('button');more.type='button';more.className='queue-dock-icon';more.dataset.action='queue-dock-more';more.dataset.queueId=item.id;more.setAttribute('aria-label','更多队列操作');more.title=tr('更多');more.innerHTML=threadDeckIcon('more');
         controls.append(interject,remove,more);row.append(handle,main,controls);
       }
       existing.delete(item.id);
@@ -11040,19 +10990,19 @@ function tdNavScrollRoot(target) {
       const shift = same.top - capture.messages.get(same.id).top;
       if (Math.abs(shift) > 2) for (const row of capture.messages.values()) row.top += shift;
     }
-    capture.order = tdMergeObservedOrder(capture.order,sample.map(message => message.id));
+    capture.order = tdMergeObservedOrder(capture.order,sample.map(message => message.id),true);
     for (const message of sample) capture.messages.set(message.id,message);
     tdZoomReconcileHistoryOrder(capture);
     return true;
   }
 
-  function tdMergeObservedOrder(base, observed) {
-    // 原文中仍可核对的记录按网页顺序重排。未挂载的记录保留在相邻锚点之间。
+  function tdMergeObservedOrder(base, observed, preserveKnown = false) {
+    // 章节可以随正文更新。会话只在有完整的顺序证据时才重排已知轮次。
     const existing = new Set(base);
     const anchors = observed.filter(item => existing.has(item));
     const seen = new Set(anchors);
     let anchorIndex = 0;
-    const ordered = base.map(item => seen.has(item) ? anchors[anchorIndex++] : item);
+    const ordered = preserveKnown ? base : base.map(item => seen.has(item) ? anchors[anchorIndex++] : item);
     let pending = [], previous;
     const before = new Map();
     for (const item of observed) {
@@ -11060,8 +11010,8 @@ function tdNavScrollRoot(target) {
       if (pending.length) { before.set(item,pending); pending = []; }
       previous = item;
     }
-    const result = ordered.flatMap(item => [...(before.get(item) || []), item, ...(item === previous ? pending : [])]);
-    if (!anchors.length) result.push(...pending);
+    const result = ordered.flatMap(item => [...(before.get(item) || []), item, ...(!preserveKnown && item === previous ? pending : [])]);
+    if (preserveKnown || !anchors.length) result.push(...pending);
     return result;
   }
 
@@ -11162,8 +11112,8 @@ function tdNavScrollRoot(target) {
 
   function tdOutlineMergeHistory(base, root) {
     const capture = tdOutlineCapture(root);
-    if (!capture?.history.order.length) return tdOutlineSavedOrder(base);
     const authoritative = tdHealth.snapshot?.complete === true;
+    if (!capture?.history.order.length) return authoritative ? base : tdOutlineSavedOrder(base);
     const observed = tdZoomCapturedRecords(capture);
     const identity = (row,role=entryAnchorRole(row)) => tdNavRecordIds(row).map(id=>role+':'+id);
     const same = (record,other,role) => identity(record,role).some(id => identity(other,role).includes(id));
@@ -11216,7 +11166,7 @@ function tdNavScrollRoot(target) {
     }
     // 完整网页采集可以替换旧的 DOM 缓存。当前会话原生快照仍用于未挂载的源记录。
     if (capture.history.complete && !authoritative) return ordered;
-    const records = tdMergeObservedOrder(merged,ordered);
+    const records = tdMergeObservedOrder(merged,ordered,authoritative || capture.history.gap === true);
     return authoritative ? records : tdOutlineSavedOrder(records);
   }
 
@@ -11746,7 +11696,7 @@ function tdNavScrollRoot(target) {
     label.className = 'zoom-line-label';
     label.textContent = text;
     row.append(label);
-    row.title = digest ? (role === 'assistant' ? '定位原回复' : '定位原问题') : text;
+    row.title = digest ? tr(role === 'assistant' ? '定位原回复' : '定位原问题') : text;
     const destination = {key:record.key, answerId};
     scene.destinations.set(row, destination);
     const id = answerId || record.messageId || record.nodeId;
@@ -11867,8 +11817,7 @@ function tdNavScrollRoot(target) {
       evidence.messages = tdZoomMountedEvidence(scene.records);
       if (!evidence.messages.length) return Promise.resolve(null);
     }
-    return chrome.runtime.sendMessage({type:'threadWorkspace',action:'topicsCached',value:evidence})
-      .then(reply=>reply?.ok ? reply.data : null).catch(()=>null);
+    return pilotRpc('topicsCached',null,evidence).catch(()=>null);
   }
 
   function tdZoomRecordRevision(entry) {
@@ -11899,7 +11848,8 @@ function tdNavScrollRoot(target) {
       if (prior.running) return;
     }
     clearTimeout(prior?.timer);
-    const preparation = {scope:tdScope(),records,complete,generate,revision,key,timer:0};
+    const lastView = prior && tdAlive(prior.scope) ? prior.view || prior.lastView : null;
+    const preparation = {scope:tdScope(),records,complete,generate,revision,key,lastView,timer:0};
     tdZoom.preparation = preparation;
     preparation.timer = setTimeout(async()=>{
       if (tdZoom.preparation !== preparation || !tdAlive(preparation.scope)) return;
@@ -12074,17 +12024,24 @@ function tdNavScrollRoot(target) {
     const button = tdZoom.surface.querySelector('.zoom-ai');
     const status = tdZoom.surface.querySelector('.zoom-ai-status');
     const complete = scene.summaries?.size ? !scene.digestPartial : scene.complete;
-    const coverage = complete ? (scene.history.complete ? '网页历史' : '完整会话') : '部分会话';
+    const coverage = complete ? '完整会话' : scene.summaries?.size ? '已读问答' : '';
     const historyAction = state === 'history-retry' || state === 'ready' && !complete && !scene.historyKey;
     const labels = {connection:'模型连接',error:'重试',cooldown:'重试'};
     const label = historyAction ? '继续补齐' : labels[state];
-    tdZoom.surface.querySelector('.zoom-coverage').textContent = coverage + ' · ' + scene.records.length + ' 轮';
+    tdZoom.surface.querySelector('.zoom-coverage').textContent = coverage ? tr('{0} · {1} 轮',tr(coverage),scene.records.length) : '';
     button.hidden = !label;
-    if (label) button.textContent = label;
+    if (label) button.textContent = tr(label);
     button.dataset.action = state === 'connection' ? 'topic-connection' : historyAction ? 'recover-topics-history' : 'generate-topics';
-    status.textContent = description;
-    status.hidden = !description;
     scene.topicState = state;
+    const empty = tdZoom.stream?.querySelector('.zoom-unprepared');
+    status.textContent = empty ? '' : tr(description);
+    status.hidden = Boolean(empty) || !description;
+    if (empty) empty.textContent = tr(description || ({
+      connection:'连接 OpenAI 后即可生成摘要。',
+      'history-retry':'网页暂未提供更早的消息。',
+      local:'暂无可用的摘要。',
+      error:'摘要暂未生成。',
+    }[state] || '正在整理对话摘要…'));
   }
 
   async function tdZoomLoadTopics(scene, retry = false) {
@@ -12118,7 +12075,8 @@ function tdNavScrollRoot(target) {
         if (!scene.history.attempted && !scene.history.running) {
           void tdZoomRecoverHistory(scene).catch(()=>tdZoomHistoryStalled(scene));
         }
-        return;
+        // 优先补齐网页历史。只有宿主确实没交出更多正文时才生成已读部分。
+        if (!scene.complete && !scene.history.exhausted) return;
       }
       if (tdZoomReplyRunning()) {
         tdZoomTopicControls(scene,'working','回复完成后更新摘要');
@@ -12168,10 +12126,19 @@ function tdNavScrollRoot(target) {
     const list = tdZoom.list;
     const stream = tdZoom.stream;
     const fragment = document.createDocumentFragment();
+    if (settings.autoTopicSummary !== false && !scene.summaries?.size) {
+      if (!stream.querySelector('.zoom-unprepared')) {
+        const pending = document.createElement('p');
+        pending.className = 'zoom-empty zoom-unprepared';
+        pending.textContent = tr('正在整理对话摘要…');
+        stream.append(pending);
+      }
+      return;
+    }
     if (!scene.records.length) {
       const empty = document.createElement('p');
       empty.className = 'zoom-empty';
-      empty.textContent = '找到的问答与章节会显示在这里。';
+      empty.textContent = tr('找到的问答与章节会显示在这里。');
       fragment.append(empty);
     }
     for (const group of tdZoomDisplayGroups(scene, start, end)) {
@@ -12196,7 +12163,7 @@ function tdNavScrollRoot(target) {
         sources.className = 'zoom-sources';
         const toggle = document.createElement('summary');
         toggle.innerHTML = threadDeckIcon('chevron');
-        toggle.append('原始问答');
+        toggle.append(tr('原始问答'));
         const key = tdZoomEntryId(scene.records[group.start]);
         const expanded = scene.expandedTopics ||= new Set();
         sources.open = expanded.has(key);
@@ -12233,8 +12200,9 @@ function tdNavScrollRoot(target) {
             if (!id) continue;
             const chapters = tdZoomChapters(entry, answer);
             const digest = answers.length === 1 && summary?.answer;
-            const label = digest || (answers.length > 1 ? '原回复 '+(answerIndex+1) : '原回复');
-            exchange.append(tdZoomLine(scene,entry,label,'assistant',id,Boolean(digest)));
+            const label = digest || (settings.autoTopicSummary===false
+              ? tdZoomAnswerText(answer).trim().split(/\n+/u).find(line=>line.trim())?.slice(0,160) : '');
+            if (label) exchange.append(tdZoomLine(scene,entry,label,'assistant',id,Boolean(digest)));
             if (chapters.length) {
               const chapterList = document.createElement('details');
               chapterList.className = 'zoom-chapters';
@@ -12247,7 +12215,7 @@ function tdNavScrollRoot(target) {
               });
               const toggle = document.createElement('summary');
               toggle.innerHTML = threadDeckIcon('chevron');
-              toggle.append('章节');
+              toggle.append(tr('章节'));
               chapterList.append(toggle);
               toggle.addEventListener('click',renderChapters,{once:true});
               function renderChapters() {
@@ -12465,11 +12433,19 @@ function tdNavScrollRoot(target) {
     delete tdZoom.surface.dataset.historyCoverage;
     tdZoom.surface.hidden = false;
     const prepared = tdZoom.preparation;
-    const ready = prepared?.view && tdAlive(prepared.scope) && prepared.records === records &&
+    const sameRoute = prepared && tdAlive(prepared.scope);
+    const ready = sameRoute && prepared.view && prepared.records === records &&
       prepared.revision === tdDomState.revision && (!prepared.view.partial || !scene.complete);
-    if (ready) {
+    const available = sameRoute && (prepared.view || prepared.lastView);
+    if (available) {
       const focus = tdZoomEntryId(records[recordIndex]);
-      tdZoomInstallDigest(scene,prepared.view);
+      const {complete,history:{attempted,exhausted}}=scene;
+      tdZoomInstallDigest(scene,available);
+      if (!ready) {
+        // 更新在途时保留已可读的摘要，新的内容到齐后再整体替换。
+        Object.assign(scene,{complete,digestDraft:records,localCacheRead:false,historyKey:null});
+        Object.assign(scene.history,{attempted,exhausted});
+      }
       const index = Math.max(0,scene.records.findIndex(entry=>tdZoomEntryId(entry)===focus));
       scene.first = tdZoomChunkEdge(scene,Math.max(0,index-18),-1);
       scene.last = tdZoomChunkEdge(scene,Math.min(scene.records.length,index+19),1);
@@ -12508,11 +12484,11 @@ function tdNavScrollRoot(target) {
     window.addEventListener('resize',relayout,resizeOptions);
     window.visualViewport?.addEventListener('resize',relayout,resizeOptions);
     scene.cacheDOMRevision = tdDomState.revision;
-    if (!ready) scene.cacheLookup = tdZoomCachedOverview(scene).then(cached=>{
+    if (!ready) scene.cacheLookup = tdZoomCachedOverview({...scene,records}).then(cached=>{
       scene.warmCacheReady = cached?.state === 'ready';
       return cached;
     });
-    tdZoomTopicControls(scene,ready ? 'ready' : 'checking');
+    tdZoomTopicControls(scene,ready?'ready':available?'working':'checking',available&&!ready?'正在更新摘要…':'');
     return scene;
   }
 
@@ -12726,7 +12702,7 @@ function tdNavScrollRoot(target) {
     if (!tdZoom.button || !tdZoom.surface) return;
     const ready = tdZoomReady();
     tdZoom.button.hidden = !ready;
-    tdZoom.button.title = settings.autoTopicSummary ? '打开概览并使用已配置的 OpenAI 连接生成摘要' : '打开概览';
+    tdZoom.button.title = tr(settings.autoTopicSummary ? '打开概览并使用已配置的 OpenAI 连接生成摘要' : '打开概览');
     if (!ready) {
       if (tdZoom.root || tdZoom.scene) tdZoomReset();
       return;
@@ -12932,6 +12908,10 @@ function tdNavScrollRoot(target) {
         .zoom-button:hover, .zoom-button:focus-visible { background:var(--apr-hover); }
         .semantic-zoom {
           position:fixed; z-index:2147483644; isolation:isolate;
+          --zoom-inset:clamp(14px, 2.4vw, 26px);
+          --zoom-reply-fill:color-mix(in srgb, var(--zoom-background), var(--zoom-ink) 6%);
+          --zoom-summary-fill:color-mix(in srgb, var(--zoom-background), var(--zoom-bubble) 22%);
+          --zoom-line-color:color-mix(in srgb, var(--zoom-ink) 10%, transparent);
           display:grid; grid-template-rows:auto minmax(0,1fr);
           overflow:hidden; color:var(--zoom-ink); color-scheme:var(--zoom-scheme, normal);
           font-family:var(--zoom-font); font-size:var(--zoom-size); line-height:1.5;
@@ -12949,61 +12929,59 @@ function tdNavScrollRoot(target) {
           scroll-padding-block:12px 24px;
         }
         .zoom-stream {
-          display:grid; gap:24px; box-sizing:border-box; width:var(--zoom-column-width); margin-left:var(--zoom-column-left);
-          padding:16px clamp(14px, 2.4vw, 26px) 36px;
+          display:grid; gap:26px; box-sizing:border-box; width:var(--zoom-column-width); margin-left:var(--zoom-column-left);
+          padding:15px var(--zoom-inset) 36px;
           transform-origin:50% var(--zoom-origin-y,50%);
         }
-        .zoom-topic {
-          display:flex; flex-direction:column; align-items:start; gap:9px;
-          border-top:1px solid color-mix(in srgb, var(--zoom-ink) 14%, transparent); padding-top:17px;
-        }
-        .zoom-topic:only-child:not(:has(h3)) { border-top:0; padding-top:0; }
+        .zoom-topic { display:flex; flex-direction:column; align-items:start; gap:10px; }
+        .zoom-topic + .zoom-topic { border-top:1px solid var(--zoom-line-color); padding-top:18px; }
         .zoom-topic h3 {
           margin:0; color:var(--zoom-ink); font-size:1em; line-height:1.35;
           font-weight:650; letter-spacing:-.018em; overflow-wrap:anywhere;
         }
         .zoom-empty { margin:4px 0; color:var(--zoom-muted); font-size:.83em; line-height:1.55; }
-        .zoom-exchange { display:flex; flex-direction:column; width:100%; align-items:start; gap:7px; }
-        .zoom-exchange + .zoom-exchange { margin-top:8px; }
-        .zoom-line {
-          display:block; border:0; text-align:left; width:fit-content; max-width:88%;
-          font-size:.87em; line-height:1.5; overflow-wrap:anywhere; cursor:pointer;
-          transform-origin:left center;
+        .zoom-exchange { display:flex; flex-direction:column; width:100%; align-items:start; gap:8px; }
+        .zoom-exchange + .zoom-exchange { margin-top:7px; }
+        .zoom-line, .zoom-turn-summary, .zoom-topic[data-merged] > .zoom-summary {
+          box-sizing:border-box; display:block; width:fit-content; max-width:88%; margin:0;
+          padding:.52em .88em; border:0; border-radius:var(--zoom-radius);
+          text-align:start; font-size:.9em; line-height:1.48; overflow-wrap:anywhere;
         }
-        .zoom-line[data-role="user"] {
-          align-self:end; padding:.45em .9em; background:var(--zoom-bubble);
+        .zoom-line { cursor:pointer; transform-origin:left center; }
+        .zoom-line[data-role="user"], .zoom-topic[data-merged] > h3 {
+          align-self:end; padding:.48em .88em; background:var(--zoom-bubble);
           color:var(--zoom-bubble-ink); border-radius:var(--zoom-radius); font-family:var(--zoom-bubble-font);
           transform-origin:right center;
         }
-        .zoom-line[data-role="assistant"] {
-          max-width:100%; padding:.3em 0; color:var(--zoom-ink); background:transparent;
+        .zoom-topic[data-merged] > h3 { max-width:88%; font-size:.9em; font-weight:550; }
+        .zoom-line[data-role="assistant"], .zoom-turn-summary, .zoom-topic[data-merged] > .zoom-summary {
+          align-self:start; background:var(--zoom-reply-fill); color:var(--zoom-ink);
         }
         .zoom-line-label { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; white-space:pre-line; }
         .zoom-line[data-role="assistant"]:not([data-digest]) { color:var(--zoom-muted); font-size:.76em; }
         .zoom-line[data-role="assistant"] .zoom-line-label { -webkit-line-clamp:4; }
         .zoom-line[data-digest="true"] .zoom-line-label { display:block; overflow:visible; }
-        .zoom-turn-summary { margin:0; color:var(--zoom-ink); font-size:.87em; line-height:1.55; overflow-wrap:anywhere; }
-        .zoom-line:focus-visible { outline:2px solid var(--zoom-muted); outline-offset:3px; }
-        .zoom-line:hover { text-decoration:underline; text-underline-offset:.22em; }
-        .zoom-summary { margin:0 0 6px; color:var(--zoom-muted); font-size:.82em; line-height:1.55; overflow-wrap:anywhere; }
-        .zoom-topic[data-merged] .zoom-summary { color:var(--zoom-ink); font-size:.9em; margin:0; }
+        .zoom-line:hover { text-decoration:underline; text-underline-offset:.2em; }
+        .zoom-summary { margin:0 0 3px; color:var(--zoom-muted); font-size:.84em; line-height:1.52; overflow-wrap:anywhere; }
         .zoom-sources { width:100%; min-width:0; color:var(--zoom-muted); font-size:.8em; }
         .zoom-source-turns { font-size:1.25em; margin-top:8px; }
         .zoom-conversation-summary {
-          box-sizing:border-box;width:var(--zoom-column-width);margin:0 0 0 var(--zoom-column-left);
-          padding:11px clamp(12px,2.4vw,24px) 12px;font-size:.84em;line-height:1.55;
-          max-height:9em;overflow:auto;scrollbar-width:thin;overflow-wrap:anywhere;
-          color:var(--zoom-ink);background:var(--zoom-background);
+          box-sizing:border-box;width:calc(var(--zoom-column-width) - 2 * var(--zoom-inset));
+          margin:12px 0 9px calc(var(--zoom-column-left) + var(--zoom-inset));
+          padding:13px clamp(12px,2.4vw,19px);border-radius:15px;border:1px solid var(--zoom-line-color);
+          font-size:1.04em;font-weight:550;line-height:1.56;letter-spacing:-.01em;
+          max-height:min(9em, 30vh);overflow:auto;scrollbar-width:thin;overflow-wrap:anywhere;
+          color:var(--zoom-ink);background:var(--zoom-summary-fill);
         }
         .zoom-conversation-summary[hidden], .zoom-topic-index[hidden] { display:none; }
         .zoom-topic-index{
           box-sizing:border-box;width:var(--zoom-column-width);margin-left:var(--zoom-column-left);
-          display:flex;gap:7px;overflow-x:auto;scrollbar-width:thin;padding:0 clamp(12px,2.4vw,24px) 7px;
+          display:flex;gap:7px;overflow-x:auto;scrollbar-width:thin;padding:1px var(--zoom-inset) 8px;
           background:var(--zoom-background);
         }
         .zoom-topic-index button{
           appearance:none;flex:0 0 auto;max-width:min(260px,75%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-          min-height:26px;border:0;border-radius:6px;padding:4px 8px;font:inherit;font-size:.75em;line-height:1.35;
+          min-height:27px;border:0;border-radius:99px;padding:4px 10px;font:inherit;font-size:.75em;line-height:1.35;
           color:var(--zoom-ink);background:color-mix(in srgb,var(--zoom-ink) 7%,transparent);cursor:pointer;
         }
         .zoom-topic-index button:hover{background:color-mix(in srgb,var(--zoom-ink) 13%,transparent)}
@@ -13020,7 +12998,7 @@ function tdNavScrollRoot(target) {
         .semantic-zoom:not([data-settled="true"]) .zoom-conversation-summary,
         .semantic-zoom:not([data-settled="true"]) .zoom-topic-index { visibility:hidden; }
         .zoom-context, .zoom-controls { display:flex; min-width:0; align-items:center; gap:9px; }
-        .zoom-context strong { font-size:.83em; white-space:nowrap; }
+        .zoom-context strong { font-size:.86em; font-weight:650; white-space:nowrap; }
         .zoom-coverage { color:var(--zoom-muted); font-size:.72em; white-space:nowrap; }
         .zoom-return, .zoom-ai {
           flex:none; min-height:30px; padding:4px 9px; border:0; border-radius:8px;
@@ -13033,7 +13011,7 @@ function tdNavScrollRoot(target) {
           color:var(--zoom-muted); font-size:.73em; line-height:1.25; max-width:32ch;
           overflow-wrap:anywhere;
         }
-        .zoom-chapters { width:100%; padding-left:5px; margin-bottom:4px; color:var(--zoom-muted); font-size:.76em; }
+        .zoom-chapters { width:100%; padding-inline-start:5px; color:var(--zoom-muted); font-size:.76em; }
         .zoom-chapters summary, .zoom-sources summary {
           display:flex; align-items:center; gap:3px; width:fit-content; min-height:26px;
           padding:2px 6px 2px 2px; border-radius:6px; cursor:pointer; list-style:none;
@@ -13925,6 +13903,7 @@ function tdNavScrollRoot(target) {
     navigatorEl = shadowRoot.querySelector('.navigator');
     railEl = shadowRoot.querySelector('.compact-rail');
     listEl = shadowRoot.querySelector('.preview-list');
+    globalThis.DiaoLocale?.apply(shadowRoot);
     toastEl = shadowRoot.querySelector('.toast');
     settingsLayerEl = shadowRoot.querySelector('.settings-layer');
     settingsFormEl = shadowRoot.querySelector('.settings-dialog');
@@ -13970,6 +13949,10 @@ function tdNavScrollRoot(target) {
       if (action === 'open-topics' || action === 'close-topics') {
         event.preventDefault(); event.stopPropagation();
         if (action === 'open-topics' && !tdZoomOpen()) {
+          if (activeCommentMode) {
+            closeInlineCommentPopover({discardEmptyNew:true});
+            saveWorkflowState();
+          }
           const scene = tdZoomShow(innerHeight*.42, true);
           if (scene) tdZoomAnimate(scene, 1);
         } else tdZoomClose();
@@ -14531,7 +14514,7 @@ function tdNavScrollRoot(target) {
     const capture = tdHistory.capture;
     const history = capture && tdAlive(capture.scope) ? capture.history : null;
     coverage.hidden = !entries.length || tdHealth.snapshot?.complete === true || history?.complete === true;
-    coverage.querySelector('span').textContent = history?.running ? '正在补齐更早消息…' : '已载入的消息';
+    coverage.querySelector('span').textContent = tr(history?.running ? '正在补齐更早消息…' : '已载入的消息');
     const button = coverage.querySelector('button');
     button.hidden = site.id !== 'chatgpt';
     button.disabled = Boolean(history?.running);
@@ -14677,7 +14660,7 @@ function tdNavScrollRoot(target) {
           }
           const answerText = document.createElement('span');
           answerText.className = 'answer-text';
-          answerText.textContent = block.label || block.text || `回答章节 ${blockIndex + 1}`;
+          answerText.textContent = block.label || block.text || tr('回答章节 {0}',blockIndex+1);
           const marker = document.createElement('span');
           marker.className = 'td-marker'; marker.textContent = block.marker || '';
           marker.setAttribute('aria-hidden', 'true');
@@ -14696,12 +14679,12 @@ function tdNavScrollRoot(target) {
     tdHistory.ignoreScrollUntil = Date.now() + 160;
     tdReconcileOutlineChildren(railEl, railFragment, 'data-entry-key');
     tdReconcileOutlineChildren(listEl, listFragment, 'data-prompt-key');
-    if (!listEl.childElementCount && searchTerm) { const empty = document.createElement('div'); empty.className = 'empty-outline'; empty.textContent = '没有匹配内容'; listEl.appendChild(empty); }
+    if (!listEl.childElementCount && searchTerm) { const empty = document.createElement('div'); empty.className = 'empty-outline'; empty.textContent = tr('没有匹配内容'); listEl.appendChild(empty); }
     listEl.scrollTop = savedScroll;
     tdHistory.lastScroll = listEl.scrollTop;
     const hasAutomationRuns = entries.some(isAutomationTimelineEntry);
     const title = shadowRoot.querySelector('.panel-title');
-    if (title) title.textContent = hasAutomationRuns ? '会话时间线' : '对话大纲';
+    if (title) title.textContent = tr(hasAutomationRuns ? '会话时间线' : '对话大纲');
     const previewPanel = shadowRoot.querySelector('.preview-panel');
     const navigator = shadowRoot.querySelector('.navigator');
     const navigationLabel = hasAutomationRuns ? '会话时间线' : '对话大纲';
@@ -14922,7 +14905,7 @@ function tdNavScrollRoot(target) {
 
   function showToast(message, duration = 0) {
     ensureUi();
-    toastEl.textContent = message;
+    toastEl.textContent = tr(message);
     toastEl.dataset.visible = 'true';
     window.clearTimeout(toastTimer);
     if (duration > 0) {
@@ -15390,6 +15373,21 @@ function tdNavScrollRoot(target) {
       if (document.documentElement) done();
     });
   }
+
+  function retirePreviousContext() {
+    if (chrome.runtime?.id) return;
+    document.removeEventListener(retireEvent,retirePreviousContext);
+    destroyed = true;
+    pilotActive = false;
+    settings.enabled = false;
+    window.clearInterval(routeTimer);
+    tdNavCancel('extension-updated');
+    tdZoomFinish();
+    td.controller.abort();
+    navHost?.remove();
+    restoreNativeChatGptRail();
+  }
+  document.addEventListener(retireEvent,retirePreviousContext);
 
   async function initialize() {
     tdInstallSelectionGesture();

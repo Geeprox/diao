@@ -16,12 +16,12 @@ if store_id is not None and not re.fullmatch(r'[a-p]{32}', store_id):
     parser.error('商店扩展 ID 须由 32 个 a 至 p 的小写字母组成。')
 
 info = {
-    'CFBundleExecutable': 'TabPilotBridge',
-    'CFBundleIdentifier': 'app.tabcadence.bridge' if store_id else 'app.tabpilot.bridge',
+    'CFBundleExecutable': 'DiaoBridge' if store_id else 'TabPilotBridge',
+    'CFBundleIdentifier': 'app.diao.bridge' if store_id else 'app.tabpilot.bridge',
     'CFBundleName': 'Diao Bridge',
     'CFBundleDisplayName': 'Diao Bridge',
     'CFBundlePackageType': 'APPL',
-    'CFBundleShortVersionString': '0.7.0',
+    'CFBundleShortVersionString': '0.7.2',
     'CFBundleVersion': os.environ.get('TABPILOT_BUILD_NUMBER', '8'),
     'LSMinimumSystemVersion': '27.2',
     'NSPrincipalClass': 'NSApplication',

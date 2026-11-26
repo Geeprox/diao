@@ -32,17 +32,19 @@ def main():
     manifest['version'] = version
     output = args.output_dir or ROOT / 'releases' / f'Diao-{version}'
     files = {
-        'manifest.json', 'sidepanel.html', 'panel.mjs', 'worker.mjs', 'sensor.js',
+        'manifest.json', 'locale.js', 'sidepanel.html', 'panel.mjs', 'worker.mjs', 'sensor.js',
         'watch-prompt.js', 'thread-history.js', 'threaddeck.js', 'ui.css', 'THIRD_PARTY_LICENSES.txt',
         *manifest['icons'].values(), *manifest['action']['default_icon'].values(),
+        *(f'_locales/{locale.name}/messages.json' for locale in (SOURCE / '_locales').iterdir()
+          if not locale.is_symlink() and locale.is_dir() and re.fullmatch(r'[a-z]{2}(?:_[A-Z]{2})?', locale.name)),
         *(str(p.relative_to(SOURCE)) for p in (SOURCE / 'core').glob('*.mjs')),
     }
     payload = {}
     for name in sorted(files):
         path = SOURCE / name
-        if path.is_symlink() or not path.is_file() or path.resolve().parent not in (
-            SOURCE, SOURCE / 'core', SOURCE / 'icons',
-        ):
+        trusted_folders = (SOURCE, SOURCE / 'core', SOURCE / 'icons')
+        is_locale = path.resolve().parent.parent == SOURCE / '_locales' and path.name == 'messages.json'
+        if path.is_symlink() or not path.is_file() or not (path.resolve().parent in trusted_folders or is_locale):
             raise SystemExit(f'发现非预期路径，未打包：{name}')
         data = (json.dumps(manifest, ensure_ascii=False, indent=2) + '\n').encode() if name == 'manifest.json' else path.read_bytes()
         if SECRET.search(data):

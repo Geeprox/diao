@@ -2,7 +2,7 @@ const option = 'autoGroupLinks';
 const ownership = 'linkGroups';
 const color = 'purple';
 const noGroup = -1;
-const idleTitle = '闲置标签';
+const idleTitles = ['闲置标签', 'Idle tabs'];
 
 function page(tab) {
   try {
@@ -33,11 +33,18 @@ export function createLinkGroups(chrome) {
     const candidate = pending.get(id);
     if (!candidate) return;
     const tab = await getTab(id);
-    if (!tab || Date.now() - candidate.createdAt > 15000 || tab.openerTabId !== candidate.openerTabId || tab.windowId !== candidate.windowId ||
+    if (!tab || Date.now() - candidate.createdAt > 15000 || tab.windowId !== candidate.windowId ||
         tab.groupId !== noGroup || tab.pinned || tab.incognito) {
       pending.delete(id);
       return;
     }
+    // Chrome 可能在 onCreated 之后才补发来源。等待真实 opener，独立标签保持原位。
+    if (!Number.isInteger(tab.openerTabId)) return;
+    if (tab.openerTabId === id || candidate.openerTabId != null && tab.openerTabId !== candidate.openerTabId) {
+      pending.delete(id);
+      return;
+    }
+    candidate.openerTabId = tab.openerTabId;
     if (!page(tab)) {
       // 新开标签的 URL 可能下一次才到。只保留临时空页，不把后续独立导航当作来源链接。
       const url = tab.pendingUrl || tab.url;
@@ -53,7 +60,7 @@ export function createLinkGroups(chrome) {
     if (window?.type !== 'normal' || window.incognito) return;
     if (source.groupId >= 0) {
       const group = await chrome.tabGroups.get(source.groupId).catch(()=>null);
-      if (group && !group.collapsed && group.title !== idleTitle && group.windowId === tab.windowId)
+      if (group && !group.collapsed && !idleTitles.includes(group.title) && group.windowId === tab.windowId)
         await chrome.tabs.group({groupId:group.id,tabIds:[id]});
       return;
     }
@@ -68,10 +75,13 @@ export function createLinkGroups(chrome) {
   }
 
   async function created(tab) {
-    if (!Number.isInteger(tab.id) || !Number.isInteger(tab.openerTabId) || tab.incognito ||
-        tab.pinned || tab.openerTabId === tab.id || !(await enabled())) return;
+    if (!Number.isInteger(tab.id) || tab.incognito || tab.pinned || tab.openerTabId === tab.id || !(await enabled())) return;
+    const now = Date.now();
+    for (const [id,entry] of pending) {
+      if (now-entry.createdAt>15000) pending.delete(id);
+    }
     // 事件顺序可能重叠；浏览器的实时分组与窗口再次核对后才写入。
-    pending.set(tab.id,{openerTabId:tab.openerTabId,windowId:tab.windowId,background:!tab.active,createdAt:Date.now()});
+    pending.set(tab.id,{openerTabId:tab.openerTabId,windowId:tab.windowId,background:!tab.active,createdAt:now});
     await groupLink(tab.id);
   }
 

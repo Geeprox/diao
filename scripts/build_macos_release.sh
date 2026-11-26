@@ -31,7 +31,7 @@ path = Path(os.environ["TABCADENCE_BUILD_ROOT"])
 }))
 PY
 app="$work/disk/Diao Bridge.app"
-binary="$app/Contents/MacOS/TabPilotBridge"
+binary="$app/Contents/MacOS/DiaoBridge"
 mkdir -p "$app/Contents/MacOS" "$work/module-cache"
 cd "$root"
 iconset="$work/Diao.iconset"

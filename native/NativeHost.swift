@@ -10,6 +10,20 @@ func elementRect(_ e:AXUIElement)->CGRect? {
     guard AXValueGetValue(unsafeBitCast(p,to:AXValue.self),.cgPoint,&point),AXValueGetValue(unsafeBitCast(s,to:AXValue.self),.cgSize,&size) else{return nil}
     return CGRect(origin:point,size:size)
 }
+private let usesChinese = Locale.preferredLanguages.first?.lowercased().hasPrefix("zh") == true
+
+private func nativeCopy(_ chinese: String, _ english: String) -> String {
+    usesChinese ? chinese : english
+}
+
+// 用户从设置明确发起时，由实际运行的助手向系统请求自己的权限。
+@discardableResult
+private func requestBridgeAccessibility() -> Bool {
+    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    if AXIsProcessTrustedWithOptions(options) { return true }
+    return NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+}
+
 final class BrowserGeometry {
     var heldWindow:AXUIElement?
     func reset(){heldWindow=nil}
@@ -168,13 +182,13 @@ final class OverlayView:NSView {
     private var lastPaintedSecond: Int?
     private lazy var keepButton: OverlayKeepButton = {
         let button = OverlayKeepButton(frame: .zero)
-        button.title = "保留"
+        button.title = nativeCopy("保留", "Keep")
         button.target = self
         button.action = #selector(keep)
         button.font = .systemFont(ofSize: 11.5, weight: .medium)
         button.isBordered = false
-        button.toolTip = "保留此页，取消本次关闭"
-        button.setAccessibilityLabel("保留此页，取消本次关闭")
+        button.toolTip = nativeCopy("保留此页，取消本次关闭", "Keep this tab open")
+        button.setAccessibilityLabel(nativeCopy("保留此页，取消本次关闭", "Keep this tab open"))
         button.isHidden = true
         return button
     }()
@@ -191,7 +205,7 @@ final class OverlayView:NSView {
         let ink = palette.ink
         guard keepButton.contentTintColor != ink else { return }
         keepButton.setTint(ink)
-        keepButton.attributedTitle = NSAttributedString(string: "保留", attributes: [
+        keepButton.attributedTitle = NSAttributedString(string: nativeCopy("保留", "Keep"), attributes: [
             .font: NSFont.systemFont(ofSize: 11.5, weight: .medium), .foregroundColor: ink,
         ])
     }
@@ -208,7 +222,7 @@ final class OverlayView:NSView {
         super.init(frame: frame)
         addSubview(keepButton)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("可以继续了")
+        setAccessibilityLabel(nativeCopy("可以继续了", "Ready"))
     }
 
     required init?(coder: NSCoder) { nil }
@@ -261,7 +275,7 @@ final class OverlayView:NSView {
         updatePalette()
         if kind != oldKind {
             keepButton.isHidden = kind != "countdown"
-            setAccessibilityLabel(kind == "countdown" ? "关闭提醒，悬停暂停，点击保留取消关闭" : "可以继续了")
+            setAccessibilityLabel(kind == "countdown" ? nativeCopy("关闭提醒，悬停暂停，点击保留取消关闭", "Tab close countdown. Hover to pause or select Keep.") : nativeCopy("可以继续了", "Ready"))
         }
         needsDisplay = true
     }
@@ -310,11 +324,11 @@ final class OverlayView:NSView {
         if kind=="countdown" {
             let divider=NSBezierPath();divider.move(to:NSPoint(x:body.maxX-43,y:body.midY-5));divider.line(to:NSPoint(x:body.maxX-43,y:body.midY+5));divider.lineWidth=0.5;ink.withAlphaComponent(0.16).setStroke();divider.stroke()
             let seconds=secondsRemaining
-            let label=paused ? "已暂停 · \(seconds) 秒":"\(seconds) 秒后关闭"
+            let label=paused ? nativeCopy("已暂停 · \(seconds) 秒", "Paused · \(seconds)s"):nativeCopy("\(seconds) 秒后关闭", "Closes in \(seconds)s")
             (label as NSString).draw(in:textRect,withAttributes:[.font:NSFont.monospacedDigitSystemFont(ofSize:11.5,weight:.medium),.foregroundColor:ink,.paragraphStyle:style])
         }else{
             let check=NSBezierPath();check.move(to:NSPoint(x:body.minX+10,y:body.midY));check.line(to:NSPoint(x:body.minX+13.5,y:body.midY+3.5));check.line(to:NSPoint(x:body.minX+20,y:body.midY-4));check.lineWidth=1.5;check.lineCapStyle = .round;check.lineJoinStyle = .round;ink.setStroke();check.stroke()
-            ("可以继续了" as NSString).draw(in:NSRect(x:body.minX+28,y:body.midY-8,width:body.width-34,height:17),withAttributes:[.font:NSFont.systemFont(ofSize:12,weight:.medium),.foregroundColor:ink,.paragraphStyle:style])
+            (nativeCopy("可以继续了", "Ready") as NSString).draw(in:NSRect(x:body.minX+28,y:body.midY-8,width:body.width-34,height:17),withAttributes:[.font:NSFont.systemFont(ofSize:12,weight:.medium),.foregroundColor:ink,.paragraphStyle:style])
         }
     }
 }
@@ -484,7 +498,7 @@ final class NativeController:NSObject {
         window.ignoresMouseEvents = true
         window.animationBehavior = .none
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        window.title = "Diao 标签提醒"
+        window.title = nativeCopy("Diao 标签提醒", "Diao tab reminder")
         window.hidesOnDeactivate = false
         let view = OverlayView()
         view.onPardon = { [weak self] in
@@ -529,16 +543,20 @@ final class NativeController:NSObject {
         if type=="mruPreview"{shortcuts.preview(object);return}
         if type=="mruDismiss"{shortcuts.dismiss();return}
         if type=="hide"{stopOverlay(status:"hidden");return}
+        if type == "setup.openAccessibility" {
+            requestBridgeAccessibility()
+            return
+        }
         if type == "hello" {
             let trusted = AXIsProcessTrusted()
             let name = CredentialVault.storeBuild ? "Diao Bridge" : "TabPilotBridge"
-            var capabilities = ["countdown-v1", "visibility-v1"]
+            var capabilities = ["countdown-v1", "visibility-v1", "setup-v1"]
             if updates != nil { capabilities.append("updates-v1") }
             if !CredentialVault.storeBuild || CredentialVault.stableCodeIdentity() {
                 capabilities += ["credentials-v1", "credentials-v2"]
             }
             send(["type":"status","status":trusted ? "ready" : "accessibility_required",
-                  "reason":trusted ? "辅助程序已连接。" : "请在系统隐私设置中授权 \(name)。",
+                  "reason":trusted ? nativeCopy("辅助程序已连接。", "Mac companion connected.") : nativeCopy("请在系统隐私设置中授权 \(name)。", "Allow \(name) in macOS Accessibility settings."),
                   "version":Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "unknown",
                   "release":Bundle.main.object(forInfoDictionaryKey:"DiaoReleaseVersion") as? String ?? "",
                   "capabilities":capabilities])
@@ -573,30 +591,31 @@ final class SetupController: NSObject, NSWindowDelegate {
         var presentation: (title: String, detail: String, action: String, symbol: String) {
             switch self {
             case .install:
-                return ("安装 Diao Bridge", "安装到「应用程序」后会打开助手，并接续现有的 Chrome 连接。",
-                        "安装助手", "arrow.down.circle")
+                return (nativeCopy("安装 Diao Bridge", "Install Diao Bridge"), nativeCopy("安装到「应用程序」后会打开助手，并接续现有的 Chrome 连接。", "Diao Bridge opens after installation and reconnects to Chrome."),
+                        nativeCopy("安装助手", "Install companion"), "arrow.down.circle")
             case .invalid:
-                return ("请重新下载 Mac 助手", "这份助手的安装文件不完整。",
-                        "打开下载页", "arrow.down.circle")
+                return (nativeCopy("请重新下载 Mac 助手", "Download Diao Bridge again"), nativeCopy("这份助手的安装文件不完整。", "This copy of the installer is incomplete."),
+                        nativeCopy("打开下载页", "Open downloads"), "arrow.down.circle")
             case .conflict:
-                return ("Chrome 连接需要处理", "此 Mac 已注册另一份助手。按安装说明处理原有连接后，再回到此窗口。",
-                        "查看安装说明", "link")
+                return (nativeCopy("Chrome 连接需要处理", "Chrome connection needs attention"), nativeCopy("此 Mac 已注册另一份助手。按安装说明处理原有连接后，再回到此窗口。", "This Mac has another companion registered. Follow the setup guide to resolve the connection."),
+                        nativeCopy("查看安装说明", "Open setup guide"), "link")
             case .failure:
-                return ("暂时无法准备助手", "Chrome 的助手连接未能保存。请检查此 Mac 的本地设置后重试。",
-                        "重试", "arrow.clockwise")
+                return (nativeCopy("暂时无法准备助手", "Unable to connect to Chrome"), nativeCopy("Chrome 的助手连接未能保存。请检查此 Mac 的本地设置后重试。", "Check that Chrome is installed and try again."),
+                        nativeCopy("重试", "Try again"), "arrow.clockwise")
             case .authorize:
                 let name = CredentialVault.storeBuild ? "Diao Bridge" : "Tab Pilot Bridge"
-                return ("允许辅助功能访问", "在辅助功能列表中开启 \(name)。如果列表中没有，从「应用程序」添加。",
-                        "打开辅助功能设置", "hand.raised")
+                return (nativeCopy("允许辅助功能访问", "Allow Accessibility access"), nativeCopy("在辅助功能列表中开启 \(name)。如果列表中没有，从「应用程序」添加。", "Turn on \(name) under Accessibility. If it is missing, add it from Applications."),
+                        nativeCopy("打开辅助功能设置", "Open Accessibility Settings"), "hand.raised")
             case .ready:
-                return ("Mac 助手已就绪", "在 Diao 的 macOS 设置中开启标签提醒或最近使用切换。",
-                        "返回 Chrome", "checkmark.circle")
+                return (nativeCopy("Mac 助手已就绪", "Diao Bridge is ready"), nativeCopy("在 Diao 的 macOS 设置中开启标签提醒或最近使用切换。", "Turn on tab reminders or recent tab switching in Diao’s macOS settings."),
+                        nativeCopy("返回 Chrome", "Return to Chrome"), "checkmark.circle")
             }
         }
     }
 
     private var step: Step?
     private var window: NSWindow?
+    private var accessibilityProbe: Timer?
     private let heading = NSTextField(labelWithString: "")
     private let detail = NSTextField(wrappingLabelWithString: "")
     private let symbol = NSImageView()
@@ -666,7 +685,10 @@ final class SetupController: NSObject, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) { refresh() }
-    func windowWillClose(_ notification: Notification) { NSApp.terminate(nil) }
+    func windowWillClose(_ notification: Notification) {
+        accessibilityProbe?.invalidate()
+        NSApp.terminate(nil)
+    }
 
     private func currentStep() -> Step {
         if CredentialVault.storeBuild {
@@ -683,6 +705,13 @@ final class SetupController: NSObject, NSWindowDelegate {
         let next = currentStep()
         guard step != next else { return }
         step = next
+        accessibilityProbe?.invalidate()
+        accessibilityProbe = nil
+        if next == .authorize {
+            accessibilityProbe = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+                if AXIsProcessTrusted() { self?.refresh() }
+            }
+        }
         let presentation = next.presentation
         heading.stringValue = presentation.title
         detail.stringValue = presentation.detail
@@ -713,7 +742,7 @@ final class SetupController: NSObject, NSWindowDelegate {
         switch step {
         case .install:
             action.isEnabled = false
-            action.title = "正在安装…"
+            action.title = nativeCopy("正在安装…", "Installing…")
             do {
                 let destination = try StoreSetup.install()
                 let configuration = NSWorkspace.OpenConfiguration()
@@ -722,16 +751,16 @@ final class SetupController: NSObject, NSWindowDelegate {
                     DispatchQueue.main.async {
                         if error == nil { NSApp.terminate(nil) }
                         else {
-                            self?.detail.stringValue = "已安装。请从「应用程序」打开 Diao Bridge。"
-                            self?.action.title = "打开应用程序"
+                            self?.detail.stringValue = nativeCopy("已安装。请从「应用程序」打开 Diao Bridge。", "Installed. Open Diao Bridge from Applications.")
+                            self?.action.title = nativeCopy("打开应用程序", "Open Applications")
                             self?.action.action = #selector(SetupController.showApplications)
                             self?.action.isEnabled = true
                         }
                     }
                 }
             } catch {
-                detail.stringValue = "未能写入「应用程序」。请打开该文件夹核对权限，再重试。"
-                action.title = "重试安装"
+                detail.stringValue = nativeCopy("未能写入「应用程序」。请打开该文件夹核对权限，再重试。", "Diao Bridge could not install in Applications. Check folder permissions and try again.")
+                action.title = nativeCopy("重试安装", "Try installing again")
                 action.isEnabled = true
             }
         case .invalid:
@@ -741,15 +770,14 @@ final class SetupController: NSObject, NSWindowDelegate {
         case .failure:
             refresh()
         case .authorize:
-            let settings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-            if !NSWorkspace.shared.open(settings) {
-                detail.stringValue = "在系统设置的「隐私与安全性 → 辅助功能」中开启此助手。"
+            if !requestBridgeAccessibility() {
+                detail.stringValue = nativeCopy("在系统设置的「隐私与安全性 → 辅助功能」中开启此助手。", "Allow Diao Bridge under System Settings → Privacy & Security → Accessibility.")
             }
         case .ready:
             if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
                 NSWorkspace.shared.open(chrome)
             } else {
-                detail.stringValue = "安装 Chrome 和 Diao 后，即可在扩展设置中开启 Mac 功能。"
+                detail.stringValue = nativeCopy("安装 Chrome 和 Diao 后，即可在扩展设置中开启 Mac 功能。", "Install Chrome and Diao, then turn on Mac features in the extension.")
             }
         }
     }
@@ -763,6 +791,7 @@ final class SetupController: NSObject, NSWindowDelegate {
             try coverageSelfTest()
             try shortcutSelfTest()
             try credentialSelfTest()
+            try StoreSetup.migrationSelfTest()
             try OverlayView(frame: NSRect(x: 0, y: 0, width: 148, height: 26)).verifyNativeControl()
             try verifySwitcherPresentation()
             print("Mapping, visibility, shortcuts, native controls, layout, and credential checks passed.")

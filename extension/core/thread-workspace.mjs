@@ -5,7 +5,7 @@ const id='tabpilot-thread-workspace';
 const historyId='tabcadence-thread-history';
 const scripts=[
  {id:historyId,matches:[match],js:['thread-history.js'],allFrames:false,runAt:'document_start',world:'MAIN',persistAcrossSessions:true},
- {id,matches:[match],js:['threaddeck.js'],allFrames:false,runAt:'document_idle',world:'ISOLATED',persistAcrossSessions:true},
+ {id,matches:[match],js:['locale.js','threaddeck.js'],allFrames:false,runAt:'document_idle',world:'ISOLATED',persistAcrossSessions:true},
 ];
 const flag='threadWorkspaceEnabled',prefs='threadWorkspacePreferences',cache='threadWorkspaceCache';
 const settingsKey='prompt-rail:settings';
@@ -21,7 +21,10 @@ function bounded(map,key,value,limit){
 export function createThreadWorkspace(chrome, handleTopics){
  const {local,session}=chrome.storage;
  const grants=()=>chrome.permissions.contains({origins:[match]});
- const status=async()=>({enabled:(await local.get(flag))[flag]===true&&await grants()});
+ const status=async()=>{
+  const stored=await local.get([flag,prefs]);
+  return {enabled:stored[flag]===true&&await grants(),prepareTopics:stored[prefs]?.prepareTopicSummary===true};
+ };
  const registered=()=>chrome.scripting.getRegisteredContentScripts({ids:[historyId,id]});
  async function register(){
   const current=new Set((await registered()).map(script=>script.id));
@@ -40,7 +43,7 @@ export function createThreadWorkspace(chrome, handleTopics){
    if(enabled)await chrome.scripting.executeScript({target:{tabId:t.id},files:['thread-history.js'],world:'MAIN'});
    const ping=()=>chrome.tabs.sendMessage(t.id,{type:'THREAD_PILOT_SWITCH',enabled},{frameId:0});
    try{await ping();return;}catch{if(!enabled)return;}
-   await chrome.scripting.executeScript({target:{tabId:t.id},files:['threaddeck.js'],world:'ISOLATED'});
+   await chrome.scripting.executeScript({target:{tabId:t.id},files:['locale.js','threaddeck.js'],world:'ISOLATED'});
   }));
   return results.filter(r=>r.status==='rejected').length;
  }
@@ -69,6 +72,15 @@ export function createThreadWorkspace(chrome, handleTopics){
   if(!panel&&!page)throw Error('无权访问对话工作台。');
   if(m.action==='status')return status();
   if(m.action==='setEnabled'&&panel)return setEnabled(m.value);
+  if(m.action==='prepareTopics'&&panel){
+   if(typeof m.value!=='boolean'||!(await status()).enabled)throw Error('先启用 ChatGPT 对话工具。');
+   const current=(await local.get(prefs))[prefs]||{};
+   await local.set({[prefs]:{...current,prepareTopicSummary:m.value,...(m.value&&{autoTopicSummary:true})}});
+   const tabs=await chrome.tabs.query({url:[match]}).catch(()=>[]);
+   void Promise.allSettled(tabs.filter(tab=>!tab.incognito&&!tab.discarded).map(tab=>
+     chrome.tabs.sendMessage(tab.id,{type:'THREAD_PILOT_PREFERENCES'},{frameId:0})));
+   return {prepareTopics:m.value};
+  }
   if(!page||!await grants())throw Error('当前页面未获对话工作台授权。');
   const active=(await local.get(flag))[flag]===true;
   const tabSlot='threadWorkspaceTab:'+sender.tab.id;
@@ -114,9 +126,12 @@ export function createThreadWorkspace(chrome, handleTopics){
   }
   throw Error('无法识别工作台数据操作。');
  }
- async function reconcile(){
+ async function reconcile({refreshExisting=false}={}){
   if(!chrome.scripting?.getRegisteredContentScripts)return;
-  if((await status()).enabled)await register();else await unregister();
+  if((await status()).enabled){
+   await register();
+   if(refreshExisting)await refreshTabs(true);
+  }else await unregister();
  }
  return {handle,status,reconcile,revoke:()=>setEnabled(false),removeTab:tabId=>session.remove('threadWorkspaceTab:'+tabId)};
 }

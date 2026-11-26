@@ -143,7 +143,7 @@ test('only a trusted settings save can remember a key, and forgetting clears per
 
 
 test('usage settings cannot persist a hidden connection draft, and remembering requires explicit consent',async()=>{
- await reset();assert((await send({type:'saveSettings',scope:'usage',settings:{...DEFAULTS,rememberKey:true,endpoint:'https://different.example/v1',cooldownSeconds:180}})).ok);const saved=(await local.get('settings')).settings;assert.equal(saved.endpoint,DEFAULTS.endpoint);assert.equal(saved.rememberKey,false);assert.equal(saved.cooldownSeconds,180);
+ await reset();assert((await send({type:'saveSettings',scope:'usage',settings:{...DEFAULTS,rememberKey:true,endpoint:'https://different.example/v1',cooldownSeconds:180}})).ok);const saved=(await local.get('settings')).settings;assert.equal(saved.endpoint,DEFAULTS.endpoint);assert.equal(saved.rememberKey,false);assert.equal('cooldownSeconds' in saved,false);
  const denied=await send({type:'saveSettings',scope:'connection',settings:{...DEFAULTS,rememberKey:true},apiKey:'synthetic-without-consent'});assert.equal(denied.ok,false);assert.match(denied.error,/保存位置/);assert.equal((await local.get('settings')).settings.rememberKey,false);assert.equal(requests,0);
 });
 
@@ -653,6 +653,45 @@ test('局部回复可复用完整缓存，忽略虚拟列表末尾位置，仍�
   assert.equal(strict.state,'stale');
 });
 
+test('前台虚拟列表卸载旧正文后，新轮次摘要仍保留有身份依据的结论和数字', async () => {
+  await reset();
+  const {topicSnapshot,topicBatchLayout,readTopics,saveTopicBatch} = await import('../extension/core/topics.mjs');
+  const conversation='append-context-fixture',connection={model:'gpt-6-luna'};
+  const makeTurn=(n,answer,revised='7:abcd')=>({
+    id:'question-'+n,question:'试运行问题 '+n,answer,sections:[],
+    navigation:{role:'user',answers:[{id:'answer-'+n,revision:revised,sections:[]}]},
+  });
+  const first=makeTurn(1,'至少 20 人、50 本书。');
+  const previous=await topicSnapshot({conversation,format:'summary-v3',turns:[first]},conversation);
+  await saveTopicBatch(local,previous,connection,previous.batches[0],{
+    summary:'首轮至少 20 人和 50 本，达标后复盘。',topics:[{start:1,end:1,title:'首轮门槛',summary:'至少 20 人和 50 本。'}],
+    turns:[{turn:1,question:'首轮门槛是什么？',answer:'至少 20 人和 50 本。'}],
+  });
+  const value={conversation,format:'summary-v3',partial:true,preparing:true,turns:[makeTurn(1,''),makeTurn(2,'两位志愿者次日 10:30 复盘。')]};
+  const layout=()=>topicBatchLayout(local,conversation,connection);
+  const next=await topicSnapshot(value,conversation,await layout());
+  assert.equal(next.partial,false);
+  assert.equal(next.batches.length,1);
+  assert.match(next.batches[0].evidence[0].earlierOverview,/20 人和 50 本/);
+  assert.equal(next.batches[0].evidence[0].answer,'至少 20 人和 50 本。');
+  assert.equal(next.batches[0].evidence[1].answer,'两位志愿者次日 10:30 复盘。');
+  const revised={...value,turns:[makeTurn(1,'门槛改为 30 人。','7:efgh'),value.turns[1]]};
+  const other=await topicSnapshot(revised,conversation,await layout());
+  assert.equal(other.partial,true);
+  assert.equal(other.batches[0].evidence[0].earlierOverview,undefined);
+  await saveTopicBatch(local,next,connection,next.batches[0],{
+    summary:'首轮至少 20 人和 50 本，达标后两位志愿者次日 10:30 复盘。',
+    topics:[{start:1,end:2,title:'试运行验收',summary:'门槛达标后次日复盘。',merge:true}],
+    turns:[{turn:1,question:'首轮门槛是什么？',answer:'至少 20 人和 50 本。'},
+      {turn:2,question:'何时复盘？',answer:'两位志愿者次日 10:30 复盘。'}],
+  });
+  const reopen=await topicSnapshot(value,conversation,await layout());
+  assert.equal(reopen.batches[0].digest,next.batches[0].digest);
+  const {view}=await readTopics(local,reopen,connection);
+  assert.equal(view.state,'ready');
+  assert.match(view.summary,/20 人和 50 本.*10:30/);
+});
+
 test('部分摘要独立保存范围，确认相同正文完整时复用模型结果', async () => {
   await reset();
   const {topicSnapshot,topicBatchLayout,readTopics,rememberTopicOverview,readLatestTopicOverview,saveTopicBatch} =
@@ -750,6 +789,41 @@ test('跨窗口移动和休眠同一标签会保留监听，唤醒后只接受�
     assert.equal((await read()).state,'resume');
     assert.equal(requests,0);
   } finally {chrome.scripting=original;}
+});
+
+test('扩展更新后原标签自动接续监听，访问失效时保留规则供一次恢复',async()=>{
+  await reset();
+  const original=chrome.scripting,contains=chrome.permissions.contains;
+  let allowed=true,injections=0;
+  const [tab]=tabs;
+  tab.status='complete';
+  chrome.scripting={async executeScript(){
+    injections++;
+    if(!allowed)throw Error('网页访问权限已撤回');
+    return [{documentId:'current-document'}];
+  }};
+  chrome.permissions.contains=async()=>allowed;
+  const read=async()=>(await local.get('records')).records[tab.id];
+  try {
+    const adapter={waiting:'Running',done:'Completed'};
+    assert((await send({type:'watch',tabId:tab.id,adapter})).ok);
+    await chrome.runtime.onInstalled.fire({reason:'update'});
+    assert.equal((await read()).watchDocumentId,'current-document');
+    assert.equal((await read()).state,'waiting');
+    allowed=false;
+    await chrome.runtime.onInstalled.fire({reason:'update'});
+    assert.equal((await read()).watchSuspended,'permission');
+    assert.deepEqual((await read()).watchAdapter,adapter);
+    allowed=true;
+    const status=await send({type:'watchPage',tabId:tab.id,url:tab.url,resume:true});
+    assert.equal(status.data.listening,true);
+    await send({type:'sensor',snapshot:{observed:'done'}},{
+      id:chrome.runtime.id,frameId:0,tab,url:tab.url,documentId:'current-document',
+    });
+    assert.equal((await read()).state,'resume');
+    assert.equal(injections,3);
+    assert.equal(requests,0);
+  }finally{chrome.scripting=original;chrome.permissions.contains=contains;}
 });
 
 test('Chrome 重启只恢复唯一匹配的监听，重复网址无需猜测归属',async()=>{

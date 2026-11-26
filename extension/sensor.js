@@ -58,6 +58,23 @@
     if(signals.length===1)return {kind:'busy',target:targetFor(signals[0])};
     return null;
   }
+  function recoverWatch(rule){
+    if(rule.kind==='busy'){
+      const match=findWatchRule();
+      return match?.kind==='busy' && match.target!==rule.target ? match : null;
+    }
+    if(rule.kind!=='region')return null;
+    // 状态节点被重新挂载时，以原来的可见文字重新定位。多个匹配时继续观察。
+    const root=stateRoot();
+    const matches=new Map();
+    for(const element of root.querySelectorAll('p,span,div,[role=status],[aria-live]')){
+      if(element.childElementCount||normalized(element.textContent||'')!==rule.baseline)continue;
+      const picked=pickRegion(element);
+      if(picked)matches.set(picked.target,picked);
+      if(matches.size>1)return null;
+    }
+    return matches.values().next().value||null;
+  }
   const chatComposer='[data-composer-markdown][contenteditable=true],#prompt-textarea';
   function chatGenerating(){
     const editor=[...document.querySelectorAll(chatComposer)].find(visible);
@@ -119,6 +136,12 @@
     if(!adapter||timer)return;
     timer=setTimeout(()=>{
       timer=null;const state=snapshot(false);
+      const recovered=state.observed==='unknown' && recoverWatch(adapter);
+      if(recovered){
+        adapter=recovered;
+        state.observed='waiting';
+        state.recovered=recovered;
+      }
       if(state.observed==='waiting')seenWaiting=true;
       if(adapter?.kind&&state.observed==='done'&&!seenWaiting)state.observed='unknown';
       if(state.observed==='done'&&adapter?.kind&&!pendingDone){
@@ -127,14 +150,14 @@
         return;
       }
       pendingDone=false;
-      const signature=JSON.stringify([state.observed,state.dirty,state.editable,state.media]);
-      if(signature!==lastSignature){lastSignature=signature;chrome.runtime.sendMessage({type:'sensor',snapshot:state}).catch(()=>{});}
+      const signature=JSON.stringify([state.observed,state.dirty,state.editable,state.media,adapter.target]);
+      if(signature!==lastSignature){lastSignature=signature;chrome.runtime?.sendMessage({type:'sensor',snapshot:state}).catch(()=>{});}
     },2000);
   }
   document.addEventListener('input',()=>{dirty=true;lastInteraction=Date.now();changed();},true);
   for(const event of ['pointerdown','keydown'])document.addEventListener(event,()=>{
     lastInteraction=Date.now();
-    if(lastInteraction-lastSent>=750){lastSent=lastInteraction;chrome.runtime.sendMessage({type:'interact'}).catch(()=>{});}
+    if(lastInteraction-lastSent>=750){lastSent=lastInteraction;chrome.runtime?.sendMessage({type:'interact'}).catch(()=>{});}
   },true);
   const observer=new MutationObserver(()=>{revision++;changed();});
   observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
@@ -145,6 +168,11 @@
     }
     if(message.type==='watchRule')reply({adapter:findWatchRule(message.saved)});
     if(message.type==='snapshot')reply(snapshot());
+    if(message.type==='watchResume'){
+      const rule=message.adapter;
+      const current=observe(rule);
+      reply({adapter:current==='unknown'?(recoverWatch(rule)||rule):rule});
+    }
     if(message.type==='adapter'){
       adapter=message.adapter;pendingDone=false;
       seenWaiting=!!adapter&&(message.wasWaiting===true||observe(adapter)==='waiting');

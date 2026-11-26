@@ -41,9 +41,10 @@ function fixture() {
 
 test('空白窗口载入链接后自动分组，后续链接跟随，最后留下来源时收起空分组',async()=>{
  const {controller,tabs,groups,add}=fixture();
- const root=add(1,{active:true}), one=add(2,{openerTabId:1,url:'about:blank'});
+ const root=add(1,{active:true}), one=add(2,{url:'about:blank'});
  await controller.created(one);
  assert.equal(root.groupId,-1);
+ one.openerTabId=1;
  one.url='https://docs.test/topic';
  await controller.groupLink(one.id);
  assert.equal(root.groupId,one.groupId);

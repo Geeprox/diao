@@ -1,5 +1,5 @@
 export const STATES = ['keep', 'waiting', 'resume', 'close'];
-export const DEFAULTS = Object.freeze({provider:'decisions', endpoint:'https://api.openai.com/v1', model:'gpt-6-luna', cooldownSeconds:120, autoAnalyze:false, rememberKey:false, credentialStorage:'', nativeEnabled:false, switcherEnabled:false, inputPrice:0, outputPrice:0});
+export const DEFAULTS = Object.freeze({provider:'decisions', endpoint:'https://api.openai.com/v1', model:'gpt-6-luna', autoAnalyze:false, rememberKey:false, credentialStorage:'', nativeEnabled:false, switcherEnabled:false});
 export function safeURL(raw) {
   try { const u=new URL(raw); return ['http:','https:'].includes(u.protocol) && !u.username && !u.password; } catch { return false; }
 }
@@ -47,7 +47,9 @@ export function boundedEvidence(tab, snapshot) {
 export async function fingerprint(evidence) {const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(evidence)));return [...new Uint8Array(bytes)].map(x=>x.toString(16).padStart(2,'0')).join('');}
 export function dayKey(now=Date.now()) { return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(now); }
 export function reserve(ledger, settings, input, now=Date.now()) {
-  const date=dayKey(now);const current=ledger?.date===date?ledger:{date,requests:0,tokens:0,cost:0};
+  const date=dayKey(now);
+  const {requests=0,tokens=0}=ledger?.date===date?ledger:{};
+  const current={date,requests,tokens};
   const tokenReserve=new TextEncoder().encode(JSON.stringify(input)).length+2048;
   return {ledger:{...current,requests:current.requests+1,tokens:current.tokens+tokenReserve},reserved:tokenReserve};
 }
@@ -55,5 +57,5 @@ export function settle(ledger, reserved, usage, settings) {
   const incoming=usage?.input_tokens??usage?.prompt_tokens;
   const outgoing=usage?.output_tokens??usage?.completion_tokens;
   if(!Number.isFinite(incoming)||!Number.isFinite(outgoing)||incoming<0||outgoing<0)return ledger;
-  return {...ledger,tokens:ledger.tokens-reserved+incoming+outgoing,cost:ledger.cost+(incoming*settings.inputPrice+outgoing*settings.outputPrice)/1e6};
+  return {...ledger,tokens:ledger.tokens-reserved+incoming+outgoing};
 }

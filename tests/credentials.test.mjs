@@ -56,13 +56,15 @@ test('加密同步在新设备解锁后恢复，换密钥沿用原口令，删�
  const old=await first.save(settings,'synthetic-sync-first',passphrase);
  const sorted = cloud.snapshot()[connectionSyncSlot];
  await cloud.set({[connectionSyncSlot]:{...sorted,settings:{endpoint:settings.endpoint,model:settings.model,provider:settings.provider}}});
- assert.deepEqual(await second.info(),{id:old,settings});
+ assert.deepEqual(await second.info(),{id:old,parentId:'',settings});
  assert(!JSON.stringify(cloud.snapshot()).includes('synthetic-sync-first'));
  assert(!JSON.stringify(cloud.snapshot()).includes(passphrase));
  await assert.rejects(second.load(),{code:'sync_unlock_required'});
  await assert.rejects(second.load({id:old,passphrase:'incorrect sync passphrase'}),/口令不正确/);
  assert.equal((await second.load({id:old,passphrase})).apiKey,'synthetic-sync-first');
- const newer=await first.save(settings,'synthetic-sync-updated','',old);
+ await assert.rejects(first.save(settings,'synthetic-sync-updated','',old),{code:'sync_replace_required'});
+ assert.equal((await second.load()).apiKey,'synthetic-sync-first');
+ const newer=await first.save(settings,'synthetic-sync-updated','',old,{replace:true});
  const restarted=createConnectionSync({storage:cloud,vault:secondVault});
  assert.equal((await restarted.load()).apiKey,'synthetic-sync-updated');
  await assert.rejects(second.remove(old),/已变更/);
@@ -174,7 +176,7 @@ test('同步仅保存密文，新设备经一次通行密钥验证恢复，后�
  assert.deepEqual(record.settings, openAI);
  assert(!JSON.stringify(record).includes(secret));
  assert(!JSON.stringify(record).includes(passkeyKey));
- assert.deepEqual(await target.info(), {id: revision, settings: openAI, passkey});
+ assert.deepEqual(await target.info(), {id: revision, parentId:'',settings: openAI, passkey});
  await assert.rejects(target.load(), {code: 'sync_unlock_required'});
  await assert.rejects(target.load({id: revision, passkeyKey: encodeURL(new Uint8Array(32).fill(1))}), /无法解锁/);
  assert.equal(targetVault.keys.size, 0);
@@ -184,7 +186,7 @@ test('同步仅保存密文，新设备经一次通行密钥验证恢复，后�
  const restarted = createConnectionSync({storage: cloud, vault: targetVault});
  assert.equal((await restarted.load()).apiKey, secret);
  assert.equal(await restarted.save(openAI, secret, '', revision), revision);
- const rotated = await source.save(openAI, 'rotated-test-only-OpenAI-key', '', revision);
+ const rotated = await source.save(openAI, 'rotated-test-only-OpenAI-key', '', revision,{replace:true});
  assert.equal((await restarted.load({id: rotated})).apiKey, 'rotated-test-only-OpenAI-key');
  await assert.rejects(restarted.load({id: revision}), /已变更/);
 

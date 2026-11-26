@@ -1,0 +1,1031 @@
+{
+  "extensionName": {
+    "message": "Diao"
+  },
+  "extensionDescription": {
+    "message": "Automatically group Chrome tabs, track web tasks, and use ChatGPT outlines, annotations, and prompt queues."
+  },
+  "openExtension": {
+    "message": "Open Diao"
+  },
+  "skipToMain": {
+    "message": "Skip to content"
+  },
+  "openSettings": {
+    "message": "Open settings"
+  },
+  "previewNote": {
+    "message": "Interface preview with sample pages"
+  },
+  "tasks": {
+    "message": "Tasks"
+  },
+  "taskCount": {
+    "message": "Task count"
+  },
+  "addTask": {
+    "message": "Add task"
+  },
+  "analyzingPages": {
+    "message": "Checking pages"
+  },
+  "analysisProgress": {
+    "message": "Page analysis progress"
+  },
+  "pause": {
+    "message": "Pause"
+  },
+  "resumeAnalysis": {
+    "message": "Resume analysis"
+  },
+  "restoreConnection": {
+    "message": "Restore connection"
+  },
+  "viewSuggestions": {
+    "message": "View suggestions"
+  },
+  "endRun": {
+    "message": "Stop this run"
+  },
+  "done": {
+    "message": "Done"
+  },
+  "filterTasks": {
+    "message": "Filter tasks"
+  },
+  "allTasks": {
+    "message": "All tasks"
+  },
+  "ready": {
+    "message": "Ready"
+  },
+  "watching": {
+    "message": "Watching"
+  },
+  "cleanup": {
+    "message": "Suggested cleanup"
+  },
+  "searchTasks": {
+    "message": "Search tasks"
+  },
+  "helperFeatures": {
+    "message": "Tab alerts and Control + Tab"
+  },
+  "installHelper": {
+    "message": "Install Mac companion"
+  },
+  "recentlyClosed": {
+    "message": "Recently closed"
+  },
+  "restoreAddress": {
+    "message": "Reopen the address. Unsaved changes cannot be recovered."
+  },
+  "settings": {
+    "message": "Settings"
+  },
+  "backToTasks": {
+    "message": "Back to tasks"
+  },
+  "settingsTabs": {
+    "message": "Settings sections"
+  },
+  "modelConnection": {
+    "message": "AI connection"
+  },
+  "usage": {
+    "message": "API usage"
+  },
+  "tabs": {
+    "message": "Tabs"
+  },
+  "savedConnectionFound": {
+    "message": "Saved connection found"
+  },
+  "pairOrPassword": {
+    "message": "Pairing code or existing passphrase"
+  },
+  "unlockDevice": {
+    "message": "Unlock this device"
+  },
+  "service": {
+    "message": "Service"
+  },
+  "compatibleApi": {
+    "message": "Compatible API"
+  },
+  "protocol": {
+    "message": "Protocol"
+  },
+  "compatibleResponses": {
+    "message": "Compatible Responses"
+  },
+  "apiEndpoint": {
+    "message": "API endpoint"
+  },
+  "model": {
+    "message": "Model"
+  },
+  "modelName": {
+    "message": "Model name"
+  },
+  "manualKey": {
+    "message": "Enter an API key"
+  },
+  "pasteKey": {
+    "message": "Paste API key"
+  },
+  "importEnv": {
+    "message": "Import .env"
+  },
+  "importEnvFile": {
+    "message": "Import an .env file"
+  },
+  "unlockAndRestore": {
+    "message": "Unlock and restore"
+  },
+  "saveTo": {
+    "message": "Save to"
+  },
+  "thisDevice": {
+    "message": "This device"
+  },
+  "chromeSync": {
+    "message": "Chrome Sync"
+  },
+  "keychain": {
+    "message": "Keychain"
+  },
+  "sessionOnly": {
+    "message": "This session"
+  },
+  "saveWithCode": {
+    "message": "Save with a pairing code"
+  },
+  "switchToPasskey": {
+    "message": "Switch to a passkey"
+  },
+  "connectHelper": {
+    "message": "Connect Mac companion"
+  },
+  "onlySaveHere": {
+    "message": "Save on this device only"
+  },
+  "replaceShared": {
+    "message": "Replace shared connection"
+  },
+  "saveConnection": {
+    "message": "Save connection"
+  },
+  "removeKey": {
+    "message": "Remove API key"
+  },
+  "todayUsage": {
+    "message": "Today's usage"
+  },
+  "chatTools": {
+    "message": "ChatGPT tools"
+  },
+  "chatIntroduction": {
+    "message": "Annotate a reply, jump to a section, or queue your next prompt while ChatGPT answers."
+  },
+  "checkingPermission": {
+    "message": "Checking access"
+  },
+  "prepareChatSummary": {
+    "message": "Prepare conversation summaries"
+  },
+  "prepareChatHelp": {
+    "message": "While the conversation is idle, prepare a summary using your OpenAI connection. Zoom out to read it. Updates use new content."
+  },
+  "groupFromSource": {
+    "message": "Group links with their source"
+  },
+  "groupFromSourceHelp": {
+    "message": "Links opened in the background stay with the page you opened them from."
+  },
+  "smartTabs": {
+    "message": "Smart tab organization"
+  },
+  "smartTabsHelp": {
+    "message": "Send titles, short excerpts, and recent activity from authorized pages to your AI provider. Related pages stay together, and finished work moves into Idle tabs."
+  },
+  "groupBySite": {
+    "message": "Group by site"
+  },
+  "downloadHelper": {
+    "message": "Download Mac companion"
+  },
+  "openAccess": {
+    "message": "Open Accessibility settings"
+  },
+  "reconnect": {
+    "message": "Reconnect"
+  },
+  "helperRequirements": {
+    "message": "Requires Apple silicon and macOS 27.2 or later."
+  },
+  "helperReleases": {
+    "message": "Releases and checksums"
+  },
+  "connectedHelper": {
+    "message": "Mac companion connected"
+  },
+  "checkUpdates": {
+    "message": "Check for updates"
+  },
+  "viewReleases": {
+    "message": "View releases"
+  },
+  "macFeatures": {
+    "message": "Mac features"
+  },
+  "recentSwitcher": {
+    "message": "Switch by recent use"
+  },
+  "switchShortcut": {
+    "message": "to switch,"
+  },
+  "reverseShortcut": {
+    "message": "to reverse,"
+  },
+  "cancelShortcut": {
+    "message": "to cancel."
+  },
+  "tabAlerts": {
+    "message": "Tab alerts"
+  },
+  "hideAlert": {
+    "message": "Hide current alert"
+  },
+  "today": {
+    "message": "Today"
+  },
+  "calls": {
+    "message": "calls"
+  },
+  "closeChecking": {
+    "message": "Close page inspection"
+  },
+  "scope": {
+    "message": "Scope"
+  },
+  "allWindows": {
+    "message": "All windows"
+  },
+  "currentWindow": {
+    "message": "Current window"
+  },
+  "watchTask": {
+    "message": "Watch a web task"
+  },
+  "watchInstructions": {
+    "message": "Get notified when the status changes. Page data stays on this device."
+  },
+  "choosePage": {
+    "message": "Choose a page"
+  },
+  "findCleanup": {
+    "message": "Find cleanup suggestions"
+  },
+  "analysisDisclosure": {
+    "message": "Send page titles, URL paths, and short excerpts from the selected sites to"
+  },
+  "connectModel": {
+    "message": "Connect AI provider"
+  },
+  "sitesToCheck": {
+    "message": "Sites to check"
+  },
+  "reviewUpdates": {
+    "message": "Check again when content changes"
+  },
+  "startAnalysis": {
+    "message": "Analyze pages"
+  },
+  "searchOpenPages": {
+    "message": "Search open pages"
+  },
+  "searchTitleOrSite": {
+    "message": "Search title or site"
+  },
+  "noMatchingPages": {
+    "message": "No matching pages."
+  },
+  "watchablePages": {
+    "message": "Pages you can watch"
+  },
+  "backToInspection": {
+    "message": "Back to page inspection"
+  },
+  "beforeAnalysis": {
+    "message": "Review what will be sent"
+  },
+  "closePreview": {
+    "message": "Close the preview"
+  },
+  "sendTo": {
+    "message": "Send to"
+  },
+  "pathAndLength": {
+    "message": ". URL path and up to 1,600 characters of text."
+  },
+  "recheckThisPage": {
+    "message": "Review this page when content changes"
+  },
+  "recheckHelp": {
+    "message": "Updates are checked when this tab is idle. You can stop at any time."
+  },
+  "dataScope": {
+    "message": "Form values stay on this device. Review the title and address before sending the preview."
+  },
+  "sendAndAnalyze": {
+    "message": "Send and analyze"
+  },
+  "cancel": {
+    "message": "Cancel"
+  },
+  "organizeWindow": {
+    "message": "Organize current window"
+  },
+  "closeOrganizePreview": {
+    "message": "Close organization preview"
+  },
+  "groupBySiteHelp": {
+    "message": "Group tabs from the same site. Existing groups and pinned tabs stay in place."
+  },
+  "groupBySiteUndo": {
+    "message": "Groups are created on this device. You can undo until you rearrange the tabs again."
+  },
+  "applyGroups": {
+    "message": "Apply groups"
+  },
+  "pairingCode": {
+    "message": "Device pairing code"
+  },
+  "copy": {
+    "message": "Copy"
+  },
+  "newCode": {
+    "message": "Generate code"
+  },
+  "watch": {
+    "message": "Watch this page"
+  },
+  "stopWatching": {
+    "message": "Stop watching"
+  },
+  "changeWatch": {
+    "message": "Change what to watch"
+  },
+  "chooseStatus": {
+    "message": "Select progress text"
+  },
+  "selectPageState": {
+    "message": "Select a page status"
+  },
+  "selectTaskState": {
+    "message": "Select the task status"
+  },
+  "reuseTaskState": {
+    "message": "Select the status text once. Diao can find it again on this page."
+  },
+  "watchStarted": {
+    "message": "Watching this page."
+  },
+  "closeInThirty": {
+    "message": "Close in 30 seconds, with Keep"
+  },
+  "tabAsleep": {
+    "message": "Tab sleeping"
+  },
+  "watchAccessRequired": {
+    "message": "Website access needed"
+  },
+  "watchAccessRecovery": {
+    "message": "Allow access to this site to resume watching."
+  },
+  "resumeWatching": {
+    "message": "Resume watching"
+  },
+  "openToWatch": {
+    "message": "Open tab to resume watching"
+  },
+  "watchWillResume": {
+    "message": "Watching resumes when you open the tab."
+  },
+  "linkLost": {
+    "message": "Connection interrupted"
+  },
+  "openTabRestore": {
+    "message": "Open this tab to resume watching."
+  },
+  "progressUnavailable": {
+    "message": "Progress not found"
+  },
+  "watchRecoverHelp": {
+    "message": "Diao checks again as the page changes. You can also select the progress text."
+  },
+  "waitingForChat": {
+    "message": "Waiting for ChatGPT to finish this reply."
+  },
+  "waitingForText": {
+    "message": "Waiting for “{0}” to change."
+  },
+  "waitingForFinishText": {
+    "message": "Waiting for the page to show “{0}”."
+  },
+  "watchNotification": {
+    "message": "You’ll be notified when the task finishes."
+  },
+  "taskInProgress": {
+    "message": "In progress"
+  },
+  "keep": {
+    "message": "Keep"
+  },
+  "closing": {
+    "message": "Closing soon"
+  },
+  "paused": {
+    "message": "Paused"
+  },
+  "needsReview": {
+    "message": "Needs review"
+  },
+  "inUse": {
+    "message": "In use"
+  },
+  "unnamedPage": {
+    "message": "Untitled page"
+  },
+  "backToWork": {
+    "message": "Return to task"
+  },
+  "moreActions": {
+    "message": "More actions"
+  },
+  "analyzePage": {
+    "message": "Analyze page"
+  },
+  "noTasks": {
+    "message": "No tasks to act on"
+  },
+  "noReadyTasks": {
+    "message": "Nothing is ready yet"
+  },
+  "noWatchTasks": {
+    "message": "No watched tasks"
+  },
+  "noCleanupSuggestions": {
+    "message": "No suggestions"
+  },
+  "noMatches": {
+    "message": "No matching tasks"
+  },
+  "allTasksAction": {
+    "message": "View all tasks"
+  },
+  "quickStartWatch": {
+    "message": "Right-click a page and choose Watch this page. Diao will let you know when it’s ready."
+  },
+  "callTotals": {
+    "message": "{0} requests today, about {1} tokens."
+  },
+  "profileSaveHelp": {
+    "message": "Restores when Chrome restarts."
+  },
+  "syncSaveHelp": {
+    "message": "One shared connection for this Chrome account. Verify a new device once to restore it."
+  },
+  "keychainSaveHelp": {
+    "message": "Saved to macOS Keychain."
+  },
+  "sessionSaveHelp": {
+    "message": "Available for this Chrome session."
+  },
+  "savedReplace": {
+    "message": "Saved · replace if needed"
+  },
+  "synced": {
+    "message": "Connected · Chrome Sync"
+  },
+  "profileSaved": {
+    "message": "Saved in this Chrome profile."
+  },
+  "savedToKeychain": {
+    "message": "Saved to Keychain."
+  },
+  "sessionConnected": {
+    "message": "Connected for this session."
+  },
+  "removeFromSync": {
+    "message": "Remove from Chrome Sync"
+  },
+  "verifyAndRestore": {
+    "message": "Verify and restore"
+  },
+  "restoring": {
+    "message": "Restoring…"
+  },
+  "checkConnection": {
+    "message": "Checking connection…"
+  },
+  "connectionVerified": {
+    "message": "Connection verified"
+  },
+  "editSharedConnection": {
+    "message": "Chrome already has a shared connection. Save the new key on this device or replace the shared connection."
+  },
+  "existingSharedConnection": {
+    "message": "Another device saved a shared connection. Save this key on this device or replace the shared connection."
+  },
+  "yourKeyKept": {
+    "message": "This device is still using its own key. You can restore the Chrome Sync connection here."
+  },
+  "otherDeviceCode": {
+    "message": "Use on another device"
+  },
+  "pastePairingCode": {
+    "message": "On the other computer, open Diao → AI connection and paste this code once to restore the shared connection."
+  },
+  "purposePairingCode": {
+    "message": "Use a pairing code to restore your saved API key on another computer. New devices verify with this code."
+  },
+  "connecting": {
+    "message": "Connecting…"
+  },
+  "saving": {
+    "message": "Saving…"
+  },
+  "allowAccessibility": {
+    "message": "Allow Accessibility access"
+  },
+  "allowAccessibilityHelp": {
+    "message": "Enable Diao Bridge in System Settings, then return here."
+  },
+  "openInstalledHelper": {
+    "message": "Open Diao Bridge from Applications and try again."
+  },
+  "downloadHelperHelp": {
+    "message": "Download and open the companion to install it."
+  },
+  "helperUnsupported": {
+    "message": "Mac features are unavailable on this device"
+  },
+  "finishHelper": {
+    "message": "Finish Mac companion setup"
+  },
+  "idleTabs": {
+    "message": "Idle tabs"
+  },
+  "enableChat": {
+    "message": "Enable ChatGPT tools"
+  },
+  "disableChat": {
+    "message": "Turn off ChatGPT tools"
+  },
+  "chatActive": {
+    "message": "Ready to use in ChatGPT."
+  },
+  "chatAccessScope": {
+    "message": "Give Diao access to chatgpt.com to use these tools."
+  },
+  "connectForSmart": {
+    "message": "Save an AI connection to enable smart organization."
+  },
+  "allowSmartTabs": {
+    "message": "Allow page access to enable smart organization."
+  },
+  "outline": {
+    "message": "Conversation outline"
+  },
+  "overview": {
+    "message": "Conversation overview"
+  },
+  "outlineSearch": {
+    "message": "Search turns and sections"
+  },
+  "overviewButton": {
+    "message": "Overview"
+  },
+  "openOverview": {
+    "message": "Open overview"
+  },
+  "overviewPreparing": {
+    "message": "Preparing the conversation summary…"
+  },
+  "overviewHistory": {
+    "message": "Reading earlier turns…"
+  },
+  "overviewReading": {
+    "message": "Reading available turns."
+  },
+  "overviewConnection": {
+    "message": "Connect OpenAI to generate a summary."
+  },
+  "originalTurns": {
+    "message": "Original turns"
+  },
+  "sections": {
+    "message": "Sections"
+  },
+  "originalReply": {
+    "message": "Jump to original reply"
+  },
+  "originalPrompt": {
+    "message": "Jump to original prompt"
+  },
+  "completeConversation": {
+    "message": "Complete conversation"
+  },
+  "readTurns": {
+    "message": "Available turns"
+  },
+  "coverageRounds": {
+    "message": "{0} · {1} turns"
+  },
+  "summaryRetry": {
+    "message": "Retry"
+  },
+  "summaryUpdate": {
+    "message": "Summary updates when the reply is complete"
+  },
+  "summaryGenerating": {
+    "message": "Generating the summary…"
+  },
+  "summaryUpdating": {
+    "message": "Updating the summary…"
+  },
+  "summaryReading": {
+    "message": "Loading the summary…"
+  },
+  "summaryPartial": {
+    "message": "Summarizing the available turns…"
+  },
+  "summaryFailure": {
+    "message": "Summary unavailable."
+  },
+  "annotate": {
+    "message": "Annotate"
+  },
+  "addAnnotation": {
+    "message": "Add annotation"
+  },
+  "queue": {
+    "message": "Queue"
+  },
+  "queuedPrompts": {
+    "message": "Prompt queue"
+  },
+  "interject": {
+    "message": "Send now"
+  },
+  "delete": {
+    "message": "Delete"
+  },
+  "more": {
+    "message": "More"
+  },
+  "prepareAhead": {
+    "message": "Prepare in advance"
+  },
+  "generateOnOpen": {
+    "message": "Generate when opened"
+  },
+  "onlyOriginal": {
+    "message": "Original text and saved summaries"
+  },
+  "overviewOpenModel": {
+    "message": "Open overview and summarize with your OpenAI connection"
+  },
+  "overviewNoSummary": {
+    "message": "No summary available yet."
+  },
+  "overviewNoEarlier": {
+    "message": "Earlier messages are unavailable on this page."
+  },
+  "overviewEmpty": {
+    "message": "Questions, answers and sections will appear here."
+  },
+  "overviewClose": {
+    "message": "Return to chat"
+  },
+  "summaryLoadMore": {
+    "message": "Load earlier messages"
+  },
+  "summaryWaitAnswer": {
+    "message": "Waiting for ChatGPT to load the reply"
+  },
+  "summaryEmptyHistory": {
+    "message": "Earlier messages will load when the chat is idle"
+  },
+  "summaryFocusHistory": {
+    "message": "Return to this tab to load earlier messages"
+  },
+  "summaryOutlineOnly": {
+    "message": "Original messages"
+  },
+  "summaryTopics": {
+    "message": "Jump to a topic"
+  },
+  "summaryServiceBackoff": {
+    "message": "OpenAI is rate-limiting requests. Try again shortly."
+  },
+  "summaryConnectionRecover": {
+    "message": "Restore your connection in Model connection."
+  },
+  "outlineClear": {
+    "message": "Clear search"
+  },
+  "outlineHistory": {
+    "message": "Load earlier messages"
+  },
+  "outlineHistoryLoading": {
+    "message": "Loading earlier messages…"
+  },
+  "outlineHistoryLoaded": {
+    "message": "Loaded messages"
+  },
+  "outlineNoMatch": {
+    "message": "No matching messages"
+  },
+  "outlineTimeline": {
+    "message": "Conversation timeline"
+  },
+  "outlineOpening": {
+    "message": "Open outline"
+  },
+  "outlinePin": {
+    "message": "Pin outline"
+  },
+  "outlineUnpin": {
+    "message": "Unpin outline"
+  },
+  "outlineNoMessages": {
+    "message": "No messages to jump to"
+  },
+  "outlineUnavailable": {
+    "message": "No outline available yet"
+  },
+  "outlineRefresh": {
+    "message": "Refresh outline"
+  },
+  "outlineQuestion": {
+    "message": "Question {0}"
+  },
+  "outlineAnswerSection": {
+    "message": "Answer section {0}"
+  },
+  "chatReply": {
+    "message": "Annotations"
+  },
+  "chatQueueMenu": {
+    "message": "Queue actions"
+  },
+  "chatSettings": {
+    "message": "Chat settings"
+  },
+  "chatSettingsClose": {
+    "message": "Close settings"
+  },
+  "chatSettingsSave": {
+    "message": "Save settings"
+  },
+  "chatRestoreDefaults": {
+    "message": "Restore defaults"
+  },
+  "chatOutlineSidebar": {
+    "message": "Conversation outline"
+  },
+  "chatEnableTools": {
+    "message": "Enable chat tools"
+  },
+  "chatEnableToolsHelp": {
+    "message": "Use the outline, annotations and prompt queue. Turning this off keeps your data."
+  },
+  "chatAnswerOutline": {
+    "message": "Answer outline"
+  },
+  "chatAnswerOutlineHelp": {
+    "message": "Use answer headings and numbered sections. Fall back to top-level lists."
+  },
+  "chatOnlyEvents": {
+    "message": "Off, show messages only"
+  },
+  "chatCompleteOutline": {
+    "message": "All sections"
+  },
+  "chatHideNative": {
+    "message": "Hide the ChatGPT outline"
+  },
+  "chatHideNativeHelp": {
+    "message": "Hide ChatGPT’s outline while the Diao outline is open."
+  },
+  "chatAnnotationsQueue": {
+    "message": "Annotations and queue"
+  },
+  "chatSelectAnnotate": {
+    "message": "Annotate selected text"
+  },
+  "chatSelectAnnotateHelp": {
+    "message": "Add annotations from the selection toolbar and include them with your next prompt."
+  },
+  "chatPromptQueue": {
+    "message": "Enable prompt queue"
+  },
+  "chatPromptQueueHelp": {
+    "message": "Enter sends when idle and queues mid-reply. Use Option or Shift + Enter for a new line. Use Command or Ctrl + Enter to send immediately."
+  },
+  "chatShowQueue": {
+    "message": "Show queue above the composer"
+  },
+  "chatShowQueueHelp": {
+    "message": "Edit, remove or reorder queued prompts above the composer."
+  },
+  "chatSendNext": {
+    "message": "Send the next prompt automatically"
+  },
+  "chatSendNextHelp": {
+    "message": "Send the next prompt after the current reply finishes."
+  },
+  "chatNavigationData": {
+    "message": "Navigation and local data"
+  },
+  "chatPinch": {
+    "message": "Pinch to see the overview"
+  },
+  "chatPinchHelp": {
+    "message": "Pinch in for the overview. Pinch out to return. You can also open it from the outline."
+  },
+  "chatSummary": {
+    "message": "Overview summaries"
+  },
+  "chatSummaryHelp": {
+    "message": "Prepare summaries when the current chat is idle using your OpenAI connection. Reuse them until the chat changes."
+  },
+  "chatJumpAnswer": {
+    "message": "Jump to answer sections"
+  },
+  "chatJumpAnswerHelp": {
+    "message": "Select a section to jump to its text. You can always jump to prompts and tasks."
+  },
+  "chatSmooth": {
+    "message": "Scroll smoothly to nearby messages"
+  },
+  "chatSmoothHelp": {
+    "message": "Scroll to nearby sections and jump directly to distant ones."
+  },
+  "chatRemember": {
+    "message": "Save the outline"
+  },
+  "chatRememberHelp": {
+    "message": "Keep indexed prompts, tasks and sections in this browser."
+  },
+  "chatPlacement": {
+    "message": "Visibility and placement"
+  },
+  "chatMinTurns": {
+    "message": "Minimum messages before showing the outline"
+  },
+  "chatMinTurnsHelp": {
+    "message": "Count each prompt or task run. Set to 1 to always show it."
+  },
+  "chatRightOffset": {
+    "message": "Distance from the right edge"
+  },
+  "chatRightOffsetHelp": {
+    "message": "Pixels from the right edge. Increase to move the outline left."
+  },
+  "chatMinWidth": {
+    "message": "Hide the outline below this window width"
+  },
+  "chatMinWidthHelp": {
+    "message": "In pixels. Set to 0 to show the outline at all widths."
+  },
+  "chatScope": {
+    "message": "Availability"
+  },
+  "chatScopeHelp": {
+    "message": "Chat tools are available on ChatGPT conversation pages."
+  },
+  "setupUpdateChecking": {
+    "message": "Checking for updates…"
+  },
+  "setupUpdateStaged": {
+    "message": "Update ready. It will install when idle."
+  },
+  "setupUpdateInstalling": {
+    "message": "Installing update and reconnecting…"
+  },
+  "setupUpdateCurrent": {
+    "message": "Up to date."
+  },
+  "setupUpdateInstalled": {
+    "message": "Update installed."
+  },
+  "setupUpdateFailed": {
+    "message": "Update failed. You can try again."
+  },
+  "setupAutoUpdate": {
+    "message": "Automatic updates are on."
+  },
+  "setupHelperLabel": {
+    "message": "Mac companion"
+  },
+  "setupHelperVersion": {
+    "message": "Mac companion · {0}"
+  },
+  "setupHelperMissingUpdate": {
+    "message": "Install the current Diao Bridge to get updates."
+  },
+  "setupHelperA11y": {
+    "message": "Allow Diao Bridge in macOS Accessibility settings first."
+  },
+  "setupHelperConfirm": {
+    "message": "Install and connect Diao Bridge to use this feature."
+  },
+  "syncReauthorize": {
+    "message": "The shared API address changed. Authorize it on this device."
+  },
+  "syncAuthorize": {
+    "message": "Authorize the shared API address first."
+  },
+  "syncSwitch": {
+    "message": "Verify to switch to the shared connection."
+  },
+  "syncVerifyThis": {
+    "message": "Verify this device to restore the connection."
+  },
+  "syncEnterCode": {
+    "message": "Enter the pairing code or your existing sync passphrase."
+  },
+  "syncChanged": {
+    "message": "The shared connection changed. Review your selection again."
+  },
+  "syncKeyNeeded": {
+    "message": "Enter or import an API key first."
+  },
+  "syncCopied": {
+    "message": "Copied"
+  },
+  "modelServiceKey": {
+    "message": "Provider API key"
+  },
+  "modelUnlockKeychain": {
+    "message": "Unlock Keychain"
+  },
+  "modelImported": {
+    "message": "Key imported. Save to connect."
+  },
+  "modelEndpointInvalid": {
+    "message": "Enter the full HTTPS API address."
+  },
+  "modelAllowEndpoint": {
+    "message": "Allow access to this API address."
+  },
+  "modelConnectionNeeded": {
+    "message": "Save a model connection first."
+  },
+  "panelNoAddress": {
+    "message": "Address unavailable"
+  },
+  "panelNoTasksPage": {
+    "message": "Wait for the page to load before starting a watch."
+  },
+  "panelTasksLoading": {
+    "message": "Analyzing pages"
+  },
+  "panelWaitingPages": {
+    "message": "Waiting for pages to load"
+  },
+  "panelCheckDone": {
+    "message": "Page check complete"
+  },
+  "panelRestoreToContinue": {
+    "message": "Restore the connection to continue"
+  },
+  "panelStopped": {
+    "message": "Analysis paused"
+  },
+  "panelSiteGroupNone": {
+    "message": "No ungrouped tabs from the same website in this window."
+  },
+  "panelUndoGroups": {
+    "message": "Undo grouping by website"
+  },
+  "panelUndidGroups": {
+    "message": "Website grouping undone."
+  },
+  "panelGroupCount": {
+    "message": "{0} tabs"
+  },
+  "panelPagesCount": {
+    "message": "{0} pages"
+  },
+  "panelContinue": {
+    "message": "Keep this tab"
+  },
+  "panelNoResponse": {
+    "message": "Reopen the side panel to reconnect."
+  }
+}

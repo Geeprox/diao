@@ -1,0 +1,12 @@
+Diao is a Chrome tab manager with task reminders and a searchable outline for long ChatGPT conversations.
+
+• Watch background tasks. Right-click a task page and select Start watching. Diao detects common activity indicators and reminds you when the page is ready. If needed, select the page’s status text once to teach Diao where to look.
+• Find your place in ChatGPT. Search prompts and answer sections, jump to the original text, annotate a selection, and queue a follow-up while a reply is in progress.
+• Pinch for an overview. Connect your OpenAI API key to get a conversation summary, topic groups, and short answers that link back to their sources. With advance preparation enabled, Diao saves the results for the next time you open the overview.
+• Keep related tabs together. Chrome tab groups can collect links with their source page. Turn on smart organization to use your model connection to group related work across sites or shelve inactive tabs. You can always find them in Chrome’s tab bar.
+
+Page watching and the outline run in your browser. Optional AI features use the API connection you configure. You can unlock a synced connection on another device using the same Chrome account and a passkey or pairing code.
+
+The optional Diao Bridge companion adds tab-side reminders, a pause-aware close countdown, and Control + Tab switching on Apple silicon Macs running macOS 27.2 or later.
+
+Diao was previously named Tab Cadence. Your extension updates through the same Chrome Web Store listing.

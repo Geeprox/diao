@@ -27,7 +27,7 @@ test('后台收纳跨重启复用已确认的分组，保护用户分组和刚�
     alarms:{get:async()=>null,create:async()=>{},clear:async()=>{}},
     windows:{getAll:async()=>[1,2].map(id=>({id,tabs:tabs.filter(tab=>tab.windowId===id)}))},
     tabGroups:{
-      query:async({windowId,title,color})=>groups.filter(group=>group.windowId===windowId&&group.title===title&&group.color===color),
+      query:async({windowId,title,color})=>groups.filter(group=>group.windowId===windowId&&(title===undefined||group.title===title)&&group.color===color),
       get:async id=>groups.find(group=>group.id===id),
       update:async(id,changes)=>Object.assign(groups.find(group=>group.id===id),changes),
     },

@@ -5,9 +5,10 @@
   let endPicking;
   let toastTimer;
 
+  const tr=globalThis.DiaoLocale?.text||(text=>text);
   function element(tag, text) {
     const node = document.createElement(tag);
-    if (text) node.textContent = text;
+    if (text) node.textContent = tr(text);
     return node;
   }
 
@@ -87,7 +88,7 @@
     const current=host;
     const toolbar=element('section');
     toolbar.className='picker';
-    toolbar.setAttribute('aria-label','选择网页状态');
+    toolbar.setAttribute('aria-label',tr('选择网页状态'));
     const heading=element('h2','点选网页上的任务状态');
     const help=element('p','点选状态文字。下次在此页可直接监听。');
     help.setAttribute('role','status');
@@ -219,7 +220,7 @@
           notice('已开始监听。');
         }
       }catch(failure){if(host===current)error.textContent=failure.message;}
-      finally{start.disabled=cancel.disabled=false;start.textContent='开始监听';}
+      finally{start.disabled=cancel.disabled=false;start.textContent=tr('开始监听');}
     });
     dialog.showModal();
     (inputs.waiting.value ? inputs.done : inputs.waiting).focus();

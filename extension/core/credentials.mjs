@@ -13,6 +13,7 @@ export function credentialStorage(settings) {
 const savedReason = mode => mode === 'sync' ? '已连接 · Chrome 同步' : mode === 'profile' ?
  '已保存在当前 Chrome 配置，更新或重启后会自动恢复。' :
  '已保存到 macOS 钥匙串，更新或重启后会自动恢复。';
+export const syncBackupOrigin = origin => 'sync-copy:'+origin;
 const validKey=key=>typeof key==='string'&&key.length>0&&key.length<=512&&!/[\r\n\0]/.test(key);
 export class CredentialManager {
  constructor({chrome,request,settings,mutate,changed=()=>{},now=()=>Date.now(),profile=createProfileVault()}){Object.assign(this,{chrome,request,settings,mutate,changed,now,profile});this.epoch=0;this.attempts=new Map();this.namespacePromise=null;this.sync=createConnectionSync({storage:chrome.storage.sync,vault:profile});}
@@ -108,8 +109,10 @@ export class CredentialManager {
   if (mode === 'sync') {
    if (!key) throw Error('先填写或导入 API Key，再启用同步。');
    const {provider,endpoint,model} = next;
-   const {passphrase,expectedId,passkey,passkeyKey,pairingCode} = syncOptions;
-   next.credentialRevision = await this.sync.save({provider,endpoint,model},key,passphrase,expectedId,{passkey,passkeyKey,pairingCode});
+   const {passphrase,expectedId,passkey,passkeyKey,pairingCode,replace} = syncOptions;
+   next.credentialRevision = await this.sync.save({provider,endpoint,model},key,passphrase,expectedId,{passkey,passkeyKey,pairingCode,replace});
+   if(!storedInTarget)await this.profile.save(syncBackupOrigin(origin),key).catch(()=>{});
+
   } else if (mode !== 'session' && !storedInTarget) {
    if (!key) throw Error('尚无此 API 地址的密钥，请填写或导入一次。');
    const result = await this.stored(mode,'save',origin,true,key);
@@ -135,7 +138,8 @@ export class CredentialManager {
   const mode = credentialStorage(settings);
   if (mode === 'sync') {
    await this.sync.remove(settings.credentialRevision);
-   await this.profile.remove(credentialOrigin(settings.endpoint));
+   await this.profile.remove(syncBackupOrigin(credentialOrigin(settings.endpoint)));
+
   } else if (mode !== 'session') await this.stored(mode, 'delete', credentialOrigin(settings.endpoint), true);
  }
 }

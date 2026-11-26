@@ -35,12 +35,15 @@ const wait=async (predicate,label,ms=6000)=>{
  throw Error(label);
 };
 fs.mkdirSync(copy,{recursive:true});
-for(const name of ['manifest.json','worker.mjs','panel.mjs','ui.css','sidepanel.html','sensor.js','watch-prompt.js','thread-history.js','threaddeck.js','core','icons'])fs.cpSync(path.join(root,'extension',name),path.join(copy,name),{recursive:true});
+for(const name of ['manifest.json','worker.mjs','panel.mjs','ui.css','sidepanel.html','sensor.js','watch-prompt.js','thread-history.js','threaddeck.js','locale.js','_locales','core','icons'])fs.cpSync(path.join(root,'extension',name),path.join(copy,name),{recursive:true});
 const manifest=JSON.parse(fs.readFileSync(path.join(copy,'manifest.json')));
-manifest.host_permissions=['https://chatgpt.com/*','https://watch.fixture.invalid/*','https://api.openai.com/*'];
+manifest.host_permissions=['https://chatgpt.com/*','https://watch.fixture.invalid/*','https://read.fixture.invalid/*','https://api.openai.com/*'];
+// 合成流程使用固定文案。英语资源在独立的未改包验收中检查。
+manifest.default_locale='zh_CN';
+fs.rmSync(path.join(copy,'_locales','en'),{recursive:true});
 fs.writeFileSync(path.join(copy,'manifest.json'),JSON.stringify(manifest));
 // 测试副本用受控菜单事件启动实际处理器。发布源码不包含测试入口。
-fs.appendFileSync(path.join(copy,'worker.mjs'),'\nglobalThis.fixtureMenu=handleTabMenu;globalThis.fixtureSweep=()=>run(()=>tidyTabs.sweep());');
+fs.appendFileSync(path.join(copy,'worker.mjs'),'\nglobalThis.fixtureMenu=handleTabMenu;globalThis.fixtureSmart=(windowId,tabId)=>organizeSmartTabs(windowId,tabId);');
 const watchPage='<title>合成构建任务</title><main style="margin:56px;font:18px system-ui"><h1>构建任务</h1><p id="state">正在执行</p></main>';
 const legacyChatPage='<!doctype html><meta charset="utf-8"><title>合成对话</title><style>body{font:16px system-ui;margin:0;background:#fbfbfa;color:#1e2521}main{width:min(690px,75vw);margin:48px auto}article{padding:18px 0}form{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);width:min(660px,72vw);padding:14px;border:1px solid #ccc;border-radius:15px;background:white}textarea{width:85%;height:45px;vertical-align:middle;font:inherit}button{padding:8px}h2{font-size:19px}</style>'+
  '<main id="thread" data-conversation-id="fixture01"><article data-testid="conversation-turn-1" data-turn="user"><div data-message-id="user-0001" data-message-author-role="user"><div class="whitespace-pre-wrap">这个项目怎么设计？</div></div></article>'+
@@ -116,10 +119,17 @@ const viewportTail=[
 ].join('');
 const viewportPage=`<!doctype html><meta charset="utf-8"><title>截断会话</title>
 <style>body{margin:0;background:#fafafa;color:#242424;font:16px system-ui} main{margin:56px auto;width:740px} #fixture-history-viewport{height:580px;overflow:auto;overflow-anchor:none;padding:8px 25px} #fixture-history-viewport [data-turn-key]{min-height:405px} h2{font-size:19px}</style>
-<main data-chatgpt-conversation-selection-target="local-chatgpt:nativeviewportfixture"><section id="fixture-history-viewport"><div id="fixture-native-turns" data-thread-find-target="conversation"><div id="fixture-native-loader"><div role="status"><span data-loading-indicator>正在加载更早的消息…</span></div></div>${viewportTail}</div></section></main>
+<main data-chatgpt-conversation-selection-target="local-chatgpt:nativeviewportfixture"><section id="fixture-history-viewport" data-mcp-app-scroll-host data-app-action-timeline-scroll><div id="fixture-native-turns" data-thread-find-target="conversation"><div id="fixture-native-loader"><div role="status"><span data-loading-indicator>正在加载更早的消息…</span></div></div>${viewportTail}</div></section></main>
 <script>const viewport=document.querySelector('#fixture-history-viewport');
 const loader = document.querySelector('#fixture-native-loader');
+const progressive = sessionStorage.getItem('fixture-progressive-cold-jump') === 'on';
+if (progressive) {
+  sessionStorage.removeItem('fixture-progressive-cold-jump');
+  loader.style.minHeight='520px';
+}
 const initialEnd = viewport.scrollHeight - viewport.clientHeight;
+window.fixtureIntermediateWindows = 0;
+let priorWindow = initialEnd;
 viewport.scrollTop=initialEnd;
 window.fixtureNativeLoads=0;
 window.fixtureNativeRebounds=0;
@@ -162,7 +172,17 @@ viewport.addEventListener('scroll',()=>{
     }
     return;
   }
-  if(viewport.scrollTop>2){
+  if (progressive) {
+    const top = viewport.scrollTop;
+    if (top > 2) {
+      if (priorWindow - top > 90) { window.fixtureIntermediateWindows++; priorWindow = top; }
+      return;
+    }
+    if (window.fixtureIntermediateWindows < 2) {
+      viewport.scrollTop=initialEnd;
+      return;
+    }
+  } else if(viewport.scrollTop>2){
     if(viewport.scrollTop<initialEnd-2){ window.fixtureNativeRebounds++; viewport.scrollTop=initialEnd; }
     return;
   }
@@ -204,6 +224,8 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
    if(url.protocol==='chrome-extension:')return route.continue();
    requests.push({host:url.hostname,path:url.pathname});
    if(url.origin==='https://watch.fixture.invalid')return route.fulfill({contentType:'text/html; charset=utf-8',body:url.pathname==='/auto'?watchPage.replace('id="state"','id="state" aria-busy="true"'):watchPage});
+   if(url.origin==='https://read.fixture.invalid')return route.fulfill({contentType:'text/html; charset=utf-8',
+     body:'<title>Community library circulation notes</title><main>Volunteer-run community library, lending and return desk.</main>'});
    if(url.origin==='https://chatgpt.com'&&url.pathname==='/c/fixture01')return route.fulfill({contentType:'text/html; charset=utf-8',body:chatPage});
    if(url.origin==='https://chatgpt.com'&&url.pathname==='/c/'+historyId)return route.fulfill({contentType:'text/html; charset=utf-8',body:historyPage});
    if(url.origin==='https://chatgpt.com'&&url.pathname==='/c/'+viewportId)return route.fulfill({contentType:'text/html; charset=utf-8',body:viewportPage});
@@ -258,18 +280,22 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
       document.body.append(anchor,document.createElement('br'));
     }
   });
-  const shortcut=process.platform==='darwin'?'Meta':'Control';
-  const opened=[];
-  for(const number of [1,2]) {
-    const newTab=ctx.waitForEvent('page');
-    await sourceLink.getByRole('link',{name:'调研链接 '+number}).click({modifiers:[shortcut]});
-    opened.push(await newTab);
-    await wait(()=>sw.evaluate(index=>chrome.tabs.query({url:'https://watch.fixture.invalid/linked-'+index}).then(result=>result.length>0),number),
-      'Chrome 未载入后台打开的链接 '+number,5000).catch(async error=>{
-      console.log('链接验收快照',await sw.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.map(({id,url,pendingUrl,openerTabId,groupId,active})=>({id,url,pendingUrl,openerTabId,groupId,active})))));
-      throw error;
-    });
-  }
+  await sourceLink.bringToFront();
+  await wait(()=>sw.evaluate(async()=>{
+    const [source]=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-source'});
+    return source?.title==='旧城调研 | 合成验收';
+  }),'Chrome 尚未接收到来源页标题');
+  const opened=await sw.evaluate(async()=>{
+    const [source]=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-source'});
+    // Chromium 的标签 API 传入与后台打开链接相同的来源关系，避免无头环境丢失实体修饰键。
+    const children=[];
+    for(const index of [1,2]){
+      const tab=await chrome.tabs.create({url:'https://watch.fixture.invalid/linked-'+index,
+        windowId:source.windowId,openerTabId:source.id,active:false});
+      children.push(tab.id);
+    }
+    return children;
+  });
   const inspectLinks=()=>sw.evaluate(async()=> {
     const [source]=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-source'});
     const children=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-*'});
@@ -278,8 +304,15 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     if(!group)return null;
     return {title:group.title,count:children.filter(child=>child.id!==source.id&&child.groupId===group.id).length};
   });
-  await wait(async()=>{const group=await inspectLinks();return group?.count===2&&group.title==='旧城调研';},'真实 Chrome 后台链接未按来源自动编入原生分组');
-  for(const page of opened)await page.close();
+  await wait(async()=>{const group=await inspectLinks();return group?.count===2&&group.title==='旧城调研';},'真实 Chrome 后台链接未按来源自动编入原生分组').catch(async error=>{
+    console.log('来源分组验收',await sw.evaluate(async()=>{
+      const tabs=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-*'});
+      const groups=await chrome.tabGroups.query({});
+      return {tabs:tabs.map(({id,groupId,openerTabId,active,title})=>({id,groupId,openerTabId,active,title})),groups};
+    }));
+    throw error;
+  });
+  await sw.evaluate(ids=>chrome.tabs.remove(ids),opened);
   await wait(()=>sw.evaluate(async()=>{
     const [tab]=await chrome.tabs.query({url:'https://watch.fixture.invalid/linked-source'});
     return tab?.groupId===-1;
@@ -307,6 +340,36 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await panel.getByText('合成构建任务',{exact:true}).waitFor();
   assert.equal(await panel.locator('.tab-row').count(),1);
   await panel.screenshot({path:path.join(base,'management.png')});
+  for (const width of [320, 380, 600]) {
+    await panel.setViewportSize({width,height:760});
+    await panel.locator('[data-filter=resume]').click();
+    const rowInset=await panel.locator('.tab-row .row-meta').evaluate(content=>{
+      const row=content.closest('.tab-row').getBoundingClientRect(), box=content.getBoundingClientRect();
+      if (Math.abs((box.left-row.left)-(row.right-box.right))>1) return -1;
+      return box.left-row.left;
+    });
+    assert(rowInset>=14);
+    for (const filter of ['waiting','suggested']) {
+      await panel.locator('[data-filter='+filter+']').click();
+      const insets=await panel.locator('#tabs .empty').evaluate(card=>{
+        const {left,right}=card.getBoundingClientRect();
+        const title=card.querySelector('h2').getBoundingClientRect();
+        const action=card.querySelector('button').getBoundingClientRect();
+        return [title.left-left,action.left-left,right-Math.max(action.right,title.right)];
+      });
+      assert(Math.abs(insets[0]-rowInset)<=1);
+      assert(Math.abs(insets[1]-rowInset)<=1);
+      assert(insets[2]>=rowInset-1);
+    }
+    assert(await panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  }
+  await panel.emulateMedia({colorScheme:'dark',reducedMotion:'reduce'});
+  await panel.screenshot({path:path.join(base,'management-empty-dark.png')});
+  await panel.getByRole('button',{name:'查看全部事项',exact:true}).click();
+  assert.equal(await panel.locator('.tab-row').count(),1);
+  await panel.setViewportSize({width:380,height:760});
+  await panel.emulateMedia({colorScheme:'light'});
+  note('窄栏到宽栏的事项卡片、筛选空态标题和操作采用相同左右内边距。');
   await panel.getByRole('button',{name:'添加事项'}).click();
   await panel.getByRole('button',{name:'连接模型',exact:true}).waitFor();
   await panel.getByRole('button',{name:'选网页',exact:true}).click();
@@ -391,9 +454,16 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await watch.goto('https://watch.fixture.invalid/auto');
   await sw.evaluate(async id=>globalThis.fixtureMenu({menuItemId:'watch-page',frameId:0},await chrome.tabs.get(id)),tabId);
   await wait(async()=>(await record())?.watchAdapter?.kind==='busy','明确忙碌状态未直接启动');
-  await watch.locator('#state').evaluate(element=>element.setAttribute('aria-busy','false'));
+  await watch.locator('#state').evaluate(element=>{
+    const replacement=element.cloneNode(true);
+    replacement.id='active-build';
+    element.replaceWith(replacement);
+  });
+  await wait(async()=>(await record())?.watchAdapter?.target==='#active-build','状态节点重挂载后未恢复监听');
+  await watch.locator('#active-build').evaluate(element=>element.setAttribute('aria-busy','false'));
   await wait(async()=>(await record())?.state==='resume','自动识别未收到完成信号');
-  note('明确忙碌状态直接启动，无须填写或点选。');
+  await watch.locator('#active-build').evaluate(element=>{element.id='state';});
+  note('明确忙碌状态直接启动，节点重挂载后自动接续并收到完成信号。');
   await sw.evaluate(async()=>{
     const {threadWorkspacePreferences={}}=await chrome.storage.local.get('threadWorkspacePreferences');
     await chrome.storage.local.set({threadWorkspacePreferences:{...threadWorkspacePreferences,autoTopicSummary:true}});
@@ -580,6 +650,23 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     const first=a.getBoundingClientRect(), last=b.getBoundingClientRect();
     return {x:first.left+1,y:first.top+first.height/2,end:last.right+1};
   });
+  await chat.evaluate(({x,y})=>{
+    const attach = (parent,left) => {
+      const floating = document.createElement('div');
+      floating.setAttribute('role','toolbar');
+      floating.style.cssText='position:fixed;z-index:999;top:'+(y+22)+'px;left:'+left+'px;';
+      floating.innerHTML='<div role="presentation"><button>询问 ChatGPT</button><button>翻译</button></div>';
+      parent.append(floating);
+    };
+    const shadowHost = document.createElement('div');
+    shadowHost.id='fixture-shadow-extension';
+    document.body.append(shadowHost);
+    attach(shadowHost.attachShadow({mode:'open'}),x+110);
+    const lightHost = document.createElement('div');
+    lightHost.id='fixture-light-extension';
+    document.body.append(lightHost);
+    attach(lightHost,x+245);
+  },quote);
   await chat.mouse.move(quote.x,quote.y);
   await chat.mouse.down();
   await chat.mouse.move(quote.end,quote.y,{steps:12});
@@ -587,6 +674,8 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await chat.mouse.up();
   const annotation=host.locator('[data-action="add-selection-comment"]');
   await annotation.waitFor({timeout:10000});
+  const externalToolbars=chat.locator('#fixture-shadow-extension, #fixture-light-extension');
+  assert.equal(await externalToolbars.locator('[data-threaddeck-selection-comment]').count(),0);
   await annotation.hover();
   const alpha=await annotation.evaluate(button=>{
     const canvas=document.createElement('canvas');
@@ -599,31 +688,57 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   assert.equal(alpha,255,'备用批注入口悬停时应保持不透明');
   await chat.evaluate(({x,y})=>{
     const toolbar=document.createElement('div');
-    toolbar.setAttribute('role','toolbar');
-    toolbar.setAttribute('data-testid','fixture-selection-toolbar');
-    toolbar.style.cssText='display:flex;position:fixed;z-index:999;left:'+x+'px;top:'+(y-48)+'px;'+
-      'background:#fff;color:#171717;border:1px solid #ddd;border-radius:8px;padding:2px';
-    toolbar.innerHTML='<button aria-label="Ask ChatGPT" class="fixture-fade">询问 ChatGPT</button><button>复制</button>';
+    toolbar.setAttribute('data-testid','fixture-popup');
+    toolbar.style.cssText='width:max-content;position:fixed;z-index:999;left:'+x+'px;top:'+(y-40)+'px;';
+    toolbar.innerHTML='<div role="presentation" class="bg-surface-elevated-secondary" style="display:flex;overflow:hidden;background:#fff;color:#171717;'+
+      'border:1px solid #ddd;border-radius:8px"><button class="fixture-fade cursor-interaction">询问 ChatGPT</button></div>';
     const style=document.createElement('style');
-    style.textContent='.fixture-fade:hover{opacity:.1}';
+    style.textContent='.fixture-fade{padding:0 6px;min-height:28px;font:400 14px/18px system-ui;border:0;background:transparent;color:inherit}.fixture-fade:hover{opacity:.1}';
     document.head.append(style);
     document.body.append(toolbar);
   },quote);
-  const nativeAnnotation=chat.getByTestId('fixture-selection-toolbar').getByRole('button',{name:'添加批注'});
+  const nativeAnnotation=chat.getByTestId('fixture-popup').locator('[role=presentation]').getByRole('button',{name:'添加批注'});
   await nativeAnnotation.waitFor({timeout:3500});
-  await annotation.waitFor({state:'hidden'});
+  await annotation.waitFor({state:'hidden',timeout:5000}).catch(async error=>{
+    const hit=await nativeAnnotation.evaluate(button=>{
+      const rect=button.getBoundingClientRect();
+      return document.elementsFromPoint(rect.x+rect.width/2,rect.y+rect.height/2).slice(0,5)
+        .map(node=>({tag:node.tagName,id:node.id,role:node.getAttribute('role')}));
+    });
+    console.log('批注按钮的点击层',hit);
+    throw error;
+  });
   await nativeAnnotation.hover();
-  assert.equal(await nativeAnnotation.evaluate(button=>getComputedStyle(button).opacity),'1');
-  await chat.getByTestId('fixture-selection-toolbar').screenshot({path:path.join(base,'annotation-native.png')});
+  assert.deepEqual(await nativeAnnotation.evaluate(button=>{
+    const host=button.previousElementSibling;
+    const own=getComputedStyle(button),native=getComputedStyle(host);
+    const canvas=document.createElement('canvas'),paint=canvas.getContext('2d');
+    paint.fillStyle=own.backgroundColor;paint.fillRect(0,0,1,1);
+    return [own.opacity,own.fontSize===native.fontSize,own.fontWeight===native.fontWeight,
+      button.getBoundingClientRect().height===host.getBoundingClientRect().height,paint.getImageData(0,0,1,1).data[3]];
+  }),['1',true,true,true,255]);
   assert.equal(await chat.evaluate(()=>getSelection().toString()),'保留现有快捷键与本地草稿。');
   await nativeAnnotation.click();
   await host.locator('.comment-popover textarea').waitFor();
+  assert.equal(await externalToolbars.locator('[data-threaddeck-selection-comment],[data-threaddeck-suppressed]').count(),0);
+  await externalToolbars.evaluateAll(toolbars=>toolbars.forEach(toolbar=>toolbar.remove()));
   await host.locator('.comment-popover textarea').fill('这是测试批注');
-  await host.locator('.comment-compose-send').click();
+  await sw.evaluate(async id=>{
+    const {threadWorkspacePreferences}=await chrome.storage.local.get('threadWorkspacePreferences');
+    await chrome.storage.local.set({threadWorkspacePreferences:{...threadWorkspacePreferences,autoTopicSummary:false}});
+    await chrome.tabs.sendMessage(id,{type:'THREAD_PILOT_PREFERENCES'},{frameId:0});
+  },chatTabId);
+  await host.locator('.compact-rail').hover();
+  await host.locator('[data-action="open-topics"]').click();
+  const overview=host.locator('.semantic-zoom');
+  await overview.waitFor({state:'visible'});
+  await host.locator('.comment-popover').waitFor({state:'hidden'});
+  await overview.locator('[data-action="close-topics"]').click();
+  await overview.waitFor({state:'hidden'});
   await wait(async()=>await host.locator('.comment-badge-layer button').count()>0,'没有保存原位批注',5000);
-  await chat.screenshot({path:path.join(base,'annotation.png')});
-  await chat.getByTestId('fixture-selection-toolbar').evaluate(toolbar=>toolbar.remove());
-  note('批注入口悬停不透底，延迟出现的 ChatGPT 工具栏合并批注动作，保留选区并保存。');
+  await chat.screenshot({path:path.join(base,'annotation-behavior-fixture.png')});
+  await chat.getByTestId('fixture-popup').evaluate(toolbar=>toolbar.remove());
+  note('第三方划词浮条保持独立。批注只并入 ChatGPT 工具条，悬停不透底，从批注切换到概览时自动保存。');
   await sw.evaluate(id=>{
     const store=chrome.storage.session;
     const write=store.set.bind(store);
@@ -649,7 +764,6 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   note('发送按钮在回执保存时重挂载，批注原文、笔记和问题仍通过一次原生提交上屏。');
   await host.locator('.compact-rail').hover();
   await host.locator('[data-action="open-topics"]').click();
-  const overview=host.locator('.semantic-zoom');
   await overview.waitFor({state:'visible'});
   await overview.locator('.zoom-chapters summary').first().click();
   await overview.locator('.zoom-chapter', {hasText:'第二步 · 确认边界'}).waitFor();
@@ -719,6 +833,34 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await search.press('Escape');
   assert.equal(await search.inputValue(),'');
   assert.equal(await outline.locator('.td-outline-coverage').isVisible(),false);
+  const mountHistoryIsland=turns=>chat.locator('#thread').evaluate((thread,turns)=>{
+    window.fixtureOriginalHistory ||= [...thread.children];
+    const users=turns.map(turn=>{
+      const node=window.fixtureOriginalHistory[0].cloneNode(true);
+      node.dataset.testid='conversation-turn-'+(2*turn-1);
+      node.querySelector('[data-message-id]').dataset.messageId='history-user-'+turn;
+      node.querySelector('.whitespace-pre-wrap').textContent='合成历史提问 '+turn+' 的约束是什么？';
+      return node;
+    });
+    thread.replaceChildren(...users);
+  },turns);
+  const assertHistoryOrder=async mounted=>{
+    await wait(async()=>{
+      const {entries=[]}=await chatStatus() || {};
+      const current=entries.filter(row=>row.mounted).map(row=>Number(row.text.match(/合成历史提问 (\d+)/)?.[1])).sort((a,b)=>a-b);
+      return current.join(',')===mounted.join(',');
+    },'未采集当前挂载的历史片段');
+    const order=await host.locator('.compact-rail .rail-item').evaluateAll(items=>items.map(item=>
+      Number(item.getAttribute('aria-label')?.match(/合成历史提问 (\d+)/)?.[1])));
+    assert.deepEqual(order,Array.from({length:12},(_,index)=>index+1));
+  };
+  await mountHistoryIsland([1,7,11]);
+  await assertHistoryOrder([1,7,11]);
+  await mountHistoryIsland([9,10]);
+  await assertHistoryOrder([9,10]);
+  await chat.locator('#thread').evaluate(thread=>thread.replaceChildren(...window.fixtureOriginalHistory));
+  await assertHistoryOrder([12]);
+  note('完整原文顺序在两段不相邻的虚拟问答交替挂载后保持一致。');
   await chat.evaluate(()=>{
     const section=document.querySelector('#thread article[data-turn="assistant"] .markdown');
     const heading=document.createElement('h2'); heading.textContent='补载的安全边界';
@@ -803,6 +945,10 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     await chrome.tabs.sendMessage(tab.id,{type:'THREAD_PILOT_PREFERENCES'},{frameId:0}).catch(()=>{});
   },enabled);
   await chat.bringToFront();
+  await sw.evaluate(async()=>{
+    const {threadWorkspacePreferences}=await chrome.storage.local.get('threadWorkspacePreferences');
+    await chrome.storage.local.set({threadWorkspacePreferences:{...threadWorkspacePreferences,autoTopicSummary:true}});
+  });
   await configurePreparation(true);
   await wait(()=>sw.evaluate(async()=>globalThis.fixtureTopicEvidence.length===1 &&
     Boolean((await chrome.storage.local.get('threadTopicCache')).threadTopicCache?.['c:historyfixture']?.overview)),
@@ -874,6 +1020,22 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   assert.match(evidence[1].answer,/首段证据[\s\S]*中段保留标记[\s\S]*尾段限制标记/);
   assert(!evidence[1].answer.includes(' … '));
   assert.match(evidence.at(-1).answer,/补载正文标记/);
+  const bubbleStyles=await overview.evaluate(root=>{
+    const row=root.querySelector('.zoom-exchange');
+    const question=row.querySelector('.zoom-line[data-role=user]');
+    const answer=row.querySelector('.zoom-line[data-role=assistant]');
+    const summary=root.querySelector('.zoom-conversation-summary');
+    const metrics=node=>({background:getComputedStyle(node).backgroundColor,radius:parseFloat(getComputedStyle(node).borderRadius),
+      font:parseFloat(getComputedStyle(node).fontSize),box:node.getBoundingClientRect()});
+    return {conversation:metrics(row),question:metrics(question),answer:metrics(answer),summary:metrics(summary)};
+  });
+  assert(Math.abs(bubbleStyles.question.box.right-bubbleStyles.conversation.box.right)<1);
+  assert(Math.abs(bubbleStyles.answer.box.left-bubbleStyles.conversation.box.left)<1);
+  for(const item of [bubbleStyles.question,bubbleStyles.answer,bubbleStyles.summary]) {
+    assert.notEqual(item.background,'rgba(0, 0, 0, 0)');
+    assert(item.radius>=10);
+  }
+  assert(bubbleStyles.summary.font>bubbleStyles.answer.font);
   await overview.screenshot({path:path.join(base,'overview.png')});
   await chat.evaluate(()=>{
     document.documentElement.setAttribute('data-theme','dark');
@@ -952,7 +1114,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     const body=document.querySelector('#fixture-native-turns');
     return getComputedStyle(body).filter==='opacity(0)' && body.getBoundingClientRect().height>0;
   });
-  await overview.locator('.zoom-coverage',{hasText:'网页历史 · 4 轮'}).waitFor({timeout:16000}).catch(async error=>{
+  await overview.locator('.zoom-coverage',{hasText:'完整会话 · 4 轮'}).waitFor({timeout:16000}).catch(async error=>{
     console.log(JSON.stringify({coverage:await overview.locator('.zoom-coverage').textContent(),status:await overview.locator('.zoom-ai-status').textContent(),loads:await chat.evaluate(()=>window.fixtureNativeLoads)}));
     throw error;
   });
@@ -987,6 +1149,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await host.locator('[data-action="open-topics"]').click();
   await overview.locator('.zoom-conversation-summary',{hasText:'处置顺序'}).waitFor({timeout:16000});
   assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative);
+  await chat.evaluate(()=>sessionStorage.setItem('fixture-progressive-cold-jump','on'));
   await chat.reload();
   await host.locator('.compact-rail .rail-item').last().hover();
   const overviewProfiler=await ctx.newCDPSession(chat);
@@ -1065,6 +1228,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
       scroll:viewport.scrollTop,loading:Boolean(document.querySelector('#fixture-native-loader'))};
   });
   assert(coldJump.inside&&!coldJump.loading,'冷启动查询缓存后，仍可跳到唯一的早期章节 '+JSON.stringify(coldJump));
+  assert(await chat.evaluate(()=>window.fixtureIntermediateWindows)>=2,'冷启动应通过中间视口触发宿主逐段挂载');
   assert.equal(await chat.locator('#fixture-native-turns').evaluate(node=>getComputedStyle(node).filter),'none');
   assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative);
   note('脱离旧页面内存后，从缓存恢复议题和早期章节导航。点击才加载目标原文。');
@@ -1116,7 +1280,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await host.locator('.compact-rail').hover();
   await host.locator('[data-action="open-topics"]').click();
   await overview.locator('.zoom-conversation-summary',{hasText:'周六 9 点试运行'}).waitFor({timeout:18000});
-  assert.match(await overview.locator('.zoom-coverage').textContent(),/部分会话 · 3 轮/);
+  assert.match(await overview.locator('.zoom-coverage').textContent(),/已读问答 · 3 轮/);
   await overview.locator('[data-action="recover-topics-history"]').waitFor({timeout:18000});
   assert(await overview.getAttribute('data-history-coverage'),'自动补齐必须已经实际检查网页历史');
   await wait(()=>sw.evaluate(async()=>!(await chrome.storage.local.get('threadTopicCache')).threadTopicCache?.['c:stalledsummaryfixture:partial']?.overview?.historyPending),
@@ -1152,7 +1316,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await host.locator('.compact-rail').hover();
   await host.locator('[data-action="open-topics"]').click();
   await overview.locator('.zoom-conversation-summary',{hasText:'周六 9 点试运行'}).waitFor({timeout:4000});
-  assert.match(await overview.locator('.zoom-coverage').textContent(),/部分会话 · 3 轮/);
+  assert.match(await overview.locator('.zoom-coverage').textContent(),/已读问答 · 3 轮/);
   assert.equal(await chat.evaluate(()=>window.fixtureStalledScrolls),0);
   assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),callsBeforeStall+1);
   note('早期历史暂不可读时已准备三轮摘要，概览自动尝试补齐，合并后定位准确。刷新复用摘要与补齐回执。');
@@ -1180,14 +1344,43 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await tidyPanel.bringToFront();
   await tidyPanel.getByRole('button',{name:'打开设置',exact:true}).click();
   await tidyPanel.getByRole('button',{name:'标签',exact:true}).click();
-  await tidyPanel.locator('#tab-tidy-hours').waitFor();
+  await tidyPanel.locator('#smart-tabs').waitFor();
   await sw.evaluate(()=>{
     globalThis.fixtureTidyNow=Date.now;
     Date.now=()=>globalThis.fixtureTidyNow()+26*3600000;
   });
   try{
-    await tidyPanel.locator('#tab-tidy-hours').selectOption('24');
-    await tidyPanel.getByText('已开启自动收纳',{exact:true}).waitFor();
+    const targetWindow=await sw.evaluate(async ids=>{
+      const tab=await chrome.tabs.get(ids[0]);
+      const fetchBefore=globalThis.fetch;
+      globalThis.fixtureFetchBeforeSmart=fetchBefore;
+      globalThis.fixtureSmartCalls=0;
+      globalThis.fetch=async(url,options)=>{
+        const request=JSON.parse(options?.body||'{}');
+        if(!request.questions?.some(q=>q.name.startsWith('tab_')))return fetchBefore(url,options);
+        globalThis.fixtureSmartCalls++;
+        return new Response(JSON.stringify({
+          answers:request.questions.map(q=>{
+            const id=Number(q.name.slice(4));
+            const peer=globalThis.fixtureLibraryPeer;
+            const source=JSON.parse(request.input).find(tab=>tab.id===id);
+            const join=source?.url.startsWith('https://read.fixture.invalid/')&&q.choices.some(choice=>choice.value==='tab-'+peer);
+            const choice=ids.includes(id)?'shelve':join?'tab-'+peer:'keep';
+            return {type:'choice',name:q.name,choice,confidence:.98,probabilities:[{value:choice,probability:.98}]};
+          }),
+          usage:{input_tokens:140,output_tokens:25}
+        }),{status:200});
+      };
+      await chrome.storage.local.set({smartTabsEnabled:true});
+      return tab.windowId;
+    },idleTabIds);
+    await sw.evaluate(async windowId=>{
+      const tab=await chrome.tabs.create({windowId,url:'about:blank',active:false});
+      await globalThis.fixtureSmart(windowId,tab.id);
+      await chrome.tabs.remove(tab.id);
+    },targetWindow);
+    assert.equal(await sw.evaluate(()=>globalThis.fixtureSmartCalls),0);
+    await sw.evaluate(win=>globalThis.fixtureSmart(win),targetWindow);
     const readTidy=()=>sw.evaluate(async ids=>{
       const groups=await chrome.tabGroups.query({title:'闲置标签'});
       const tabs=await chrome.tabs.query({});
@@ -1201,18 +1394,40 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     assert.deepEqual(tidy.members,[...idleTabIds].sort());
     assert.equal(tidy.onlySafe,true);
     await sw.evaluate(id=>chrome.tabs.ungroup([id]),idleTabIds[0]);
-    await wait(()=>sw.evaluate(async id=>Boolean((await chrome.storage.session.get('tabTidySession')).tabTidySession?.touched?.[id]),idleTabIds[0]),'取消分组应记住用户恢复意图');
-    await sw.evaluate(()=>globalThis.fixtureSweep());
+    await wait(()=>sw.evaluate(async id=>Boolean((await chrome.storage.session.get('smartTabHeld')).smartTabHeld?.[id]),idleTabIds[0]),'取消分组应记住用户恢复意图');
+    await sw.evaluate(win=>globalThis.fixtureSmart(win),targetWindow);
     tidy=await readTidy();
     assert.deepEqual(tidy.members,[idleTabIds[1]]);
+    const source=await ctx.newPage();
+    await source.goto('https://watch.fixture.invalid/library-planning');
+    await source.evaluate(()=>{document.title='Community library setup';document.querySelector('h1').textContent='Community library volunteer plan';});
+    const peer=await sw.evaluate(async()=>{
+      const [peer]=await chrome.tabs.query({url:'https://watch.fixture.invalid/library-planning'});
+      globalThis.fixtureLibraryPeer=peer.id;
+      return peer.id;
+    });
+    const child=await ctx.newPage();
+    await child.goto('https://read.fixture.invalid/circulation');
+    const tab=await sw.evaluate(async()=>(await chrome.tabs.query({url:'https://read.fixture.invalid/circulation'}))[0].id);
+    const autoGrouped={peer,tab};
+    await wait(()=>sw.evaluate(async({peer,tab})=>{
+      const [source,link]=await Promise.all([chrome.tabs.get(peer),chrome.tabs.get(tab)]);
+      return link.groupId>=0&&source.groupId===link.groupId;
+    },autoGrouped),'新开的跨站页面没有按模型判断自动归组',9500);
+    await child.close();
+    await source.close();
+    note('另一个网站的新标签随页面载入自动归组，无需按整理按钮。');
     await tidyPanel.screenshot({path:path.join(base,'tidy-settings.png')});
-    await tidyPanel.locator('#tab-tidy-hours').selectOption('0');
-    await tidyPanel.getByText('已关闭自动收纳',{exact:true}).waitFor();
+    await tidyPanel.locator('#smart-tabs').uncheck();
+    await wait(()=>sw.evaluate(async()=>!(await chrome.storage.local.get('smartTabsEnabled')).smartTabsEnabled),'关闭智能整理应停止后续分析');
     assert.equal(await sw.evaluate(async()=>Boolean(await chrome.alarms.get('tidy-tabs'))),false);
-  }finally{await sw.evaluate(()=>{Date.now=globalThis.fixtureTidyNow;});}
+  }finally{await sw.evaluate(()=>{
+    Date.now=globalThis.fixtureTidyNow;
+    if(globalThis.fixtureFetchBeforeSmart)globalThis.fetch=globalThis.fixtureFetchBeforeSmart;
+  });}
   await tidyPanel.close();
   for(const page of idlePages)await page.close();
-  note('Chrome 原生标签以闲置时长自动收纳，固定与监听页保留，手动取消分组后不会立即收回。');
+  note('Chrome 原生标签按模型判定收纳，固定与监听页保留，手动取消分组后不会立即收回。');
   await watch.close();
   await ctx.close();
   const updatedManifest={...manifest,version:manifest.version+'.1'};
@@ -1301,8 +1516,9 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     const checksBeforeRecovery=await worker.evaluate(()=>globalThis.fixtureSyncChecks);
     // 模拟加密记录晚于本地保存到达，且设置一直开着。
     await worker.evaluate(({slot,record})=>chrome.storage.sync.set({[slot]:record}),{slot:syncSlot,record:envelope});
-    await second.locator('#sync-recovery').waitFor({state:'visible'});
     assert.equal(await worker.evaluate(async()=>(await chrome.storage.session.get('apiKey')).apiKey),'synthetic-existing-local-key');
+    await second.getByText('Chrome 同步',{exact:true}).click();
+    await second.locator('#sync-recovery').waitFor({state:'visible'});
     assert.equal(await second.locator('#sync-unlock').isVisible(),false);
     await second.getByRole('button',{name:'验证并恢复',exact:true}).click();
     await wait(()=>worker.evaluate(async id=>{
@@ -1321,7 +1537,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     assert.equal(await second.locator('#api-key').inputValue(),'');
     assert.equal(await worker.evaluate(async()=>(await chrome.storage.session.get('apiKey')).apiKey),'synthetic-synced-key');
     assert.equal(await worker.evaluate(()=>globalThis.fixtureSyncChecks),checksBeforeRecovery+1);
-    await restored.getByRole('button',{name:'生成新配对码',exact:true}).click();
+    await restored.getByRole('button',{name:'在另一台设备使用',exact:true}).click();
     const pairing=restored.getByRole('dialog',{name:'设备配对码'});
     await pairing.getByRole('button',{name:'生成新码',exact:true}).click();
     const value=restored.locator('#sync-pairing-value');

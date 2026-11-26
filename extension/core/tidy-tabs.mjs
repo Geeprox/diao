@@ -4,7 +4,8 @@ export const tidyAlarm = 'tidy-tabs';
 const preference = 'tabTidyHours';
 const savedGroups = 'tabTidyGroups';
 const currentSession = 'tabTidySession';
-const title = '闲置标签';
+const titles = ['闲置标签','Idle tabs'];
+const title = () => globalThis.DiaoLocale?.text(titles[0]) || titles[0];
 const color = 'grey';
 const hours = [0,12,24,72,168];
 const needsAttention = new Set(['waiting','resume','closing','paused']);
@@ -48,10 +49,10 @@ export function createTidyTabs(chrome, loadRecords, changed) {
     await session.set({[currentSession]:{...state,touched:{...state.touched,[tabId]:Date.now()}}});
   }
 
-  async function sweep() {
+  async function sweep(approved) {
     const value = await setting();
-    if (!value) return;
-    const now = Date.now(), cutoff = now - value * 3600000;
+    if (!value&&!approved) return;
+    const now = Date.now(), cutoff = approved ? now : now - value * 3600000;
     const [windows,records,stored,active] = await Promise.all([
       chrome.windows.getAll({windowTypes:['normal'],populate:true}),
       loadRecords(),local.get(savedGroups),session.get(currentSession),
@@ -62,8 +63,8 @@ export function createTidyTabs(chrome, loadRecords, changed) {
     const candidates = [];
     const normal = windows.filter(window=>!window.incognito);
     for (const window of normal) {
-      const groups = await chrome.tabGroups.query({windowId:window.id,title,color});
-      for (const group of groups) {
+      const groups = await chrome.tabGroups.query({windowId:window.id,color});
+      for (const group of groups.filter(group=>titles.includes(group.title))) {
         const tabs = (window.tabs || []).filter(tab=>tab.groupId === group.id);
         if (tabs.length) candidates.push({...group,signature:await groupContents(tabs)});
       }
@@ -87,14 +88,15 @@ export function createTidyTabs(chrome, loadRecords, changed) {
       }
       const group = owned.find(item=>item.windowId === window.id);
       if (group ? !group.collapsed : candidates.some(item=>item.windowId === window.id)) continue;
-      if (!tabs.some(tab=>eligible(tab,records[tab.id],touched,cutoff))) continue;
+      const selected = tab => (!approved || approved.has(tab.id)) && eligible(tab,records[tab.id],touched,cutoff);
+      if (!tabs.some(selected)) continue;
       const fresh = await chrome.tabs.query({windowId:window.id});
-      const ids = fresh.filter(tab=>eligible(tab,records[tab.id],touched,cutoff)).map(tab=>tab.id);
-      if (ids.length < (group ? 1 : 2)) continue;
+      const ids = fresh.filter(selected).map(tab=>tab.id);
+      if (ids.length < (group || approved ? 1 : 2)) continue;
 
       if (group) {
         const current = await chrome.tabGroups.get(group.id).catch(()=>null);
-        if (current?.collapsed && current.title===title && current.color===color && current.windowId===window.id) {
+        if (current?.collapsed && titles.includes(current.title) && current.color===color && current.windowId===window.id) {
           try { await chrome.tabs.group({groupId:group.id,tabIds:ids}); moved = true; } catch {}
         }
       } else {
@@ -102,7 +104,7 @@ export function createTidyTabs(chrome, loadRecords, changed) {
         try {
           id = await chrome.tabs.group({tabIds:ids,createProperties:{windowId:window.id}});
           const members = await chrome.tabs.query({windowId:window.id,groupId:id});
-          await chrome.tabGroups.update(id,{title,color,collapsed:members.length>0 && members.every(tab=>!tab.active&&!tab.highlighted)});
+          await chrome.tabGroups.update(id,{title:title(),color,collapsed:members.length>0 && members.every(tab=>!tab.active&&!tab.highlighted)});
           owned.push({id,windowId:window.id});
           moved = true;
         } catch {
