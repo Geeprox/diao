@@ -1,6 +1,6 @@
 # Diao Mac 助手
 
-适用 Apple silicon Mac、macOS 27.2 或更新版本。网页监听和 ChatGPT 页内工具可在只安装 Chrome 扩展时使用。Mac 助手提供标签旁提醒、仅可见时推进的关闭倒计时和 Control+Tab 最近访问切换。
+适用 Apple silicon Mac、macOS 27.2 或更新版本。网页监听和 ChatGPT 页内工具可在只安装 Chrome 扩展时使用。Mac 助手提供标签旁提醒、仅可见时推进的关闭倒计时和 Control+Tab 最近访问切换。切换器和助手窗口跟随 macOS 的首选语言，支持简体中文和英文。
 
 1. 从本项目的 GitHub Release 下载 DMG 和同名的 SHA‑256 文件。在下载目录用 `shasum -a 256 -c` 校验同名的 SHA‑256 文件，确认显示 OK。
 2. 打开 DMG 中的 **Diao Bridge**，选择「安装助手」。助手会安装并重新打开。已有 Tab Cadence Bridge 时，安装器将有效的旧登记迁到「应用程序 → Diao Bridge」，保留原来的扩展许可与旧应用供恢复。如果 macOS 识别为未公证软件，确认来源与校验通过后，可由你在「系统设置 → 隐私与安全性」选择「仍要打开」批准此 App。遇到警告称 App 会损坏电脑时停止安装。

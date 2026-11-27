@@ -41,13 +41,13 @@ final class ChromeShortcuts {
     deinit{stop();if let o=focusObserver {NSWorkspace.shared.notificationCenter.removeObserver(o)}}
     func report(_ status:String,_ reason:String){send(["type":"mruStatus","status":status,"reason":reason])}
     func configure(_ object:[String:Any]) {
-        guard object["enabled"] as? Bool==true else{enabled=false;context=nil;end(cancel:false);stop();report("disabled","尚未启用。");return}
+        guard object["enabled"] as? Bool==true else{enabled=false;context=nil;end(cancel:false);stop();report("disabled", nativeCopy("尚未启用。", "Off."));return}
         enabled=true
         var next:ShortcutContext?
         if let raw=object["context"] as? [String:Any],let data=try? JSONSerialization.data(withJSONObject:raw),let decoded=try? JSONDecoder().decode(ShortcutContext.self,from:data),decoded.count>=2,decoded.window.rect.width>=200,decoded.window.rect.height>=150 {next=decoded}
         if context?.windowId != next?.windowId {end(cancel:false)};context=next
-        guard AXIsProcessTrusted() else{stop();report("accessibility_required","快捷切换需要辅助功能授权；在系统设置中启用当前 Mac 助手，再试一次。");return}
-        guard let process=NSRunningApplication.runningApplications(withBundleIdentifier:"com.google.Chrome").first else{stop();report("chrome_not_running","打开 Chrome 后重新保存快捷切换设置。");return}
+        guard AXIsProcessTrusted() else{stop();report("accessibility_required", nativeCopy("请在系统设置中允许 Diao Bridge 使用辅助功能。", "Allow Diao Bridge under Accessibility in System Settings."));return}
+        guard let process=NSRunningApplication.runningApplications(withBundleIdentifier:"com.google.Chrome").first else{stop();report("chrome_not_running", nativeCopy("打开 Chrome 后即可使用快捷切换。", "Open Chrome to switch between tabs."));return}
         if tap==nil || chromePID != process.processIdentifier {
             stop();chromePID=process.processIdentifier
             let mask=[CGEventType.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown].reduce(CGEventMask(0)){$0 | (CGEventMask(1)<<$1.rawValue)}
@@ -55,12 +55,15 @@ final class ChromeShortcuts {
                 guard let info=info else{return Unmanaged.passUnretained(event)}
                 return Unmanaged<ChromeShortcuts>.fromOpaque(info).takeUnretainedValue().handle(type,event)
             }
-            guard let port=CGEvent.tapCreateForPid(pid:chromePID,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:callback,userInfo:Unmanaged.passUnretained(self).toOpaque()) else{report("permission_required","macOS 尚未允许接管快捷键；检查 Mac 助手的辅助功能授权，再试一次。");return}
+            guard let port=CGEvent.tapCreateForPid(pid:chromePID,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:callback,userInfo:Unmanaged.passUnretained(self).toOpaque()) else{report("permission_required", nativeCopy("请在系统设置中允许 Diao Bridge 使用辅助功能。", "Allow Diao Bridge under Accessibility in System Settings."));return}
             tap=port;source=CFMachPortCreateRunLoopSource(kCFAllocatorDefault,port,0)
             if let s=source {CFRunLoopAddSource(CFRunLoopGetMain(),s,.commonModes)}
             CGEvent.tapEnable(tap:port,enable:true)
         }
-        report("ready",context==nil ? "已连接；当前普通窗口有两个标签后即可使用 ⌃ Tab。" : "已启用：⌃ Tab 按最近使用切换，松开 Control 确认。")
+        let ready = context == nil
+            ? nativeCopy("在当前窗口再打开一个标签，即可使用 Control + Tab。", "Open a second tab in this window to use Control + Tab.")
+            : nativeCopy("按 Control + Tab 切换最近使用的标签。", "Use Control + Tab to switch between recent tabs.")
+        report("ready", ready)
     }
     func stop(){if let t=tap {CGEvent.tapEnable(tap:t,enable:false);CFMachPortInvalidate(t)};if let s=source {CFRunLoopRemoveSource(CFRunLoopGetMain(),s,.commonModes)};tap=nil;source=nil;panel?.orderOut(nil);timeout?.invalidate();timeout=nil}
     func focusedWindowMatches()->Bool {
@@ -72,7 +75,7 @@ final class ChromeShortcuts {
         return sameWindow(rect,c.window.rect)
     }
     func handle(_ type:CGEventType,_ event:CGEvent)->Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {end(cancel:false);stop();report("paused","快捷键接管已暂停；在 Diao 的 Mac 设置中重新连接。");return Unmanaged.passUnretained(event)}
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {end(cancel:false);stop();report("paused", nativeCopy("切换已暂停。请在 Diao 的 macOS 设置中重新连接。", "Tab switching paused. Reconnect in Diao’s macOS settings."));return Unmanaged.passUnretained(event)}
         if type == .flagsChanged {if !event.flags.contains(.maskControl){end(cancel:false)};return Unmanaged.passUnretained(event)}
         if type == .leftMouseDown || type == .rightMouseDown {end(cancel:false);return Unmanaged.passUnretained(event)}
         // Do not read Unicode characters or record general keystrokes.
@@ -201,7 +204,7 @@ final class SwitcherContent: NSView {
     }
 
     private let foreground = Foreground()
-    private let heading = NSTextField(labelWithString: "切换标签")
+    private let heading = NSTextField(labelWithString: nativeCopy("切换标签", "Switch tabs"))
     private let position = NSTextField(labelWithString: "")
     private let footer = NSTextField(labelWithString: "")
     private let rule = NSBox()
@@ -238,14 +241,14 @@ final class SwitcherContent: NSView {
         position.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         position.textColor = NativeColors.secondaryLabel
         position.alignment = .right
-        position.setAccessibilityLabel("选择位置")
+        position.setAccessibilityLabel(nativeCopy("选择位置", "Selected position"))
         footer.font = .systemFont(ofSize: 11, weight: .medium)
         footer.textColor = NativeColors.secondaryLabel
         footer.lineBreakMode = .byTruncatingTail
         rule.boxType = .separator
         for view in [heading, position, rule, footer] { foreground.addSubview(view) }
         setAccessibilityRole(.group)
-        setAccessibilityLabel("最近使用的 Chrome 标签")
+        setAccessibilityLabel(nativeCopy("最近使用的 Chrome 标签", "Recent Chrome tabs"))
     }
 
     required init?(coder: NSCoder) { nil }
@@ -264,10 +267,12 @@ final class SwitcherContent: NSView {
         heading.frame = NSRect(x: 17, y: 14, width: width - 108, height: 18)
         position.frame = NSRect(x: width - 94, y: 16, width: 77, height: 15)
         position.stringValue = "\(value.index) / \(value.total)"
-        position.setAccessibilityValue("第 \(value.index) 个，共 \(value.total) 个标签")
+        position.setAccessibilityValue(nativeCopy("第 \(value.index) 个，共 \(value.total) 个标签", "Tab \(value.index) of \(value.total)"))
         rule.frame = NSRect(x: 17, y: height - Self.footerHeight + 3, width: width - 34, height: 1)
         footer.frame = NSRect(x: 17, y: height - 24, width: width - 34, height: 15)
-        footer.stringValue = width >= 308 ? "松开 Control 确认 · Shift 反向 · Esc 取消" : "松开 ⌃ 确认 · ⇧ 反向 · Esc 取消"
+        footer.stringValue = width >= 308
+            ? nativeCopy("松开 Control 确认 · Shift 反向 · Esc 取消", "Release Control · Shift reverses · Esc cancels")
+            : nativeCopy("松开 ⌃ 确认 · ⇧ 反向 · Esc 取消", "Release ⌃ · ⇧ Back · Esc Cancel")
 
         let visibleIDs = Set(items.map(\.id))
         for id in rows.keys.filter({ !visibleIDs.contains($0) }) {
@@ -293,8 +298,9 @@ final class SwitcherContent: NSView {
         return height
     }
 
-    func verifySelection(_ id: Int) -> (visible: Bool, titleWidth: CGFloat) {
-        (rows[id]?.selected == true, rows[id]?.titleWidth ?? 0)
+    func verifySelection(_ id: Int) -> (visible: Bool, titleWidth: CGFloat, footerFits: Bool) {
+        let footerFits = footer.intrinsicContentSize.width <= footer.frame.width
+        return (rows[id]?.selected == true, rows[id]?.titleWidth ?? 0, footerFits)
     }
 
     private final class Row: NSView {
@@ -374,7 +380,7 @@ final class SwitcherContent: NSView {
             title.frame = NSRect(x: 43, y: site.isHidden ? 12 : 5, width: width, height: 17)
             site.frame = NSRect(x: 43, y: 22, width: width, height: 14)
             marker.frame = NSRect(x: bounds.width - 24, y: 13, width: 14, height: 14)
-            setAccessibilityLabel([item.title, item.site].filter { !$0.isEmpty }.joined(separator: "，"))
+            setAccessibilityLabel([item.title, item.site].filter { !$0.isEmpty }.joined(separator: nativeCopy("，", ", ")))
             if self.selected != selected {
                 self.selected = selected
                 setAccessibilitySelected(selected)
@@ -414,16 +420,16 @@ func shortcutSelfTest() throws {
 }
 func verifySwitcherPresentation(renderingTo directory: URL? = nil) throws {
     let examples = [
-        SwitcherPreview.Item(id: 1, title: "Chrome 扩展开发文档", site: "developer.chrome.com", kind: "web", icon: nil),
-        .init(id: 2, title: "会话大纲和主题分组的界面验收", site: "chatgpt.com", kind: "web", icon: nil),
-        .init(id: 3, title: "扩展程序", site: "", kind: "extensions", icon: nil),
-        .init(id: 4, title: "较长的文章标题在空间不足时保持原来的截断位置", site: "example.org", kind: "web", icon: nil),
-        .init(id: 5, title: "打开的文稿", site: "", kind: "file", icon: nil),
-        .init(id: 6, title: "下载内容", site: "", kind: "downloads", icon: nil),
-        .init(id: 7, title: "标签提醒验收", site: "example.com", kind: "web", icon: nil),
+        SwitcherPreview.Item(id: 1, title: nativeCopy("Chrome 扩展开发文档", "Chrome extension docs"), site: "developer.chrome.com", kind: "web", icon: nil),
+        .init(id: 2, title: nativeCopy("社区图书交换试运行", "Community book swap"), site: "chatgpt.com", kind: "web", icon: nil),
+        .init(id: 3, title: nativeCopy("扩展程序", "Extensions"), site: "", kind: "extensions", icon: nil),
+        .init(id: 4, title: nativeCopy("给社区空间办图书交换的完整指南", "A practical guide to neighborhood book swaps"), site: "example.org", kind: "web", icon: nil),
+        .init(id: 5, title: nativeCopy("活动志愿者排班", "Volunteer schedule"), site: "", kind: "file", icon: nil),
+        .init(id: 6, title: nativeCopy("下载内容", "Downloads"), site: "", kind: "downloads", icon: nil),
+        .init(id: 7, title: nativeCopy("社区活动日历", "Community events"), site: "example.com", kind: "web", icon: nil),
     ]
     let cases: [(String, NSAppearance.Name, CGFloat, CGFloat)] = [
-        ("light", .aqua, 396, 400), ("dark", .darkAqua, 396, 400), ("compact", .aqua, 220, 205),
+        ("light", .aqua, 396, 400), ("dark", .darkAqua, 396, 400), ("aligned", .aqua, 308, 260), ("compact", .aqua, 220, 205),
     ]
     if let directory { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
 
@@ -441,7 +447,7 @@ func verifySwitcherPresentation(renderingTo directory: URL? = nil) throws {
             content.layoutSubtreeIfNeeded()
             timings.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
             let selection = content.verifySelection(index)
-            guard height <= availableHeight, selection.visible, selection.titleWidth > 0,
+            guard height <= availableHeight, selection.visible, selection.titleWidth > 0, selection.footerFits,
                   titleWidth == nil || selection.titleWidth == titleWidth else { throw CocoaError(.validationMultipleErrors) }
             titleWidth = selection.titleWidth
         }

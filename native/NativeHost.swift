@@ -12,7 +12,7 @@ func elementRect(_ e:AXUIElement)->CGRect? {
 }
 private let usesChinese = Locale.preferredLanguages.first?.lowercased().hasPrefix("zh") == true
 
-private func nativeCopy(_ chinese: String, _ english: String) -> String {
+func nativeCopy(_ chinese: String, _ english: String) -> String {
     usesChinese ? chinese : english
 }
 
