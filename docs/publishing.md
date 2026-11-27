@@ -25,7 +25,7 @@
 
 首次激活自动更新时，使用固定的 Sparkle 2.10.1 工具生成专用于 Diao 的更新签名密钥。将公开部分配置到 GitHub Actions 变量 `DIAO_UPDATE_PUBLIC_KEY`，私密部分存入 Actions secret `DIAO_SPARKLE_PRIVATE_KEY`，并单独保留发布密钥备份。保持所有发布的更新公钥一致。
 
-打标签后，工作流生成 DMG、Sparkle 更新 ZIP、SHA-256 和签名的 `diao-appcast.xml`，核对归档签名可用，再放入同一个 GitHub Release 草稿。确认更新包后发布为最新正式 Release。助手通过固定的最新正式 Release 地址检查签名更新。正式更新包需要稳定的 Developer ID 签名、公证凭据与配套的 Sparkle 签名密钥。手动构建不附带更新通道。
+打标签后，工作流生成 DMG、Sparkle 更新 ZIP、SHA-256 和签名的 `diao-appcast.xml`，校验更新归档与更新源的签名，再放入同一个 GitHub Release 草稿。确认更新包后发布为最新正式 Release。助手通过固定的最新正式 Release 地址检查签名更新。正式更新包需要稳定的 Developer ID 签名、公证凭据与配套的 Sparkle 签名密钥。手动构建不附带更新通道。
 
 先安装具备更新通道的 Diao Bridge，再用下一版本的签名归档实测下载、忙时延后、原子安装与 Chrome 重新连接。开发版、已安装商店版和正式发布签名通道分别验收。[Sparkle 更新发布文档](https://sparkle-project.org/documentation/publishing/)
 
