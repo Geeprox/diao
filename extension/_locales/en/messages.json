@@ -1027,5 +1027,38 @@
   },
   "panelNoResponse": {
     "message": "Reopen the side panel to reconnect."
+  },
+  "watchPageReady": {
+    "message": "The page shows that the task has finished."
+  },
+  "watchRegionReady": {
+    "message": "The status you selected has changed."
+  },
+  "watchTextReady": {
+    "message": "The page now shows your completion text."
+  },
+  "writeAnnotation": {
+    "message": "Write a note"
+  },
+  "numberedAnnotation": {
+    "message": "Annotation {0}"
+  },
+  "annotationCount": {
+    "message": "Annotations ({0})"
+  },
+  "saveAnnotation": {
+    "message": "Save annotation"
+  },
+  "closeAnnotations": {
+    "message": "Close annotations"
+  },
+  "removeAnnotation": {
+    "message": "Delete annotation {0}"
+  },
+  "responseAnnotations": {
+    "message": "Reply annotations"
+  },
+  "annotationSaved": {
+    "message": "Annotation saved"
   }
 }

@@ -1027,5 +1027,38 @@
   },
   "panelNoResponse": {
     "message": "扩展未响应。请重新打开侧栏。"
+  },
+  "watchPageReady": {
+    "message": "页面显示任务已结束，可以返回检查。"
+  },
+  "watchRegionReady": {
+    "message": "你选中的状态区域已变化，可以返回查看。"
+  },
+  "watchTextReady": {
+    "message": "你设定的完成文案已出现，可以返回检查。"
+  },
+  "writeAnnotation": {
+    "message": "写下批注"
+  },
+  "numberedAnnotation": {
+    "message": "批注 {0}"
+  },
+  "annotationCount": {
+    "message": "{0} 条批注"
+  },
+  "saveAnnotation": {
+    "message": "保存批注"
+  },
+  "closeAnnotations": {
+    "message": "关闭批注"
+  },
+  "removeAnnotation": {
+    "message": "删除批注 {0}"
+  },
+  "responseAnnotations": {
+    "message": "回答批注"
+  },
+  "annotationSaved": {
+    "message": "批注已保存"
   }
 }

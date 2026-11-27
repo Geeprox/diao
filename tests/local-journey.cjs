@@ -643,6 +643,8 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await chat.evaluate(()=>window.fixtureComplete());
   await wait(async()=>(await chatRecord())?.state==='resume','ChatGPT 回答的明确完成状态未进入待接手');
   note('ChatGPT 生成时右键直接监听，连发结束后进入待接手。');
+  // 宿主直接把输入框挂在正文同级时，整页不能被误认为输入区。
+  await chat.locator('#prompt-textarea').evaluate(editor=>editor.parentElement.before(editor));
   await chat.locator('#quote').scrollIntoViewIfNeeded();
   const quote=await chat.locator('#quote').evaluate(element=>{
     const a=new Range(),b=new Range(),text=element.firstChild;
@@ -674,6 +676,13 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await chat.mouse.up();
   const annotation=host.locator('[data-action="add-selection-comment"]');
   await annotation.waitFor({timeout:10000});
+  assert(await annotation.evaluate(button=>{
+    const box=button.getBoundingClientRect();
+    const selection=getSelection().getRangeAt(0).getBoundingClientRect();
+    const x=Math.max(selection.left-box.right,box.left-selection.right,0);
+    const y=Math.max(selection.top-box.bottom,box.top-selection.bottom,0);
+    return Math.hypot(x,y)<95;
+  }), '备用批注入口必须贴在选区附近');
   const externalToolbars=chat.locator('#fixture-shadow-extension, #fixture-light-extension');
   assert.equal(await externalToolbars.locator('[data-threaddeck-selection-comment]').count(),0);
   await annotation.hover();
@@ -720,6 +729,7 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   assert.equal(await chat.evaluate(()=>getSelection().toString()),'保留现有快捷键与本地草稿。');
   await nativeAnnotation.click();
   await host.locator('.comment-popover textarea').waitFor();
+  await chat.locator('#prompt-textarea').evaluate(editor=>document.querySelector('form').prepend(editor));
   assert.equal(await externalToolbars.locator('[data-threaddeck-selection-comment],[data-threaddeck-suppressed]').count(),0);
   await externalToolbars.evaluateAll(toolbars=>toolbars.forEach(toolbar=>toolbar.remove()));
   await host.locator('.comment-popover textarea').fill('这是测试批注');

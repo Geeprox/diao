@@ -8090,10 +8090,10 @@ function tdNavScrollRoot(target) {
       commentBadgeLayerEl.appendChild(button);
       commentAggregateBadgeEl = button;
     }
-    const label = `${reviewComments.length} 条注释`;
+    const label = tr('{0} 条批注', reviewComments.length);
     const labelNode = commentAggregateBadgeEl.querySelector('span');
     if (labelNode) labelNode.textContent = label;
-    commentAggregateBadgeEl.setAttribute('aria-label', `打开${label}`);
+    commentAggregateBadgeEl.setAttribute('aria-label', label);
     commentAggregateBadgeEl.title = label;
     scheduleInlineCommentPosition();
     scheduleQueueDockPosition();
@@ -8174,7 +8174,7 @@ function tdNavScrollRoot(target) {
     scheduleWorkflowSave();
     syncInlineCommentBadges();
     closeInlineCommentPopover();
-    if (showFeedback) showToast('批注已保存', 1000);
+    if (showFeedback) showToast(tr('批注已保存'), 1000);
     return true;
   }
 
@@ -8190,16 +8190,16 @@ function tdNavScrollRoot(target) {
       const shell = createWorkflowElement('div', 'comment-compose-shell');
       const textarea = createWorkflowElement('textarea', 'comment-compose-input');
       textarea.rows = 1;
-      textarea.placeholder = '写下批注';
+      textarea.placeholder = tr('写下批注');
       textarea.value = comment.note || '';
       textarea.dataset.commentCompose = comment.id;
-      textarea.setAttribute('aria-label', '用户评论');
+      textarea.setAttribute('aria-label', tr('写下批注'));
       textarea.setAttribute('aria-keyshortcuts', 'Enter Alt+Enter Shift+Enter');
       const send = createWorkflowElement('button', 'comment-compose-send');
       send.type = 'button';
       send.dataset.action = 'comment-compose-save';
-      send.setAttribute('aria-label', '保存这条批注');
-      send.title = '保存批注';
+      send.setAttribute('aria-label', tr('保存批注'));
+      send.title = tr('保存批注');
       send.innerHTML = threadDeckIcon('check');
       shell.append(textarea, send);
       fragment.appendChild(shell);
@@ -8210,11 +8210,11 @@ function tdNavScrollRoot(target) {
         return;
       }
       const header = createWorkflowElement('div', 'comment-thread-header');
-      header.appendChild(createWorkflowElement('strong', 'comment-thread-title', `${comments.length} 条注释`));
+      header.appendChild(createWorkflowElement('strong', 'comment-thread-title', tr('{0} 条批注', comments.length)));
       const close = createWorkflowElement('button', 'comment-thread-close');
       close.type = 'button';
       close.dataset.action = 'comment-popover-close';
-      close.setAttribute('aria-label', '关闭批注');
+      close.setAttribute('aria-label', tr('关闭批注'));
       close.innerHTML = '<svg viewBox="0 0 18 18" aria-hidden="true"><path d="m5 5 8 8M13 5l-8 8"/></svg>';
       header.appendChild(close);
       fragment.appendChild(header);
@@ -8228,14 +8228,14 @@ function tdNavScrollRoot(target) {
         quote.title = comment.quote;
         const note = createWorkflowElement('textarea', 'comment-thread-note');
         note.rows = 2;
-        note.placeholder = `批注 ${index + 1}`;
+        note.placeholder = tr('批注 {0}', index + 1);
         note.value = comment.note || '';
         note.dataset.commentNote = comment.id;
         const remove = createWorkflowElement('button', 'comment-thread-delete');
         remove.type = 'button';
         remove.dataset.action = 'remove-comment';
         remove.dataset.commentId = comment.id;
-        remove.setAttribute('aria-label', `删除批注 ${index + 1}`);
+        remove.setAttribute('aria-label', tr('删除批注 {0}', index + 1));
         remove.title = tr('删除');
         remove.innerHTML = threadDeckIcon('trash');
         card.append(quote, note, remove);
@@ -8528,12 +8528,17 @@ function tdNavScrollRoot(target) {
   function getComposerBoundary() {
     const composer = getChatGptComposer();
     if (!(composer instanceof HTMLElement)) return null;
+    // 找不到明确的输入区容器时，只采用与正文隔离的直接父级。
+    const turns = TD_DOM_ROLE_ATTRS.map(a => `[${a}="assistant"],[${a}="user"]`).join(',') +
+      ',[data-turn-id-container],[data-testid^="conversation-turn-"]';
+    let fallback = composer;
     let node = composer.parentElement;
     for (let i = 0; node && i < 7; i++, node = node.parentElement) {
-      if (node.matches('main,body,html,#thread') || node.querySelector(TD_DOM_ROLE_ATTRS.map(a => `[${a}="assistant"],[${a}="user"]`).join(',') + ',[data-turn-id-container],[data-testid^="conversation-turn-"]')) break;
+      if (node.matches('main,body,html,#thread') || node.querySelector(turns)) break;
       if (node.matches('[data-testid="composer"],form,input-area-v2,[class*="composer" i]')) return node;
+      if (i === 0) fallback = node;
     }
-    return composer.parentElement || composer;
+    return fallback;
   }
 
   function elementBelongsToConversationTurn(element) {

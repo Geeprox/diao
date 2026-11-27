@@ -100,7 +100,8 @@ function makeRow(t) {
  const title=document.createElement('h2');title.className='tab-title';title.append(button(t.title||'无标题页面',()=>rpc('activate',{tabId:t.id}),'title-button','activate'));
  const reason=document.createElement('p');reason.className='reason';
  const duplicate=data.duplicates?.[t.id];
- reason.textContent=tr(analyzingTabs.has(t.id)?'正在分析页面…':watched?.[1]||(r.reason?(r.reason+(r.apiIssue?' '+r.apiIssue:'')):r.apiIssue)||(duplicate?.extra?'此网址已在另一个标签中打开，分析后可检查是否适合清理。':safeURL(t.url)?'未开始监听或分析。':'浏览器页面，可切换，支持的网页才能监听或分析。'));
+ const explanation=[r.reason,r.apiIssue].filter(Boolean).map(copy=>tr(copy)).join(' ');
+ reason.textContent=tr(analyzingTabs.has(t.id)?'正在分析页面…':watched?.[1]||explanation||(duplicate?.extra?'此网址已在另一个标签中打开，分析后可检查是否适合清理。':safeURL(t.url)?'未开始监听或分析。':'浏览器页面，可切换，支持的网页才能监听或分析。'));
  const actions=document.createElement('div');actions.className='row-actions';
  if(r.state==='resume')actions.append(button('返回接手',async()=>{await rpc('activate',{tabId:t.id});await refresh();},'secondary','resume'));
  if(['closing','paused'].includes(r.state)){
