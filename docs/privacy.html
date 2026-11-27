@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy policy — Diao</title>
+  <meta name="description" content="How Diao uses page content, model connections and Chrome Sync for tab organization and ChatGPT tools.">
+  <link rel="canonical" href="https://geeprox.github.io/diao/privacy.html">
+  <link rel="alternate" hreflang="en" href="https://geeprox.github.io/diao/privacy.html">
+  <link rel="alternate" hreflang="zh-Hans" href="https://geeprox.github.io/diao/zh-cn/privacy.html">
+  <link rel="alternate" hreflang="x-default" href="https://geeprox.github.io/diao/privacy.html">
+  <link rel="icon" href="assets/branding/Diao.png">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="./"><img src="assets/branding/Diao.png" width="38" height="38" alt="">Diao</a>
+    <a href="zh-cn/privacy.html" hreflang="zh-Hans" lang="zh-Hans">简体中文</a>
+  </header>
+  <main class="guide">
+    <h1>Privacy policy</h1>
+    <p class="lead">Diao uses browser data to organize open tabs, watch tasks and help you revisit ChatGPT conversations. This policy covers Diao 0.5.</p>
+    <dl>
+      <dt>Tabs and reminders</dt>
+      <dd>Diao reads open tab titles, addresses, groups and recent activity in regular Chrome windows. On pages you allow it to access, Diao can track task status and changes in a region you select. Watch settings stay in your Chrome profile. Recently closed tabs are available for 30 minutes during the current Chrome session. Opening links together with their source tab is handled in Chrome.</dd>
+      <dt>ChatGPT tools</dt>
+      <dd>With ChatGPT access enabled, Diao reads questions, replies, headings and selected text to build the outline and place annotations. Diao stores annotations and overview results locally. Queued messages use the ChatGPT composer and send controls, and the messages you send go to ChatGPT.</dd>
+      <dt>Requests to your model provider</dt>
+      <dd>When you use model-powered tab analysis, Diao sends the title, address without query or fragment, up to 1,600 characters of readable text and signals about page state. If you enable smart grouping and shelving, Diao uses the same data from allowed pages plus source-tab relationships, group and position, and time since last use to organize open tabs automatically. It moves finished tabs into the Idle tabs group so you can reopen the group later.</dd>
+      <dd>Conversation summaries send readable questions, reply text, headings and indicators for image replies to the configured OpenAI connection. In preparation mode, this can start when the current conversation is idle, before you open the overview. If more history becomes available, Diao uses it to update the overview and reuses cached results for matching content. Choose the original and cached view in the ChatGPT settings to turn off new summary requests.</dd>
+      <dd>Diao sends requests directly to the HTTPS endpoint you configure, with its API credential. Your model provider's privacy and retention policies apply to the data it receives.</dd>
+      <dt>Model connection and Chrome Sync</dt>
+      <dd>You can keep a key for the current session or save it in your Chrome profile's encrypted storage. Chrome Sync sends the encrypted key, connection settings and public parameters needed to unlock it to Google's sync service. A device restores the connection after a passkey or pairing code unlock. Conversation summaries and annotations stay out of the connection sync record. A compatible Mac helper can also use macOS Keychain when you choose that storage option.</dd>
+      <dt>Diao Bridge</dt>
+      <dd>The optional Mac helper uses Accessibility access to locate Chrome windows and tabs so it can place tab-side reminders and show the keyboard switcher. It exchanges the window and tab state needed for these features with the extension on your Mac. You can manage that access in macOS System Settings.</dd>
+      <dt>Manage your data</dt>
+      <dd>In Diao, you can stop watching tasks, remove annotations and remove your saved key. To remove a shared key, use Remove from sync in Model connection. Uninstalling Diao clears its local Chrome data. To remove a saved Keychain entry, remove the key before uninstalling the helper.</dd>
+    </dl>
+    <p>Diao's use of information follows the <a href="https://developer.chrome.com/docs/webstore/program-policies/policies">Chrome Web Store User Data Policy</a>, including its Limited Use requirements.</p>
+  </main>
+  <footer>
+    <a href="https://github.com/Geeprox/diao/issues">Support</a>
+    <a href="https://geeprox.github.io/tab-cadence-support/" lang="zh-Hans">Tab Cadence 0.4 policy</a>
+  </footer>
+</body>
+</html>

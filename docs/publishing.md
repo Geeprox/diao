@@ -1,6 +1,6 @@
 # Diao 发布路线
 
-使用 Geeprox 的现有 [商店条目](https://chromewebstore.google.com/detail/jbamhjcmjhmmhehjnnblflckmikhjojm) 发版本。安装身份为 jbamhjcmjhmmhehjnnblflckmikhjojm。资料见[隐私政策](https://geeprox.github.io/tab-cadence-support/)与[审核测试页](https://geeprox.github.io/tab-cadence-support/review-fixture.html)。
+使用 Geeprox 的现有 [商店条目](https://chromewebstore.google.com/detail/jbamhjcmjhmmhehjnnblflckmikhjojm) 发版本。安装身份为 jbamhjcmjhmmhehjnnblflckmikhjojm。资料见[隐私政策](https://geeprox.github.io/diao/privacy.html)与[审核测试页](https://geeprox.github.io/tab-cadence-support/review-fixture.html)。
 
 ## Chrome 扩展
 
