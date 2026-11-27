@@ -52,7 +52,7 @@
   const REVIEW_SELECTION_MIN_CHARS = 1;
   const REVIEW_SELECTION_MAX_CHARS = 32768; // save limit; larger selections keep an explanatory action
   const NATIVE_SELECTION_TOOLBAR_FALLBACK_MS = 150;
-  const NATIVE_SELECTION_TOOLBAR_DISCOVERY_MS = 900;
+  const NATIVE_SELECTION_PRIMARY_SELECTOR = '[role="presentation"].bg-surface-elevated-secondary button.cursor-interaction,button[data-testid*="ask-chatgpt" i]';
   const NATIVE_SELECTION_PENDING_TTL_MS = 30000;
   const NATIVE_SELECTION_TOOLBAR_MAX_DISTANCE_PX = 230;
   const QUEUE_POLL_MS = 80;
@@ -240,7 +240,7 @@
   let nativeSelectionButtonEl = null;
   let nativeSelectionToolbarEl = null;
   let nativeSelectionFallbackTimer = null;
-  let nativeSelectionSearchTimer = null;
+  let nativeSelectionSearchLifecycle = null;
   let nativeSelectionObserver = null;
   let nativeSelectionSuppressionObserver = null;
   let nativeSelectionSuppressionRaf = null;
@@ -2029,9 +2029,9 @@
       tdResumeSelectionWork();
       tdWake(120);
     },{capture:true,passive:true});
-    window.addEventListener('pointercancel',()=>{tdSelectionReset();reviewHitGesture=null;tdResumeSelectionWork();tdWake(150);},{capture:true,passive:true});
-    window.addEventListener('blur',()=>{tdSelectionReset();reviewHitGesture=null;tdResumeSelectionWork();},{capture:true,passive:true});
-    document.addEventListener('visibilitychange',()=>{if(document.hidden)tdSelectionReset();});
+    window.addEventListener('pointercancel',()=>{tdSelectionReset();hideSelectionAction();reviewHitGesture=null;tdResumeSelectionWork();tdWake(150);},{capture:true,passive:true});
+    window.addEventListener('blur',()=>{tdSelectionReset();hideSelectionAction();reviewHitGesture=null;tdResumeSelectionWork();},{capture:true,passive:true});
+    document.addEventListener('visibilitychange',()=>{if(document.hidden){tdSelectionReset();hideSelectionAction();}});
     window.addEventListener('keydown',event=>{
       if(event.shiftKey&&['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'].includes(event.key) &&
           tdSelectionAllowed(window.getSelection()?.anchorNode)){
@@ -7027,21 +7027,27 @@ function tdNavScrollRoot(target) {
   }
   async function tdNavAfterHostLayout(req) {
     const thread = tdZoom.scene?.root || tdZoomRoot();
-    if (thread && req.paging && tdZoomEarlierMessagesPending(thread)) {
-      // 某些虚拟列表会先挂载章节，分页转场完毕后才应用最后一次宿主滚动校正。
-      const target = await tdNavWait(req,()=>tdZoomEarlierMessagesPending(thread) ? null : tdNavResolve(req),1800);
-      if (!tdNavAlive(req)) return null;
-      if (target && req.root?.isConnected && !tdNavVerification(target).ok) {
-        // 加载器退场时宿主有时重新锚定末尾。先恢复刚刚读过的同一端，再精确定位。
-        const info = tdNavScrollInfo(req.root);
-        const boundary = req.paging === 'up' ? info.min : info.max;
-        tdSignalHostReadingScroll(req.root,boundary-info.top);
-        tdNavWriteScroll(req,req.root,boundary);
-        if (!await tdNavFrame(req)) return null;
-      }
+    if (thread && req.paging === 'up' && tdZoomEarlierMessagesPending(thread)) {
+      // 早期章节可能先挂载。等 ChatGPT 完成分页和滚动校正后，再核对落点。
+      await tdUntil(() => !tdNavAlive(req) || !tdZoomEarlierMessagesPending(thread),1800,req.scope,80);
     }
     if (!await tdDelay(160,req.scope) || !tdNavAlive(req)) return null;
-    return tdNavVerifyArrival(req,tdNavResolve(req));
+    let target = tdNavResolve(req);
+    if (req.paging && req.root?.isConnected && (!target || !tdNavVerification(target).visible)) {
+      // 先让宿主收到回到分页边界的滚动，再将准确章节放进视口。
+      const root = req.root;
+      const info = tdNavScrollInfo(root);
+      const boundary = req.paging === 'up' ? info.min : info.max;
+      tdSignalHostReadingScroll(root,boundary-info.top);
+      tdNavWriteScroll(req,root,boundary);
+      if (!await tdNavFrame(req)) return null;
+      target = await tdNavWait(req,() => tdNavResolve(req),900);
+    }
+    if (target && tdNavAlive(req)) {
+      const root = tdNavScrollRoot(target);
+      tdSignalHostReadingScroll(root,tdNavGeometry(root,target).scroll-tdNavScrollInfo(root).top);
+    }
+    return tdNavVerifyArrival(req,target);
   }
 
   async function tdNavRun(entry, block = null, overviewRecords = null) {
@@ -7092,20 +7098,19 @@ function tdNavScrollRoot(target) {
         if (!tdNavAlive(req)) return { result: 'cancelled' };
         if (!target) throw new Error(liveBlock ? 'section-unresolved' : 'message-unmounted');
       }
-      if (!await tdNavPlace(req, target, true)) return { result: 'cancelled' };
-      // Resolve once more after the scroll: never trust a node across virtualization.
+      const settleHost = Boolean(overviewRecords || req.paging);
+      const placed = await tdNavPlace(req, target, true);
+      if (!tdNavAlive(req) || !placed && !settleHost) return { result: 'cancelled' };
+      // 每次滚动后重新匹配原文。概览和按需分页还要等宿主结束滚动校正。
       let exact = tdNavResolve(req);
-      if (!exact) exact = await tdNavWait(req, () => tdNavResolve(req), 1000);
-      if (!tdNavAlive(req)) return { result: 'cancelled' };
-      if (!exact) throw new Error('target-remounted');
-      exact = await tdNavVerifyArrival(req, exact);
+      if (!settleHost && !exact) {
+        exact = await tdNavWait(req, () => tdNavResolve(req), 1000);
+        if (!tdNavAlive(req)) return { result: 'cancelled' };
+        if (!exact) throw new Error('target-remounted');
+      }
+      exact = settleHost ? await tdNavAfterHostLayout(req) : await tdNavVerifyArrival(req, exact);
       if (!tdNavAlive(req)) return {result:'cancelled'};
       if (!exact) throw new Error('scroll-did-not-reach-target');
-      if (overviewRecords || req.paging) {
-        exact = await tdNavAfterHostLayout(req);
-        if (!tdNavAlive(req)) return {result:'cancelled'};
-        if (!exact) throw new Error('scroll-did-not-reach-target');
-      }
       const error = req.verification.alignmentErrorPx;
       const live = tdNavLiveEntry(req), index = entries.indexOf(live);
       if (index >= 0) setActiveIndex(index, false);
@@ -8431,9 +8436,9 @@ function tdNavScrollRoot(target) {
 
   function stopNativeSelectionSearch() {
     clearTimeout(nativeSelectionFallbackTimer);
-    clearTimeout(nativeSelectionSearchTimer);
+    nativeSelectionSearchLifecycle?.abort();
     nativeSelectionFallbackTimer = null;
-    nativeSelectionSearchTimer = null;
+    nativeSelectionSearchLifecycle = null;
     nativeSelectionObserver?.disconnect();
     nativeSelectionObserver = null;
   }
@@ -8658,15 +8663,10 @@ function tdNavScrollRoot(target) {
   }
 
   function findNativeSelectionToolbar(selectionRect) {
-    const selector = '[role="presentation"] button,button[data-testid*="ask-chatgpt" i]';
     let best = null;
     // ChatGPT 的选区气泡位于页面自身的浮层。通用工具条及扩展的影子根不参与匹配。
-    for (const anchor of safeQueryAll(document,selector)) {
+    for (const anchor of safeQueryAll(document,NATIVE_SELECTION_PRIMARY_SELECTOR)) {
       if (!isElementVisible(anchor) || !isNativeSelectionPrimaryAction(anchor) || isNativeSelectionToolbarDecoy(anchor)) continue;
-      const row = anchor.closest('[role="presentation"]');
-      const nativeTheme = row?.classList.contains('bg-surface-elevated-secondary') &&
-        anchor.classList.contains('cursor-interaction');
-      if (!nativeTheme && !anchor.matches('[data-testid*="ask-chatgpt" i]')) continue;
       const root = findCompactFloatingRoot(anchor);
       if (!root) continue;
       const score = nativeToolbarGeometryScore(root,selectionRect);
@@ -8781,10 +8781,12 @@ function tdNavScrollRoot(target) {
     const anchor = match?.anchor;
     if (!(toolbar instanceof HTMLElement) || !toolbar.isConnected || isNativeSelectionToolbarDecoy(toolbar)) return false;
     let button = toolbar.querySelector('[data-threaddeck-selection-comment="true"]');
-    if (!(button instanceof HTMLButtonElement)) {
+    if (!(button instanceof HTMLButtonElement) || button !== nativeSelectionButtonEl) {
       const container = findNativeToolbarButtonContainer(toolbar,anchor);
       if (!(container instanceof HTMLElement) || isNativeSelectionToolbarDecoy(container)) return false;
-      if (nativeSelectionButtonEl?.isConnected) nativeSelectionButtonEl.remove();
+      // 复用同一个按钮。宿主复制的节点没有原点击处理器。
+      button?.remove();
+      nativeSelectionButtonEl?.remove();
       button = createNativeSelectionButton(toolbar,anchor);
       container.appendChild(button);
     }
@@ -8804,10 +8806,12 @@ function tdNavScrollRoot(target) {
     clearNativeSelectionAction();
     if (selectionActionEl) selectionActionEl.hidden = true;
 
-    const alive = () => token === nativeSelectionIntegrationToken && !tdSelectionBusy() && pendingSelection;
+    const lifecycle = new AbortController();
+    nativeSelectionSearchLifecycle = lifecycle;
+    const alive = () => !lifecycle.signal.aborted && token === nativeSelectionIntegrationToken &&
+      !document.hidden && !tdSelectionBusy() && pendingSelection;
     const attach = () => {
       if (!alive()) return false;
-      if (tdDomActionVisible(nativeSelectionButtonEl)) return true;
       try {
         const match = findNativeSelectionToolbar(selectionRect);
         return Boolean(match && attachNativeSelectionAction(match));
@@ -8817,35 +8821,45 @@ function tdNavScrollRoot(target) {
       }
     };
 
-    // 宿主会在文字选中之后异步挂载或替换菜单。合并这些变化，避免轮询整页。
-    const portal = 'button,[role="toolbar"],[popover],[data-state],[data-floating-ui-portal],[data-testid*="selection" i]';
+    // 宿主迟到的浮层与重挂载都属于同一选区。只在相关 DOM 变化后重新结合。
+    const matchesPrimary = node => node instanceof HTMLElement &&
+      (node.matches(NATIVE_SELECTION_PRIMARY_SELECTOR) || node.querySelector(NATIVE_SELECTION_PRIMARY_SELECTOR));
+    const reconcile = () => {
+      if (!alive()) return;
+      if (attach()) selectionActionEl.hidden = true;
+      else if (nativeSelectionFallbackTimer === null) positionSelectionAction(selectionRect);
+    };
     let queued = false;
     const queueAttach = () => {
-      if (queued) return;
+      if (queued || !alive()) return;
       queued = true;
       requestAnimationFrame(() => {
         queued = false;
-        if (attach() && selectionActionEl) selectionActionEl.hidden = true;
+        reconcile();
       });
     };
     nativeSelectionObserver = new MutationObserver(records => {
-      if (!alive() || tdDomActionVisible(nativeSelectionButtonEl)) return;
-      if (records.some(record => [...record.addedNodes, record.target].some(node =>
-        node instanceof HTMLElement && !node.closest('#threaddeck-host,[data-threaddeck-selection-comment]') &&
-        (node.matches(portal) || record.type === 'childList' && node !== record.target && node.querySelector(portal))))) queueAttach();
+      if (nativeSelectionToolbarEl && !nativeSelectionToolbarEl.isConnected) {
+        queueAttach();
+        return;
+      }
+      if (records.some(record => record.type === 'attributes'
+        ? matchesPrimary(record.target)
+        : Array.from(record.addedNodes).some(matchesPrimary) ||
+          record.removedNodes.length > 0 && nativeSelectionToolbarEl?.contains(record.target))) queueAttach();
     });
     nativeSelectionObserver.observe(document.body || document.documentElement, {
-      childList:true, subtree:true, attributes:true, attributeFilter:['class','hidden','style','data-state'],
+      childList:true, subtree:true, attributes:true,
+      attributeFilter:['class','hidden','style','role','aria-label','aria-hidden','data-state','data-testid'],
     });
+    const onHostAnimationEnd = event => { if (matchesPrimary(event.target)) queueAttach(); };
+    for (const name of ['animationend','transitionend']) {
+      document.addEventListener(name,onHostAnimationEnd,{capture:true,signal:lifecycle.signal});
+    }
     nativeSelectionFallbackTimer = setTimeout(() => {
       nativeSelectionFallbackTimer = null;
-      if (alive() && !attach()) positionSelectionAction(selectionRect);
+      reconcile();
     }, NATIVE_SELECTION_TOOLBAR_FALLBACK_MS);
-    nativeSelectionSearchTimer = setTimeout(() => {
-      if (!alive()) return;
-      if (attach() && selectionActionEl) selectionActionEl.hidden = true;
-      stopNativeSelectionSearch();
-    }, NATIVE_SELECTION_TOOLBAR_DISCOVERY_MS);
     queueAttach();
   }
 
@@ -8978,7 +8992,7 @@ function tdNavScrollRoot(target) {
     // first selection. Reinitialising here would remove the button we just injected.
     tdDomState.selection=tooLong?'selection-too-long':'selection-ready';
     tdDomRememberSelection(tdDomState.selection,range,true);
-    if (!sameSelection || !tdDomActionVisible(nativeSelectionButtonEl) && selectionActionEl.hidden && nativeSelectionFallbackTimer === null) {
+    if (!sameSelection || !nativeSelectionObserver) {
       scheduleNativeSelectionIntegration(rectSnapshot);
     }
   }
@@ -10892,11 +10906,15 @@ function tdNavScrollRoot(target) {
  if(reviewSelectionListenersInstalled)return;reviewSelectionListenersInstalled=true;tdInstallSelectionGesture();
  document.addEventListener('selectionchange',()=>{tdSelectionSnapshot();if(!tdSelectionBusy())tdSelectionSchedule(36);},true);
  document.addEventListener('selectstart',()=>{if(tdSelectionBusy())return;tdSelection.serial++;tdSelection.sample=null;tdPauseSelectionIntegration();},true);
- // Retry for a lazy/replaced native toolbar, only after selection has settled.
+ // 只在选区已稳定时检查恢复。宿主清除选区后，释放暂存范围与观察器。
  window.setInterval(()=>{
-   if(tdSelectionBusy()||td.tx||!settings.enabled||!settings.enableInlineComments||activeCommentMode==='compose')return;
+   if(document.hidden||tdSelectionBusy()||td.tx||!settings.enabled||!settings.enableInlineComments||activeCommentMode==='compose')return;
    const s=window.getSelection();
-   if(s&&!s.isCollapsed&&s.rangeCount===1&&!tdDomActionVisible(nativeSelectionButtonEl)&&selectionActionEl?.hidden&&nativeSelectionFallbackTimer===null)tdSelectionSchedule(24);
+   if(!s || s.isCollapsed){
+     if(pendingSelection && Date.now()-pendingSelection.capturedAt>=NATIVE_SELECTION_PENDING_TTL_MS)hideSelectionAction();
+     return;
+   }
+   if(s.rangeCount===1&&!tdDomActionVisible(nativeSelectionButtonEl)&&selectionActionEl?.hidden&&nativeSelectionFallbackTimer===null)tdSelectionSchedule(24);
  },650);
 }
 
@@ -11672,9 +11690,8 @@ function tdNavScrollRoot(target) {
     try {
       for (let pass=0; pass<2 && tdNavAlive(req); pass++) {
         const target = tdNavResolve(req) || await tdNavMountCaptured(req,captured,root);
-        if (!target || !await tdNavPlace(req,target)) break;
-        const verified = await tdNavVerifyArrival(req,tdNavResolve(req));
-        if (!verified) continue;
+        if (!target) break;
+        await tdNavPlace(req,target);
         const landed = await tdNavAfterHostLayout(req);
         if (!tdNavAlive(req)) return {result:'cancelled'};
         if (!landed) continue;
@@ -11686,8 +11703,10 @@ function tdNavScrollRoot(target) {
       }
       return {result:'unavailable'};
     } finally {
-      if (!arrived && tdNavigation.current === req) tdNavCancel('overview-target-unavailable');
-      if (!arrived && tdZoom.scene === scene && tdAlive(scope)) tdZoomNativeScroll(root,initial);
+      if (!arrived && tdNavigation.current === req) {
+        tdNavCancel('overview-target-unavailable');
+        if (tdZoom.scene === scene && tdAlive(scope)) tdZoomNativeScroll(root,initial);
+      }
     }
   }
 

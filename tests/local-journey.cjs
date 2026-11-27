@@ -42,6 +42,13 @@ manifest.host_permissions=['https://chatgpt.com/*','https://watch.fixture.invali
 manifest.default_locale='zh_CN';
 fs.rmSync(path.join(copy,'_locales','en'),{recursive:true});
 fs.writeFileSync(path.join(copy,'manifest.json'),JSON.stringify(manifest));
+
+const diagnosticScript = path.join(copy,'threaddeck.js');
+const fixtureStatus = fs.readFileSync(diagnosticScript,'utf8');
+const workflowMarker = '      workflow: {\n        comments:';
+assert(fixtureStatus.includes(workflowMarker));
+fs.writeFileSync(diagnosticScript,fixtureStatus.replace(workflowMarker,'      workflow: {\n        navigation: tdNavigation.last,\n        comments:'));
+
 // 测试副本用受控菜单事件启动实际处理器。发布源码不包含测试入口。
 fs.appendFileSync(path.join(copy,'worker.mjs'),'\nglobalThis.fixtureMenu=handleTabMenu;globalThis.fixtureSmart=(windowId,tabId)=>organizeSmartTabs(windowId,tabId);');
 const watchPage='<title>合成构建任务</title><main style="margin:56px;font:18px system-ui"><h1>构建任务</h1><p id="state">正在执行</p></main>';
@@ -134,6 +141,7 @@ viewport.scrollTop=initialEnd;
 window.fixtureNativeLoads=0;
 window.fixtureNativeRebounds=0;
 window.fixtureCompleteRebounds=0;
+window.fixtureEarlyMountedWhileBusy=false;
 let provedHead=false, jumpHead=[];
 window.fixtureJumpRebounds=0;
 window.fixtureHostReadIntents=0;
@@ -164,7 +172,12 @@ viewport.addEventListener('scroll',()=>{
     return;
   }
   if(window.fixtureNativeLoads){
-    if(loader.isConnected || provedHead)return;
+    if(loader.isConnected){
+      if(progressive && window.fixtureEarlyMountedWhileBusy && viewport.scrollTop<viewport.scrollHeight-viewport.clientHeight-2)
+        viewport.scrollTop=viewport.scrollHeight;
+      return;
+    }
+    if(provedHead)return;
     if(viewport.scrollTop<=2)provedHead=true;
     else if(viewport.scrollTop<viewport.scrollHeight-viewport.clientHeight-2){
       window.fixtureCompleteRebounds++;
@@ -190,7 +203,13 @@ viewport.addEventListener('scroll',()=>{
   document.querySelector('[data-turn-key="native-placeholder"]').remove();
   const existing=[...document.querySelectorAll('#fixture-native-turns > [data-turn-key]')];
   for(const turn of existing) turn.hidden=true;
-  setTimeout(()=>loader.insertAdjacentHTML('afterend',${JSON.stringify(viewportHead)}),1120);
+  setTimeout(()=>{
+    loader.insertAdjacentHTML('afterend',${JSON.stringify(viewportHead)});
+    if(progressive && loader.isConnected){
+      window.fixtureEarlyMountedWhileBusy=true;
+      viewport.scrollTop=viewport.scrollHeight;
+    }
+  },1120);
   setTimeout(()=>{
     for(const turn of existing) turn.hidden=false;
     viewport.scrollTop=viewport.scrollHeight;
@@ -704,7 +723,8 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     const style=document.createElement('style');
     style.textContent='.fixture-fade{padding:0 6px;min-height:28px;font:400 14px/18px system-ui;border:0;background:transparent;color:inherit}.fixture-fade:hover{opacity:.1}';
     document.head.append(style);
-    document.body.append(toolbar);
+    // 真实页面的划词浮层可能晚于备用按钮出现，原选区应自动转回宿主浮层。
+    setTimeout(()=>document.body.append(toolbar),1150);
   },quote);
   const nativeAnnotation=chat.getByTestId('fixture-popup').locator('[role=presentation]').getByRole('button',{name:'添加批注'});
   await nativeAnnotation.waitFor({timeout:3500});
@@ -726,6 +746,15 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
     return [own.opacity,own.fontSize===native.fontSize,own.fontWeight===native.fontWeight,
       button.getBoundingClientRect().height===host.getBoundingClientRect().height,paint.getImageData(0,0,1,1).data[3]];
   }),['1',true,true,true,255]);
+  assert.equal(await chat.evaluate(()=>getSelection().toString()),'保留现有快捷键与本地草稿。');
+  await chat.getByTestId('fixture-popup').evaluate(toolbar=>{
+    const replacement=toolbar.cloneNode(true);
+    replacement.querySelector('[data-threaddeck-selection-comment]').setAttribute('aria-label','待替换的旧批注');
+    replacement.dataset.fixtureRemounted='true';
+    toolbar.replaceWith(replacement);
+  });
+  await chat.locator('[data-fixture-remounted]').getByRole('button',{name:'添加批注'}).waitFor();
+  await annotation.waitFor({state:'hidden'});
   assert.equal(await chat.evaluate(()=>getSelection().toString()),'保留现有快捷键与本地草稿。');
   await nativeAnnotation.click();
   await host.locator('.comment-popover textarea').waitFor();
@@ -1264,6 +1293,13 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
   await overview.locator('.zoom-chapters summary').first().click();
   await overview.locator('.zoom-chapter',{hasText:'重复章节标题'}).first().click();
   await overview.waitFor({state:'hidden',timeout:7000}).catch(async error=>{
+    console.log('冷启动宿主状态',await chat.evaluate(()=>{
+      const view=document.querySelector('#fixture-history-viewport');
+      const head=document.querySelector('#fixture-native-heading-1');
+      return {top:view.scrollTop,max:view.scrollHeight-view.clientHeight,head:head?.getBoundingClientRect().top,
+        loads:window.fixtureNativeLoads,intermediate:window.fixtureIntermediateWindows,busy:window.fixtureEarlyMountedWhileBusy,
+        rebounds:window.fixtureCompleteRebounds,readIntents:window.fixtureHostReadIntents};
+    }));
     console.log('冷启动定位回执',await sw.evaluate(async url=>{
       const [tab]=await chrome.tabs.query({url});
       return (await chrome.tabs.sendMessage(tab.id,{type:'PROMPT_RAIL_GET_STATUS'}))?.workflow?.navigation;
@@ -1277,6 +1313,8 @@ viewport.scrollTo=(...args)=>{window.fixtureStalledScrolls++;return scroll(...ar
       scroll:viewport.scrollTop,loading:Boolean(document.querySelector('#fixture-native-loader'))};
   });
   assert(coldJump.inside&&!coldJump.loading,'冷启动查询缓存后，仍可跳到唯一的早期章节 '+JSON.stringify(coldJump));
+  assert(await chat.evaluate(()=>window.fixtureEarlyMountedWhileBusy),'最早章节应出现在宿主仍可能回弹时');
+  assert.equal(await chat.locator('#fixture-native-heading-2').getAttribute('data-threaddeck-nav-hit'),null);
   assert(await chat.evaluate(()=>window.fixtureIntermediateWindows)>=2,'冷启动应通过中间视口触发宿主逐段挂载');
   assert.equal(await chat.locator('#fixture-native-turns').evaluate(node=>getComputedStyle(node).filter),'none');
   assert.equal(await sw.evaluate(()=>globalThis.fixtureTopicEvidence.length),requestsAfterNative);
