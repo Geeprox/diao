@@ -764,9 +764,9 @@ final class SetupController: NSObject, NSWindowDelegate {
                 action.isEnabled = true
             }
         case .invalid:
-            NSWorkspace.shared.open(URL(string: "https://github.com/Geeprox/tab-cadence/releases/latest")!)
+            NSWorkspace.shared.open(URL(string: "https://github.com/Geeprox/diao/releases/latest")!)
         case .conflict:
-            NSWorkspace.shared.open(URL(string: "https://github.com/Geeprox/tab-cadence/blob/main/docs/mac-install.md")!)
+            NSWorkspace.shared.open(URL(string: "https://github.com/Geeprox/diao/blob/main/docs/mac-install.md")!)
         case .failure:
             refresh()
         case .authorize:

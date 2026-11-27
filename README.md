@@ -1,6 +1,6 @@
 # Diao
 
-[English](docs/index.html) · [简体中文](docs/zh-cn/index.html)
+[English](https://geeprox.github.io/diao/) · [简体中文](https://geeprox.github.io/diao/zh-cn/)
 
 Chrome 标签旁的本地提醒，以及 ChatGPT 页面内的批注、排队和大纲。
 

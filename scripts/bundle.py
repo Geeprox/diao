@@ -45,7 +45,7 @@ if update_key:
     if not store_id or not args.release_version or len(base64.b64decode(update_key, validate=True)) != 32:
         parser.error('自动更新需要商店身份、有效发布版本和 32 字节 Ed25519 公钥。')
     info.update({
-        'SUFeedURL': 'https://github.com/Geeprox/tab-cadence/releases/latest/download/diao-appcast.xml',
+        'SUFeedURL': 'https://github.com/Geeprox/diao/releases/latest/download/diao-appcast.xml',
         'SUPublicEDKey': update_key,
         'SUEnableAutomaticChecks': True,
         'SUAutomaticallyUpdate': True,

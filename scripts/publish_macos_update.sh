@@ -24,7 +24,7 @@ import sys
 
 root, archive, version, signature = sys.argv[1:]
 asset = Path(root) / archive
-url = 'https://github.com/Geeprox/tab-cadence/releases/download/v' + version + '/' + archive
+url = 'https://github.com/Geeprox/diao/releases/download/v' + version + '/' + archive
 (Path(root) / 'diao-appcast.xml').write_text(f'''<?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
