@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>隐私政策 — Diao</title>
+  <meta name="description" content="了解 Diao 的标签整理、ChatGPT 摘要、模型连接与 Chrome 同步如何使用数据。">
+  <link rel="canonical" href="https://geeprox.github.io/diao/zh-cn/privacy.html">
+  <link rel="alternate" hreflang="en" href="https://geeprox.github.io/diao/privacy.html">
+  <link rel="alternate" hreflang="zh-Hans" href="https://geeprox.github.io/diao/zh-cn/privacy.html">
+  <link rel="alternate" hreflang="x-default" href="https://geeprox.github.io/diao/privacy.html">
+  <link rel="icon" href="../assets/branding/Diao.png">
+  <link rel="stylesheet" href="../site.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="./"><img src="../assets/branding/Diao.png" width="38" height="38" alt="">Diao</a>
+    <a href="../privacy.html" hreflang="en" lang="en">English</a>
+  </header>
+  <main class="guide">
+    <h1>隐私政策</h1>
+    <p class="lead">Diao 使用浏览器数据整理打开的标签、监听任务和回顾 ChatGPT 对话。本政策适用于 Diao 0.5。</p>
+    <dl>
+      <dt>标签与提醒</dt>
+      <dd>Diao 读取 Chrome 普通窗口中打开的标签标题、网址、分组和近期使用情况。对你允许访问的网页，Diao 可跟踪任务状态和所选区域的变化。监听设置保存在当前 Chrome 配置中。标签关闭后 30 分钟内，可在同一次 Chrome 会话中重新打开。链接与来源页的分组在 Chrome 内完成。</dd>
+      <dt>ChatGPT 工具</dt>
+      <dd>授予 ChatGPT 站点访问权限后，Diao 读取问题、回答、章节标题和选中文字，用于生成大纲和定位批注。批注和概览结果保存在本机。排队消息通过 ChatGPT 的输入框和发送按钮提交，发送后的消息由 ChatGPT 接收。</dd>
+      <dt>模型请求</dt>
+      <dd>使用模型分析标签时，Diao 会发送网页标题、去掉查询参数和片段的网址、最多 1,600 个字符的可读正文和页面状态信号。启用「智能分组与收纳」后，Diao 会根据已授权网页的这些数据，以及来源标签关系、分组、位置和闲置时间，自动整理打开的标签。已完成的标签收入「闲置标签」，可展开分组取回。</dd>
+      <dd>生成会话摘要时，Diao 将能读取的问题、回答正文、章节标题和图片回复标记发送给你配置的 OpenAI 连接。选择「提前准备」后，当前会话空闲时即可生成，无需先打开概览。读到更多历史后，Diao 会更新概览，并复用相同内容的缓存。在 ChatGPT 设置选择「只看原文与缓存」即可停止发起新的摘要请求。</dd>
+      <dd>Diao 使用 API 密钥，直接向你配置的 HTTPS 地址发起请求。模型服务商收到的数据适用该服务商的隐私和保留政策。</dd>
+      <dt>模型连接与 Chrome 同步</dt>
+      <dd>密钥可仅供当前会话使用，也可以加密保存在当前 Chrome 配置中。选择「Chrome 同步」后，加密密钥、连接设置和解锁所需的公开参数会进入 Google 同步服务。其他设备通过通行密钥或配对码解锁后即可恢复连接。会话摘要和批注留在本机。兼容的 Mac 助手也支持按你的选择将密钥保存在 macOS 钥匙串中。</dd>
+      <dt>Diao Bridge</dt>
+      <dd>安装 Mac 助手后，可授权使用 macOS 辅助功能来定位 Chrome 窗口与标签，以显示标签旁的提醒和键盘切换器。助手在本机与扩展交换这些功能所需的窗口及标签状态。你可以在 macOS 系统设置中管理该权限。</dd>
+      <dt>管理数据</dt>
+      <dd>你可以在 Diao 中停止监听、删除批注和移除密钥。删除共享密钥时，在「模型连接」中选择「从同步中移除」。卸载扩展会清除扩展在当前 Chrome 配置中的数据。如果使用钥匙串保存密钥，可在卸载助手前从 Diao 移除密钥。</dd>
+    </dl>
+    <p>Diao 对信息的使用遵循 <a href="https://developer.chrome.com/docs/webstore/program-policies/policies">Chrome 应用商店用户数据政策</a>，包括「有限使用」要求。</p>
+  </main>
+  <footer>
+    <a href="https://github.com/Geeprox/diao/issues">反馈问题</a>
+    <a href="https://geeprox.github.io/tab-cadence-support/">Tab Cadence 0.4 隐私政策</a>
+  </footer>
+</body>
+</html>
